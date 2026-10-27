@@ -5,8 +5,11 @@ Telnet open, to show the diff and the critical finding.
 
 from .ports import findings_for_ports
 
+DEMO_SUBNET = "192.168.1.0/24"
+
 
 def _device(ip, mac, hostname, label, ports):
+    ports = sorted(ports)
     open_ports = [{"port": p, "open": True, "banner": ""} for p in ports]
     return {
         "ip": ip, "mac": mac, "hostname": hostname, "label": label,
