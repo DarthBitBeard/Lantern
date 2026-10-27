@@ -4,7 +4,7 @@
 
 Lantern is a defensive scanner for your own home or small office network. Only scan a network you own, or one where you have explicit permission from the owner to scan it. Scanning someone else's network without permission may be unlawful and is out of scope for this project.
 
-Lantern enforces part of this in code: it refuses public IP addresses and subnets larger than a /16. That is a guardrail, not a substitute for permission.
+Lantern enforces part of this in code: it refuses public, loopback, and link-local addresses, and subnets larger than 1024 addresses (a /22). That is a guardrail, not a substitute for permission.
 
 ## Reporting a vulnerability in Lantern
 
@@ -25,6 +25,8 @@ Please include the Lantern version, how you ran it, and what you observed, witho
 ## Dashboard exposure
 
 The web dashboard has no login, by design for local use. Bind it to localhost (the default), or reach it only over a private VPN such as Tailscale. Never expose port 8068 to the internet or to an untrusted network.
+
+Against other pages in your own browser, the API refuses POSTs that are not JSON, that are over 64 KiB, or whose `Origin` header is not the dashboard itself, and HTML responses carry a strict Content Security Policy. These limit cross-site mischief; they are not a login.
 
 ## Supported versions
 
