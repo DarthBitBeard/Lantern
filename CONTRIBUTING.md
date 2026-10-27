@@ -27,7 +27,7 @@ See the README "Run and debug" section for DB path, ports, and debugger tips.
 python3 tests/run_tests.py
 ```
 
-Add a test for new behavior. Risk rules go in `tests/test_risks.py`, dashboard behavior in `tests/test_web.py`. Keep tests fast and offline: no real network scans in CI.
+Tests use `unittest` and are discovered automatically from `tests/test_*.py`; you can also run one file directly, for example `python3 tests/test_web.py`. Add a test for new behavior, next to the module it covers: risk rules in `test_risks.py`, subnet and ARP handling in `test_discovery.py`, probes in `test_scanner.py`, storage and diff in `test_store.py`, commands in `test_cli.py`, dashboard API in `test_web.py`. Keep tests fast and offline: no real network scans in CI. Mock `ping_host`, `arp_table`, and `scan_host` where a test would otherwise touch the network.
 
 ## Pull requests
 

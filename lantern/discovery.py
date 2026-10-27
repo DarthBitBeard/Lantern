@@ -2,37 +2,56 @@
 
 Safety rules, enforced here and in the CLI:
 - Only RFC1918 private subnets (10/8, 172.16/12, 192.168/16).
-- Refuse anything larger than a /16. The normal case is a /24.
+- Refuse anything larger than MAX_SCAN_HOSTS addresses (a /22).
+  The normal case is a /24.
 - No scanning of public IPs, ever.
 - Discovery is ping + ARP + a TCP connect to a few common ports.
   No exploits, no password guessing, no packet crafting.
 """
+
+from __future__ import annotations
 
 import ipaddress
 import platform
 import re
 import socket
 import subprocess
+from pathlib import Path
 
 MAC_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
+IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
+
+# Hard cap on addresses per scan. A /22 is 1024 addresses; a /24 is 256.
+MAX_SCAN_HOSTS = 1024
+MIN_PREFIXLEN = 32 - (MAX_SCAN_HOSTS.bit_length() - 1)  # 22
+
+_EMPTY_MAC = "00:00:00:00:00:00"
 
 
-def validate_subnet(text):
-    """Parse and validate a subnet string. Raise ValueError if unsafe."""
+def validate_subnet(text: str) -> ipaddress.IPv4Network:
+    """Parse and validate a subnet string. Raise ValueError if unsafe.
+
+    Accepts a network ("192.168.1.0/24") or a host inside one
+    ("192.168.1.5/24"); the host bits are dropped. Returns the network.
+    """
+    text = str(text).strip()
     try:
         network = ipaddress.ip_network(text, strict=False)
     except ValueError as exc:
-        raise ValueError(f"Not a valid subnet: {text}") from exc
-    if not network.is_private:
-        raise ValueError("Lantern only scans private home networks, not public IPs.")
-    if network.prefixlen < 16:
-        raise ValueError("Subnet is too large. Use a /16 or smaller, normally a /24.")
+        raise ValueError(f"Not a valid subnet: {text!r}. Example: 192.168.1.0/24") from exc
     if network.version != 4:
-        raise ValueError("IPv4 only in v0.1.")
+        raise ValueError("Lantern scans IPv4 subnets only.")
+    if not network.is_private or network.is_loopback or network.is_link_local:
+        raise ValueError("Lantern only scans private home networks, not public IPs.")
+    if network.prefixlen < MIN_PREFIXLEN:
+        raise ValueError(
+            f"Subnet is too large: {text} has {network.num_addresses} addresses. "
+            f"Lantern scans at most {MAX_SCAN_HOSTS} (a /{MIN_PREFIXLEN}), normally a /24."
+        )
     return network
 
 
-def _local_ipv4_candidates():
+def _local_ipv4_candidates() -> list[str]:
     """Best-effort list of this machine's IPv4 addresses, outbound first.
 
     Many Linux hosts resolve their hostname to 127.0.0.1, so hostname lookup
@@ -50,62 +69,103 @@ def _local_ipv4_candidates():
         candidates.append(socket.gethostbyname(socket.gethostname()))
     except Exception:
         pass
-    # Preserve order, drop duplicates.
-    seen = set()
-    ordered = []
-    for ip in candidates:
-        if ip not in seen:
-            seen.add(ip)
-            ordered.append(ip)
-    return ordered
+    return list(dict.fromkeys(candidates))
 
 
-def guess_subnet():
+def guess_subnet() -> str | None:
     """Guess the local /24 from the machine's own IP. Returns a string or None."""
     for local_ip in _local_ipv4_candidates():
         try:
             addr = ipaddress.ip_address(local_ip)
-            if addr.is_private and not addr.is_loopback:
-                network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-                return str(network)
-        except Exception:
+        except ValueError:
             continue
+        if addr.is_private and not addr.is_loopback and not addr.is_link_local:
+            return str(ipaddress.ip_network(f"{local_ip}/24", strict=False))
     return None
 
 
-def ping_host(ip, timeout_ms=500):
-    """True if the host answers one ping. Best effort, never fatal."""
-    system = platform.system().lower()
+def ping_command(ip: str, timeout_ms: int = 1000, system: str | None = None) -> list[str]:
+    """Build the one-shot ping command for this OS.
+
+    The wait flag differs per platform: Windows -w is milliseconds, Linux -W
+    is seconds, macOS/BSD -W is milliseconds (and -t is the overall timeout
+    in seconds). Getting this wrong makes every host look offline.
+    """
+    system = (system or platform.system()).lower()
+    seconds = str(max(1, round(timeout_ms / 1000)))
     if system == "windows":
-        cmd = ["ping", "-n", "1", "-w", str(timeout_ms), str(ip)]
-    else:
-        cmd = ["ping", "-c", "1", "-W", "1", str(ip)]
+        return ["ping", "-n", "1", "-w", str(timeout_ms), str(ip)]
+    if system == "darwin":
+        return ["ping", "-c", "1", "-t", seconds, str(ip)]
+    return ["ping", "-c", "1", "-W", seconds, str(ip)]
+
+
+def ping_host(ip: str, timeout_ms: int = 1000) -> bool:
+    """True if the host answers one ping. Best effort, never fatal."""
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=3)
+        result = subprocess.run(
+            ping_command(ip, timeout_ms), capture_output=True,
+            timeout=timeout_ms / 1000 + 2,
+        )
         return result.returncode == 0
     except Exception:
         return False
 
 
-def arp_table():
-    """Parse the OS ARP cache into {ip: mac}. Best effort."""
+def parse_neighbors(text: str) -> dict[str, str]:
+    """Parse ARP-style output (one entry per line) into {ip: mac}.
+
+    Works for /proc/net/arp, `arp -a` (Linux, macOS, Windows), and
+    `ip neigh`. Incomplete entries (no MAC, or an all-zero MAC) are skipped.
+    """
     table = {}
-    try:
-        result = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.splitlines():
-            ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
-            mac_match = MAC_RE.search(line)
-            if ip_match and mac_match:
-                table[ip_match.group(1)] = mac_match.group(1).lower().replace("-", ":")
-    except Exception:
-        pass
+    for line in text.splitlines():
+        ip_match = IPV4_RE.search(line)
+        mac_match = MAC_RE.search(line)
+        if not ip_match or not mac_match:
+            continue
+        ip = ip_match.group(1)
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            continue
+        mac = mac_match.group(0).lower().replace("-", ":")
+        if mac != _EMPTY_MAC:
+            table[ip] = mac
     return table
 
 
-def reverse_hostname(ip):
+def _run_text(cmd: list[str], timeout: float = 5) -> str:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def arp_table() -> dict[str, str]:
+    """Read the OS neighbor (ARP) cache into {ip: mac}. Best effort.
+
+    Tries /proc/net/arp (Linux, no subprocess), then `arp -a`, then
+    `ip neigh`, and merges whatever answers. Never raises.
+    """
+    table = {}
+    proc_arp = Path("/proc/net/arp")
+    try:
+        if proc_arp.is_file():
+            table.update(parse_neighbors(proc_arp.read_text(errors="ignore")))
+    except Exception:
+        pass
+    if not table:
+        table.update(parse_neighbors(_run_text(["arp", "-a"])))
+    if not table:
+        table.update(parse_neighbors(_run_text(["ip", "neigh"])))
+    return table
+
+
+def reverse_hostname(ip: str) -> str | None:
     """Best-effort reverse DNS. Returns None on failure."""
     try:
         name, _, _ = socket.gethostbyaddr(str(ip))
-        return name
+        return name or None
     except Exception:
         return None

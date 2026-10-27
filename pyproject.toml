@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lantern"
-version = "0.2.1"
+version = "0.3.0"
 description = "Local-first home network scanner: find devices, flag risky open ports, and show what changed since the last scan."
 readme = "README.md"
 license = {text = "MIT"}

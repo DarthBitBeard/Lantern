@@ -1,9 +1,13 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+// View state. `viewingId` is null when showing the latest scan.
 let currentScan = null;
 let currentDiff = null;
-let viewingLatest = true;
+let viewingId = null;
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
@@ -11,11 +15,16 @@ function esc(value) {
   }[c]));
 }
 
+function formatTime(iso) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
+}
+
 function worstSeverity(device) {
-  const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
   let worst = null;
   for (const f of device.findings || []) {
-    if (!worst || order[f.severity] < order[worst]) worst = f.severity;
+    if (!(f.severity in SEVERITY_ORDER)) continue;
+    if (!worst || SEVERITY_ORDER[f.severity] < SEVERITY_ORDER[worst]) worst = f.severity;
   }
   return worst;
 }
@@ -26,6 +35,12 @@ function setMessage(text, isError) {
   el.className = isError ? "message error" : "message";
 }
 
+function setBusy(busy) {
+  document.body.setAttribute("aria-busy", busy ? "true" : "false");
+  for (const id of ["scan-btn", "demo-btn", "refresh-btn"]) $(id).disabled = busy;
+  $("history").disabled = busy;
+}
+
 async function api(path, options) {
   const res = await fetch(path, options);
   const data = await res.json().catch(() => ({}));
@@ -33,10 +48,23 @@ async function api(path, options) {
   return data;
 }
 
+function postJson(path, body) {
+  return api(path, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body ?? {}) });
+}
+
+function describeChange(change) {
+  const parts = [];
+  if (change.old_ip && change.old_ip !== change.device.ip) parts.push(`moved from ${esc(change.old_ip)}`);
+  if (change.opened.length) parts.push(`opened ${change.opened.join(", ")}`);
+  if (change.closed.length) parts.push(`closed ${change.closed.join(", ")}`);
+  return `${esc(change.device.ip)}: ${parts.join("; ") || "no change"}`;
+}
+
 function renderSummary(scan, diff) {
   const el = $("summary");
   if (!scan) {
     el.innerHTML = "";
+    $("status").textContent = "No scans yet";
     return;
   }
   const critical = scan.devices.filter((d) => worstSeverity(d) === "critical").length;
@@ -45,29 +73,29 @@ function renderSummary(scan, diff) {
   const added = diff ? diff.added.length : 0;
   el.innerHTML = `
     <div class="stat"><b>${scan.devices.length}</b><span>devices</span></div>
-    <div class="stat ${added ? "warn" : ""}"><b>${added}</b><span>new since last scan</span></div>
+    <div class="stat ${added ? "warn" : ""}"><b>${added}</b><span>new since previous scan</span></div>
     <div class="stat ${unknown ? "warn" : ""}"><b>${unknown}</b><span>unknown / untrusted</span></div>
     <div class="stat ${critical ? "bad" : ""}"><b>${critical}</b><span>critical devices</span></div>
     <div class="stat ${high ? "warn" : ""}"><b>${high}</b><span>high-risk devices</span></div>`;
-  $("status").textContent = `${scan.subnet} | ${new Date(scan.started_at).toLocaleString()}${scan.demo ? " | demo" : ""}`;
+  const which = viewingId === null ? "Latest" : `Scan #${scan.id}`;
+  $("status").textContent = `${which} | ${scan.subnet} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}`;
 }
 
 function renderDiff(scan, diff) {
   const el = $("diff");
   if (!scan || !diff) {
     el.className = "diff calm";
-    el.innerHTML = "<h2>What changed</h2><p>Run two scans to see what changed. The demo does this for you.</p>";
+    const why = scan ? "This is the first saved scan, so there is nothing to compare it with yet."
+      : "Run two scans to see what changed. The demo does this for you.";
+    el.innerHTML = `<h2>What changed</h2><p>${why}</p>`;
     return;
   }
-  const changed = diff.changed.length;
-  const calm = diff.added.length === 0 && diff.removed.length === 0 && changed === 0;
+  const calm = diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0;
   el.className = calm ? "diff calm" : "diff";
   const added = diff.added.map((d) => esc(d.ip)).join(", ") || "none";
   const removed = diff.removed.map((d) => esc(d.ip)).join(", ") || "none";
-  const changedText = diff.changed.map((c) =>
-    `${esc(c.device.ip)} opened [${c.opened.join(", ")}], closed [${c.closed.join(", ")}]`
-  ).join("; ") || "none";
-  el.innerHTML = `<h2>What changed since the last scan</h2>
+  const changedText = diff.changed.map(describeChange).join("; ") || "none";
+  el.innerHTML = `<h2>What changed since the previous scan</h2>
     <p><strong>New devices:</strong> ${added}</p>
     <p><strong>Devices gone:</strong> ${removed}</p>
     <p><strong>Port changes:</strong> ${changedText}</p>
@@ -81,8 +109,40 @@ function deviceMatches(device) {
   if (filter === "trusted" && !device.trusted) return false;
   if (filter === "risky" && !["critical", "high"].includes(worstSeverity(device))) return false;
   if (!q) return true;
-  const hay = [device.ip, device.mac, device.hostname, device.label].join(" ").toLowerCase();
+  const hay = [device.ip, device.mac, device.hostname, device.label]
+    .concat((device.open_ports || []).map((p) => String(p.port)))
+    .filter(Boolean).join(" ").toLowerCase();
   return hay.includes(q);
+}
+
+function renderDevice(device) {
+  const name = esc(device.label || device.hostname || device.ip);
+  const worst = worstSeverity(device);
+  const ports = device.open_ports.map((p) =>
+    `<span class="port" ${p.banner ? `title="${esc(p.banner)}"` : ""}>${esc(p.port)}</span>`
+  ).join("") || "<span class='port'>none</span>";
+  const findings = (device.findings || []).map((f) => `
+    <li><span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>
+    <strong> ${esc(f.port)} ${esc(f.service)}:</strong> ${esc(f.title)}
+    <small>${esc(f.fix)}</small></li>`).join("") || "<li>No risky open ports found.</li>";
+  const trustBadge = device.trusted
+    ? `<span class="badge trusted">trusted</span>`
+    : `<span class="badge unknown">unknown</span>`;
+  const mac = device.mac || "";
+  const disabled = mac ? "" : "disabled";
+  return `<article class="device ${device.trusted ? "" : "unknown"}">
+    <h2>${name} ${trustBadge}</h2>
+    <p class="meta">${esc(device.ip)}${mac ? ` &middot; ${esc(mac)}` : ""}${device.hostname ? ` &middot; ${esc(device.hostname)}` : ""}</p>
+    ${worst ? `<p>Worst risk: <span class="badge ${esc(worst)}">${esc(worst)}</span></p>` : ""}
+    <div class="ports">${ports}</div>
+    <ul class="findings">${findings}</ul>
+    <div class="trust-row">
+      <input name="label-${esc(mac || device.ip)}" data-label-for="${esc(mac)}" value="${esc(device.label || "")}" maxlength="80" placeholder="Label, e.g. Living room TV" ${disabled} aria-label="Label for ${esc(device.ip)}">
+      <button type="button" class="secondary" data-trust="${esc(mac)}" ${disabled}>Trust</button>
+      <button type="button" class="secondary" data-untrust="${esc(mac)}" ${disabled}>Mark unknown</button>
+    </div>
+    ${mac ? "" : "<p class='hint'>No MAC address, so this device cannot be trusted yet. It is tracked by IP only.</p>"}
+  </article>`;
 }
 
 function renderDevices() {
@@ -96,39 +156,32 @@ function renderDevices() {
     el.innerHTML = `<div class="empty"><p>No devices match this filter.</p></div>`;
     return;
   }
-  el.innerHTML = devices.map((device) => {
-    const name = esc(device.label || device.hostname || device.ip);
-    const worst = worstSeverity(device);
-    const ports = device.open_ports.map((p) => `<span class="port">${p.port}</span>`).join("") || "<span class='port'>none</span>";
-    const findings = (device.findings || []).map((f) => `
-      <li><span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>
-      <strong> ${f.port} ${esc(f.service)}:</strong> ${esc(f.title)}
-      <small>${esc(f.fix)}</small></li>`).join("") || "<li>No risky open ports found.</li>";
-    const trustBadge = device.trusted
-      ? `<span class="badge trusted">trusted</span>`
-      : `<span class="badge unknown">unknown</span>`;
-    const mac = device.mac || "";
-    return `<article class="device ${device.trusted ? "" : "unknown"}">
-      <h2>${name} ${trustBadge}</h2>
-      <p class="meta">${esc(device.ip)}${mac ? ` &middot; ${esc(mac)}` : ""}${device.hostname ? ` &middot; ${esc(device.hostname)}` : ""}</p>
-      ${worst ? `<p>Worst risk: <span class="badge ${esc(worst)}">${esc(worst)}</span></p>` : ""}
-      <div class="ports">${ports}</div>
-      <ul class="findings">${findings}</ul>
-      <div class="trust-row">
-        <input data-label-for="${esc(mac)}" value="${esc(device.label || "")}" placeholder="Label, e.g. Living room TV" ${mac ? "" : "disabled"} aria-label="Label for ${esc(device.ip)}">
-        <button class="secondary" data-trust="${esc(mac)}" ${mac ? "" : "disabled"}>Trust</button>
-        <button class="secondary" data-untrust="${esc(mac)}" ${mac ? "" : "disabled"}>Mark unknown</button>
-      </div>
-      ${mac ? "" : "<p class='hint'>No MAC address, so this device cannot be trusted yet. It will be keyed by IP only.</p>"}
-    </article>`;
-  }).join("");
-
+  el.innerHTML = devices.map(renderDevice).join("");
   el.querySelectorAll("[data-trust]").forEach((btn) => {
     btn.addEventListener("click", () => saveTrust(btn.dataset.trust, true, btn));
   });
   el.querySelectorAll("[data-untrust]").forEach((btn) => {
     btn.addEventListener("click", () => saveTrust(btn.dataset.untrust, false, btn));
   });
+  el.querySelectorAll("[data-label-for]").forEach((input) => {
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const btn = el.querySelector(`[data-trust="${CSS.escape(input.dataset.labelFor)}"]`);
+      if (btn) btn.click();
+    });
+  });
+}
+
+function showScan(scan, diff) {
+  currentScan = scan;
+  currentDiff = diff;
+  renderSummary(currentScan, currentDiff);
+  renderDiff(currentScan, currentDiff);
+  renderDevices();
+  $("report-link").href = viewingId === null
+    ? "/api/report?format=html"
+    : `/api/report?format=html&scan_id=${encodeURIComponent(viewingId)}`;
 }
 
 async function saveTrust(mac, trusted, btn) {
@@ -136,13 +189,9 @@ async function saveTrust(mac, trusted, btn) {
   const label = input ? input.value.trim() : "";
   btn.disabled = true;
   try {
-    await api("/api/trust", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mac, label, trusted }),
-    });
+    await postJson("/api/trust", { mac, label, trusted });
     setMessage(trusted ? `Trusted ${mac}${label ? ` as ${label}` : ""}.` : `Marked ${mac} unknown.`);
-    await loadLatest(true);
+    await reloadCurrentView();
   } catch (err) {
     setMessage(err.message, true);
   } finally {
@@ -151,95 +200,83 @@ async function saveTrust(mac, trusted, btn) {
 }
 
 async function loadHistory() {
-  try {
-    const data = await api("/api/scans");
-    const select = $("history");
-    const current = select.value;
-    select.innerHTML = `<option value="">Latest scan</option>` + data.scans.map((s) =>
-      `<option value="${s.id}">#${s.id} ${esc(new Date(s.started_at).toLocaleString())} (${s.device_count} devices)${s.demo ? " demo" : ""}</option>`
-    ).join("");
-    select.value = current;
-  } catch (err) {
-    setMessage(err.message, true);
+  const data = await api("/api/scans");
+  const select = $("history");
+  select.innerHTML = `<option value="">Latest scan</option>` + data.scans.map((s) =>
+    `<option value="${s.id}">#${s.id} ${esc(formatTime(s.started_at))} (${s.device_count} devices)${s.demo ? " demo" : ""}</option>`
+  ).join("");
+  select.value = viewingId === null ? "" : String(viewingId);
+  if (select.value !== (viewingId === null ? "" : String(viewingId))) {
+    // The selected scan no longer exists; fall back to latest.
+    viewingId = null;
+    select.value = "";
   }
 }
 
-async function loadLatest(keepHistorySelection) {
+async function loadLatest() {
+  viewingId = null;
   const data = await api("/api/scans/latest");
-  currentScan = data.scan;
-  currentDiff = data.diff;
-  viewingLatest = true;
-  renderSummary(currentScan, currentDiff);
-  renderDiff(currentScan, currentDiff);
-  renderDevices();
-  $("report-link").href = "/api/report?format=html";
-  if (!keepHistorySelection) await loadHistory();
+  showScan(data.scan, data.diff);
   return data;
 }
 
 async function loadScanById(id) {
-  if (!id) {
-    viewingLatest = true;
-    await loadLatest(true);
-    return;
-  }
-  viewingLatest = false;
-  const data = await api(`/api/scans/${id}`);
-  currentScan = data.scan;
-  currentDiff = null;
-  renderSummary(currentScan, null);
-  renderDiff(currentScan, null);
-  renderDevices();
-  $("report-link").href = `/api/report?format=html&scan_id=${id}`;
+  if (!id) return loadLatest();
+  const data = await api(`/api/scans/${encodeURIComponent(id)}`);
+  viewingId = data.scan.id;
+  showScan(data.scan, data.diff);
+  return data;
+}
+
+async function reloadCurrentView() {
+  if (viewingId === null) await loadLatest();
+  else await loadScanById(viewingId);
+  await loadHistory();
 }
 
 async function loadStatus() {
   const data = await api("/api/status");
   if (data.guessed_subnet && !$("subnet").value) $("subnet").value = data.guessed_subnet;
+  if (data.version) $("version").textContent = `Lantern v${data.version}`;
+  if (data.scan_running) setMessage("A scan started elsewhere is still running.");
   return data;
 }
 
 $("scan-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const btn = $("scan-btn");
-  btn.disabled = true;
+  setBusy(true);
   setMessage("Scanning. This can take a minute on a /24.");
   try {
-    const data = await api("/api/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subnet: $("subnet").value.trim() || undefined }),
-    });
-    currentScan = data.scan;
-    currentDiff = data.diff;
-    viewingLatest = true;
-    renderSummary(currentScan, currentDiff);
-    renderDiff(currentScan, currentDiff);
-    renderDevices();
+    const data = await postJson("/api/scan", { subnet: $("subnet").value.trim() || undefined });
+    viewingId = null;
+    showScan(data.scan, data.diff);
     await loadHistory();
-    setMessage(`Scan done: ${currentScan.devices.length} devices.`);
+    setMessage(`Scan done: ${data.scan.devices.length} devices.`);
   } catch (err) {
     setMessage(err.message, true);
   } finally {
-    btn.disabled = false;
+    setBusy(false);
   }
 });
 
 $("demo-btn").addEventListener("click", async () => {
+  setBusy(true);
   setMessage("Running demo scans.");
   try {
-    await api("/api/demo", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await postJson("/api/demo", {});
     await loadLatest();
+    await loadHistory();
     setMessage("Demo done. Look for the new device with Telnet open.");
   } catch (err) {
     setMessage(err.message, true);
+  } finally {
+    setBusy(false);
   }
 });
 
 $("refresh-btn").addEventListener("click", async () => {
   try {
-    if (viewingLatest) await loadLatest();
-    else await loadScanById($("history").value);
+    await reloadCurrentView();
     setMessage("");
   } catch (err) {
     setMessage(err.message, true);
@@ -248,12 +285,20 @@ $("refresh-btn").addEventListener("click", async () => {
 
 $("search").addEventListener("input", renderDevices);
 $("filter").addEventListener("change", renderDevices);
-$("history").addEventListener("change", (event) => loadScanById(event.target.value));
+$("history").addEventListener("change", async (event) => {
+  try {
+    await loadScanById(event.target.value);
+    setMessage("");
+  } catch (err) {
+    setMessage(err.message, true);
+  }
+});
 
 (async () => {
   try {
     await loadStatus();
     await loadLatest();
+    await loadHistory();
   } catch (err) {
     $("status").textContent = "Could not reach the Lantern server.";
     setMessage(err.message, true);

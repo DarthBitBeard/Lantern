@@ -1,50 +1,34 @@
-"""Run all Lantern tests offline. Usage: python3 tests/run_tests.py"""
+"""Run all Lantern tests offline. Usage: python3 tests/run_tests.py
+
+Discovers every tests/test_*.py (unittest), then smoke-tests the CLI
+demo in a fresh process against a temporary database.
+"""
 
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
-    # Risk and safety tests: import and run the plain functions.
     sys.path.insert(0, str(ROOT))
-    sys.path.insert(0, str(ROOT / "tests"))
-    from test_risks import (  # noqa: E402
-        test_dashboard_assets_present,
-        test_guess_subnet_private_or_none,
-        test_public_subnet_refused,
-        test_telnet_is_critical,
-        test_too_large_subnet_refused,
-    )
+    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    if not result.wasSuccessful():
+        raise SystemExit(1)
 
-    test_telnet_is_critical()
-    test_public_subnet_refused()
-    test_too_large_subnet_refused()
-    test_dashboard_assets_present()
-    test_guess_subnet_private_or_none()
-    print("risk tests passed")
-
-    # Web dashboard tests: separate process, temporary database.
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "tests" / "test_web.py")],
-        check=False, capture_output=True, text=True,
-    )
-    print(result.stdout, end="")
-    if result.returncode != 0:
-        print(result.stderr, end="", file=sys.stderr)
-        raise SystemExit(result.returncode)
-
-    # CLI demo smoke test, temporary database.
-    result = subprocess.run(
-        [sys.executable, "-m", "lantern", "demo", "--db", "/tmp/lantern-ci-test.db"],
-        cwd=ROOT, check=False, capture_output=True, text=True,
-    )
-    print(result.stdout, end="")
-    if result.returncode != 0:
-        print(result.stderr, end="", file=sys.stderr)
-        raise SystemExit(result.returncode)
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = subprocess.run(
+            [sys.executable, "-m", "lantern", "demo", "--db", str(Path(tmp) / "lantern.db")],
+            cwd=ROOT, check=False, capture_output=True, text=True,
+        )
+    print(proc.stdout, end="")
+    if proc.returncode != 0:
+        print(proc.stderr, end="", file=sys.stderr)
+        raise SystemExit(proc.returncode)
     print("all tests passed")
 
 
