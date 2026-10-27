@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lantern"
+version = "0.2.0"
+description = "Local-first home network scanner: find devices, flag risky open ports, and show what changed since the last scan."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+keywords = ["network", "scanner", "security", "homelab", "lan"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/DarthBitBeard/Lantern"
+Repository = "https://github.com/DarthBitBeard/Lantern"
+Issues = "https://github.com/DarthBitBeard/Lantern/issues"
+
+[project.scripts]
+lantern = "lantern.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lantern*"]

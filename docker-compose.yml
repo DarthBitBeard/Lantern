@@ -1,0 +1,10 @@
+services:
+  lantern:
+    build: .
+    # Host networking: the dashboard needs the host LAN to scan it.
+    # Without this, a scan only sees the container network.
+    # Keep the dashboard itself on localhost or behind Tailscale.
+    network_mode: "host"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

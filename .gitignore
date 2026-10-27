@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Lantern local data (scan results, never commit)
+data/
+.DS_Store
