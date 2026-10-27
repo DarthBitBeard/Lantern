@@ -3,34 +3,37 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>Lantern</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand"><span class="lamp" aria-hidden="true">&#9679;</span> Lantern</div>
-  <div id="status" class="status">Connecting&hellip;</div>
+  <div id="status" class="status" aria-live="polite">Connecting&hellip;</div>
 </header>
 
 <main>
-  <section class="controls">
+  <noscript><p class="message error">Lantern's dashboard needs JavaScript. The CLI works without it: <code>python3 -m lantern demo</code>.</p></noscript>
+
+  <section class="controls" aria-label="Scan controls">
     <form id="scan-form">
       <label for="subnet">Subnet</label>
-      <input id="subnet" name="subnet" type="text" placeholder="192.168.1.0/24" autocomplete="off">
+      <input id="subnet" name="subnet" type="text" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false" inputmode="decimal">
       <button type="submit" id="scan-btn">Run scan</button>
       <button type="button" id="demo-btn">Run demo</button>
       <button type="button" id="refresh-btn">Refresh</button>
     </form>
     <p class="hint">Private home networks only. Lantern refuses public IPs. Scanning runs from this machine, so run it on your home network, not in a container, for real results.</p>
-    <p id="message" class="message" role="status"></p>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
   </section>
 
   <section id="summary" class="summary" aria-label="Scan summary"></section>
 
   <section id="diff" class="diff" aria-label="What changed"></section>
 
-  <section class="controls-row">
-    <input id="search" type="search" placeholder="Search devices, IPs, or hostnames" aria-label="Search devices">
+  <section class="controls-row" aria-label="Device filters">
+    <input id="search" type="search" placeholder="Search devices, IPs, hostnames, or ports" aria-label="Search devices">
     <select id="filter" aria-label="Filter devices">
       <option value="all">All devices</option>
       <option value="unknown">Unknown only</option>
@@ -47,6 +50,7 @@
 
   <footer>
     <p>Local only. No cloud, no accounts, no tracking. Data stays in one SQLite file on this machine. Keep this page on localhost or behind Tailscale. Never expose it to the internet.</p>
+    <p id="version" class="version"></p>
   </footer>
 </main>
 
