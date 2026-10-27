@@ -137,7 +137,7 @@ function renderDevice(device) {
     <div class="ports">${ports}</div>
     <ul class="findings">${findings}</ul>
     <div class="trust-row">
-      <input data-label-for="${esc(mac)}" value="${esc(device.label || "")}" maxlength="80" placeholder="Label, e.g. Living room TV" ${disabled} aria-label="Label for ${esc(device.ip)}">
+      <input name="label-${esc(mac || device.ip)}" data-label-for="${esc(mac)}" value="${esc(device.label || "")}" maxlength="80" placeholder="Label, e.g. Living room TV" ${disabled} aria-label="Label for ${esc(device.ip)}">
       <button type="button" class="secondary" data-trust="${esc(mac)}" ${disabled}>Trust</button>
       <button type="button" class="secondary" data-untrust="${esc(mac)}" ${disabled}>Mark unknown</button>
     </div>

@@ -50,8 +50,9 @@ class LanternHandler(BaseHTTPRequestHandler):
     db_path = None
     debug = False
     protocol_version = "HTTP/1.1"
-    server_version = "Lantern"
-    sys_version = ""
+
+    def version_string(self):
+        return "Lantern"
 
     def log_message(self, format, *args):
         if self.debug:
