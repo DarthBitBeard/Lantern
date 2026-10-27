@@ -48,10 +48,12 @@ _scan_lock = threading.Lock()
 
 class LanternHandler(BaseHTTPRequestHandler):
     db_path = None
+    debug = False
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *args):
-        pass
+    def log_message(self, format, *args):
+        if self.debug:
+            super().log_message(format, *args)
 
     # -- helpers ------------------------------------------------------
 
@@ -271,11 +273,22 @@ class LanternHandler(BaseHTTPRequestHandler):
             conn.close()
 
 
-def serve(db_path, host="127.0.0.1", port=8068):
-    handler = type("BoundHandler", (LanternHandler,), {"db_path": str(db_path)})
+def serve(db_path, host="127.0.0.1", port=8068, debug=False):
+    if not (WEB_DIR / "index.html").is_file():
+        raise FileNotFoundError(
+            f"Dashboard files missing under {WEB_DIR}. "
+            "Reinstall Lantern from the repo so lantern/web is included."
+        )
+    handler = type(
+        "BoundHandler",
+        (LanternHandler,),
+        {"db_path": str(db_path), "debug": bool(debug)},
+    )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Lantern dashboard: http://{host}:{port}/  (local only, no login)", flush=True)
     print(f"Database: {db_path}", flush=True)
+    if debug:
+        print("Debug request logging on.", flush=True)
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("WARNING: bound to a non-localhost address. Keep this behind Tailscale, never the internet.", flush=True)
     try:

@@ -13,10 +13,13 @@ Thanks for considering a contribution. Lantern is deliberately small, so please 
 ## How to run it
 
 ```bash
+python3 -m pip install -e .
 python3 -m lantern demo
-python3 -m lantern web
+python3 -m lantern web --debug
 # open http://127.0.0.1:8068/
 ```
+
+See the README "Run and debug" section for DB path, ports, and debugger tips.
 
 ## Tests
 

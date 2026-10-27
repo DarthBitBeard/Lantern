@@ -12,6 +12,8 @@ def main():
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "tests"))
     from test_risks import (  # noqa: E402
+        test_dashboard_assets_present,
+        test_guess_subnet_private_or_none,
         test_public_subnet_refused,
         test_telnet_is_critical,
         test_too_large_subnet_refused,
@@ -20,6 +22,8 @@ def main():
     test_telnet_is_critical()
     test_public_subnet_refused()
     test_too_large_subnet_refused()
+    test_dashboard_assets_present()
+    test_guess_subnet_private_or_none()
     print("risk tests passed")
 
     # Web dashboard tests: separate process, temporary database.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 - 2026-10-27
+
+- Include `lantern/web` HTML/CSS/JS in the package so `pip install` and Docker serve the dashboard.
+- Fix subnet auto-detect on hosts whose hostname resolves to `127.0.0.1`.
+- Add `lantern web --debug` for HTTP request logging, clearer run/debug docs in the README.
+- Fail fast with a clear error if dashboard assets are missing after a bad install.
+
 ## 0.2.0 - 2026-10-27
 
 - Web dashboard, stdlib only, on `http://127.0.0.1:8068/` by default.

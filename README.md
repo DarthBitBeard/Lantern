@@ -18,15 +18,47 @@ Nmap is powerful and has no memory: no history, no diff, no plain English fix st
 
 ## Quick start
 
-No dependencies. Python 3.11 or newer.
+No third-party dependencies. Python 3.11 or newer.
+
+From a clone of this repo:
 
 ```bash
+# optional but recommended: install the package (includes the web UI assets)
+python3 -m pip install -e .
+
 python3 -m lantern demo
 python3 -m lantern web
 # open http://127.0.0.1:8068/
 ```
 
+You can also run without installing: `python3 -m lantern …` from the repo root works the same way, because the `lantern` package lives next to the command.
+
 The demo runs two fake scans, saves them, prints the diff (one new unknown device with Telnet open), and the dashboard shows the same result in a browser. No network is scanned in demo mode.
+
+## Run and debug
+
+| Goal | Command |
+| --- | --- |
+| Demo scan + diff (offline) | `python3 -m lantern demo` |
+| Web dashboard | `python3 -m lantern web` then open http://127.0.0.1:8068/ |
+| Dashboard with request logs | `python3 -m lantern web --debug` |
+| Custom DB path | `python3 -m lantern web --db /tmp/lantern.db` |
+| Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` |
+| Real scan | `python3 -m lantern scan --subnet 192.168.1.0/24` |
+| Diff last two scans | `python3 -m lantern diff` |
+| HTML/JSON report | `python3 -m lantern report --format html` |
+| Tests | `python3 tests/run_tests.py` |
+
+Default database file: `data/lantern.db` (created automatically; gitignored).
+
+**Debug tips**
+
+- Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --debug --db data/lantern.db`.
+- `--debug` prints each HTTP request to stderr; leave it off for normal use.
+- Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`.
+- API smoke check: `curl -s http://127.0.0.1:8068/api/status` and `curl -s -X POST http://127.0.0.1:8068/api/demo -H 'Content-Type: application/json' -d '{}'`.
+- If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
+- Subnet auto-detect uses the machine's outbound private IPv4. If it cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
 
 ## Scan your own network
 
