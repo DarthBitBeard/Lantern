@@ -32,17 +32,44 @@ def validate_subnet(text):
     return network
 
 
+def _local_ipv4_candidates():
+    """Best-effort list of this machine's IPv4 addresses, outbound first.
+
+    Many Linux hosts resolve their hostname to 127.0.0.1, so hostname lookup
+    alone is not enough. Connecting a UDP socket does not send packets; it
+    only asks the OS which source address it would use.
+    """
+    candidates = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidates.append(sock.getsockname()[0])
+    except Exception:
+        pass
+    try:
+        candidates.append(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    # Preserve order, drop duplicates.
+    seen = set()
+    ordered = []
+    for ip in candidates:
+        if ip not in seen:
+            seen.add(ip)
+            ordered.append(ip)
+    return ordered
+
+
 def guess_subnet():
     """Guess the local /24 from the machine's own IP. Returns a string or None."""
-    try:
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        addr = ipaddress.ip_address(local_ip)
-        if addr.is_private and not addr.is_loopback:
-            network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-            return str(network)
-    except Exception:
-        return None
+    for local_ip in _local_ipv4_candidates():
+        try:
+            addr = ipaddress.ip_address(local_ip)
+            if addr.is_private and not addr.is_loopback:
+                network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+                return str(network)
+        except Exception:
+            continue
     return None
 
 

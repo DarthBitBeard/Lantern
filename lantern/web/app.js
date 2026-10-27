@@ -172,6 +172,7 @@ async function loadLatest(keepHistorySelection) {
   renderSummary(currentScan, currentDiff);
   renderDiff(currentScan, currentDiff);
   renderDevices();
+  $("report-link").href = "/api/report?format=html";
   if (!keepHistorySelection) await loadHistory();
   return data;
 }

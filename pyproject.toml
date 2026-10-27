@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lantern"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local-first home network scanner: find devices, flag risky open ports, and show what changed since the last scan."
 readme = "README.md"
 license = {text = "MIT"}
@@ -30,3 +30,8 @@ lantern = "lantern.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["lantern*"]
+
+# Dashboard HTML/CSS/JS must ship with the package. Without this, `pip install`
+# and the Docker image serve a 404 for the UI even though the API still starts.
+[tool.setuptools.package-data]
+lantern = ["web/*"]

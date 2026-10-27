@@ -78,6 +78,7 @@ def main(argv=None):
     web_p.add_argument("--db", default=argparse.SUPPRESS, help="SQLite file.")
     web_p.add_argument("--host", default="127.0.0.1", help="Bind address, default 127.0.0.1 (local only).")
     web_p.add_argument("--port", type=int, default=8068, help="Port, default 8068.")
+    web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
 
     args = parser.parse_args(argv)
     db_path = Path(getattr(args, "db", str(DEFAULT_DB)))
@@ -86,7 +87,7 @@ def main(argv=None):
     if args.command == "web":
         from .webapp import serve
 
-        serve(db_path, host=args.host, port=args.port)
+        serve(db_path, host=args.host, port=args.port, debug=args.debug)
         return 0
 
     conn = connect(db_path)
