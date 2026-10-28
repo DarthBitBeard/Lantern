@@ -305,6 +305,21 @@ class ApiTests(unittest.TestCase):
         status, body, _ = self._request("/api/v1/devices?limit=1234567890", token=self.token)
         self.assertEqual(status, 400, body)
         self.assertNotIn("1234567890", json.loads(body)["error"]["message"])
+        for fmt in ("csv", "json"):
+            status, body, _ = self._request(
+                f"/api/v1/export?what=findings&format={fmt}&scan_id={second}",
+                token=self.token,
+            )
+            self.assertEqual(status, 200, body[:200])
+            if fmt == "json":
+                item = json.loads(body)["items"][0]
+                self.assertEqual(item["scan_id"], second)
+                self.assertIn("title", item)
+            else:
+                parsed = list(csv.reader(io.StringIO(body, newline="")))
+                self.assertEqual(parsed[0][0], "scan_id")
+                self.assertEqual(len(parsed[1]), len(parsed[0]))
+                self.assertEqual(dict(zip(parsed[0], parsed[1]))["scan_id"], str(second))
 
     def test_errors_are_fixed_and_exports_are_limited(self):
         scan_id = self._seed()[1]
@@ -438,3 +453,59 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(code, 2, err)
         code, _out, err = self.run_cli("export", "--what", "devices", "--scan-id", "99")
         self.assertEqual(code, 1, err)
+
+    def _finding_scan(self):
+        conn = connect(self.db)
+        try:
+            scan_id = save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.10",
+                    "aa:bb:cc:dd:ee:10",
+                    findings=[{
+                        "port": 23,
+                        "service": "telnet",
+                        "severity": "critical",
+                        "title": "Open telnet",
+                        "fix": "Close it",
+                    }],
+                )],
+            )
+        finally:
+            conn.close()
+        return scan_id
+
+    def test_findings_export_csv_and_json_include_scan_id(self):
+        scan_id = self._finding_scan()
+        code, out, err = self.run_cli("export", "--what", "findings", "--format", "csv")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        parsed = list(csv.reader(io.StringIO(out, newline="")))
+        self.assertEqual(
+            parsed[0],
+            ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"],
+        )
+        self.assertEqual(len(parsed[1]), len(parsed[0]))
+        row = dict(zip(parsed[0], parsed[1]))
+        self.assertEqual(row["scan_id"], str(scan_id))
+        self.assertEqual(row["ip"], "192.168.50.10")
+        self.assertEqual(row["title"], "Open telnet")
+        code, out, err = self.run_cli("export", "--what", "findings", "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        document = json.loads(out)
+        self.assertEqual(document["scan_id"], scan_id)
+        self.assertEqual(document["items"][0]["scan_id"], scan_id)
+        self.assertEqual(document["items"][0]["service"], "telnet")
+
+    def test_export_errors_do_not_print_a_traceback(self):
+        self._finding_scan()
+        with mock.patch("lantern.v1.render_export", side_effect=RuntimeError("secret-boom")):
+            code, out, err = self.run_cli("export", "--what", "findings", "--format", "csv")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("secret-boom", err)
+        self.assertNotIn("secret-boom", out)

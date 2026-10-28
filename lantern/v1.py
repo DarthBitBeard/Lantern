@@ -424,6 +424,7 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
             if severity is not None and finding.get("severity") != severity:
                 continue
             rows.append({
+                "scan_id": scan["id"],
                 "ip": device["ip"],
                 "mac": device["mac"],
                 "port": int(finding["port"]),
@@ -543,7 +544,7 @@ def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
         "finding_count": device["finding_count"],
     }
     columns = [name for name in _DEVICE_COLUMNS if private or name not in _PRIVATE]
-    return [_cell(values[name]) for name in columns]
+    return _project_rows(columns, [values])[0]
 
 
 def device_csv_table(scan_id: int, rows: list[dict], *, private: bool) -> tuple[list[str], list[list]]:
@@ -557,6 +558,16 @@ def _history_items(conn, query: dict) -> list[dict]:
     rows = list_scans(conn, _one(query, "scope"))
     _too_many(len(rows))
     return [_scan_dict(row) for row in rows]
+
+
+def _project_rows(headers: list[str], rows: list[dict]) -> list[list]:
+    """One cell per column. A missing key is an export error, not a traceback."""
+    table = []
+    for row in rows:
+        if any(name not in row for name in headers):
+            raise V1Error(500, "server_error")
+        table.append([_cell(row[name]) for name in headers])
+    return table
 
 
 def _csv_body(headers: list[str], rows: list[list]) -> bytes:
@@ -585,8 +596,7 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
             })
         else:
             headers = list(_HISTORY_COLUMNS)
-            table = [[_cell(item[name]) for name in headers] for item in items]
-            body = _csv_body(headers, table)
+            body = _csv_body(headers, _project_rows(headers, items))
         return body, fmt, scan_id, what, fmt
     if what == "devices":
         scan, rows = device_rows(conn, query, private=private)
@@ -613,8 +623,7 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
         })
     else:
         headers = list(_FINDING_COLUMNS)
-        table = [[_cell(row[name]) for name in headers] for row in rows]
-        body = _csv_body(headers, table)
+        body = _csv_body(headers, _project_rows(headers, rows))
     return body, fmt, scan_id, what, fmt
 
 

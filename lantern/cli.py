@@ -271,16 +271,18 @@ def _cmd_export(args, conn) -> int:
         payload, _fmt, _scan_id, _what, _fmt_name = render_export(
             conn, query, private=bool(args.include_private_fields),
         )
+        if args.output:
+            written = write_export_file(args.output, payload, force=bool(args.force))
     except V1Error as exc:
         if exc.status == 404:
             print(f"lantern: {MESSAGES['not_found']}", file=sys.stderr)
             return 1
         return _err(MESSAGES[exc.code])
+    except ValueError as exc:
+        return _err(str(exc))
+    except Exception:
+        return _err(MESSAGES["server_error"])
     if args.output:
-        try:
-            written = write_export_file(args.output, payload, force=bool(args.force))
-        except ValueError as exc:
-            return _err(str(exc))
         print(f"Wrote {written}", file=sys.stderr)
         return 0
     text = payload.decode("utf-8")
