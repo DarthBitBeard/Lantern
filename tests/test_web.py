@@ -1255,6 +1255,55 @@ class HardeningTests(unittest.TestCase):
         self.assertGreater(elapsed, write_timeout, elapsed)
         self.assertEqual(rest, payload)
 
+    def test_write_chunk_timeout_is_capped_by_the_deadline(self):
+        """A stalled chunk cannot wait the full write timeout past the deadline.
+
+        The overall cap used to be checked only between chunks, and each
+        chunk then waited the full write_timeout. One chunk could hold a
+        slot for about write_deadline plus write_timeout. The chunk's
+        socket timeout is now the time remaining.
+        """
+        import time
+
+        write_timeout = 1.5
+        write_deadline = 0.3
+        server = make_server(
+            Path(self.tmp.name) / "write-cap.db",
+            host="127.0.0.1",
+            port=0,
+            write_timeout=write_timeout,
+            write_deadline=write_deadline,
+        )
+        self.addCleanup(server.server_close)
+        handler = server.RequestHandlerClass.__new__(server.RequestHandlerClass)
+        self.assertEqual(handler.write_deadline, write_deadline)
+        self.assertEqual(handler.write_timeout, write_timeout)
+        handler.close_connection = False
+        seen = []
+
+        class Stalled:
+            def settimeout(self, value):
+                seen.append(float(value))
+
+            def send(self, data):
+                # A reader that takes nothing blocks until this chunk's timeout.
+                time.sleep(seen[-1])
+                raise TimeoutError("chunk stalled")
+
+        handler.connection = Stalled()
+        started = time.monotonic()
+        handler._write_all(b"W" * 64)
+        elapsed = time.monotonic() - started
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(seen, "no chunk timeout was set")
+        self.assertLessEqual(seen[0], write_deadline + 0.05, seen)
+        self.assertLess(seen[0], write_timeout)
+        self.assertLess(
+            elapsed,
+            write_timeout * 0.6,
+            f"chunk blocked for {elapsed:.2f}s after a {write_deadline}s deadline",
+        )
+
     def test_trace_and_connect_close_once(self):
         port = self.port
         for method in ("TRACE", "CONNECT"):
