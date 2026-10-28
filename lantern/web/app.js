@@ -224,7 +224,9 @@ function renderDevice(device) {
   const extra = [
     device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
     device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
-    device.tag ? `<p>Tag: ${esc(device.tag)}</p>` : "",
+    Array.isArray(device.tags) && device.tags.length
+      ? `<p>Tags: ${device.tags.map((tag) => esc(tag)).join(", ")}</p>`
+      : "",
     device.notes ? `<p>Notes: ${esc(device.notes)}</p>` : "",
   ].join("");
   return `<article class="device ${device.trusted ? "" : "unknown"}">

@@ -19,16 +19,15 @@ LOCATION_MAX = 80
 NOTES_MAX = 500
 TAG_MAX = 32
 TAG_LIMIT = 10
+ASSET_ROW_CAP = 10_000
 CRITICALITIES = ("low", "medium", "high", "critical")
 ASSET_FIELDS = ("owner", "location", "tags", "criticality", "notes")
 
 _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 _TAG_RE = re.compile(r"^[a-z0-9._-]{1,32}$")
-# Bidirectional overrides and isolates. casefold is not involved; these
-# are rejected before a value is stored.
-_BIDI = frozenset(
-    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f"
-)
+# Cc control, Cf format (bidi overrides, word joiner, soft hyphen, BOM, …),
+# Zl/Zp line and paragraph separators, Cs surrogates.
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
 def normalize_mac(value: str | None) -> str | None:
@@ -41,34 +40,39 @@ def normalize_mac(value: str | None) -> str | None:
     return None
 
 
+def _is_unsafe(char: str) -> bool:
+    return unicodedata.category(char) in _UNSAFE_CATEGORIES
+
+
 def _reject_unsafe(text: str, label: str) -> str:
     for char in text:
-        if unicodedata.category(char) == "Cc" or char in _BIDI:
+        if _is_unsafe(char):
             raise ValueError(
-                f"{label} contains a control character or a bidirectional override."
+                f"{label} contains a control, format, or separator character."
             )
     return text
 
 
-def validate_owner(value: str) -> str:
-    text = _reject_unsafe(str(value), "Owner")
-    if not text or len(text) > OWNER_MAX:
-        raise ValueError(f"Owner must be 1 to {OWNER_MAX} characters.")
+def _reject_blank(text: str, label: str, limit: int) -> str:
+    text = _reject_unsafe(str(text), label)
+    if not text.strip() or len(text) > limit:
+        raise ValueError(
+            f"{label} must be 1 to {limit} characters and must not be only whitespace. "
+            "Use asset clear to remove it."
+        )
     return text
+
+
+def validate_owner(value: str) -> str:
+    return _reject_blank(value, "Owner", OWNER_MAX)
 
 
 def validate_location(value: str) -> str:
-    text = _reject_unsafe(str(value), "Location")
-    if not text or len(text) > LOCATION_MAX:
-        raise ValueError(f"Location must be 1 to {LOCATION_MAX} characters.")
-    return text
+    return _reject_blank(value, "Location", LOCATION_MAX)
 
 
 def validate_notes(value: str) -> str:
-    text = _reject_unsafe(str(value), "Notes")
-    if not text or len(text) > NOTES_MAX:
-        raise ValueError(f"Notes must be 1 to {NOTES_MAX} characters.")
-    return text
+    return _reject_blank(value, "Notes", NOTES_MAX)
 
 
 def validate_criticality(value: str) -> str:
@@ -79,19 +83,33 @@ def validate_criticality(value: str) -> str:
     return text
 
 
+def _ascii_lower(text: str) -> str:
+    """Lowercase A-Z only. Other characters stay as typed."""
+    return "".join(char.lower() if "A" <= char <= "Z" else char for char in text)
+
+
 def validate_tag(value: str) -> str:
-    text = _reject_unsafe(str(value), "Tag").strip().lower()
-    if not _TAG_RE.fullmatch(text):
+    """Tags match ``[a-z0-9._-]`` after ASCII lowercase only.
+
+    A character that ``casefold`` or NFKC would rewrite, such as the Kelvin
+    sign, is rejected instead of being stored as a different character.
+    """
+    raw = _reject_unsafe(str(value), "Tag").strip()
+    lowered = _ascii_lower(raw)
+    if (
+        raw.lower() != lowered
+        or raw.casefold() != lowered
+        or unicodedata.normalize("NFKC", raw) != raw
+        or not _TAG_RE.fullmatch(lowered)
+    ):
         raise ValueError(
             f"Tag {value!r} is not allowed. "
             f"Use 1 to {TAG_MAX} characters from a-z, 0-9, '.', '_' or '-'."
         )
-    return text
+    return lowered
 
 
 def validate_tags(values: list[str]) -> list[str]:
-    if len(values) > TAG_LIMIT:
-        raise ValueError(f"A device may have at most {TAG_LIMIT} tags.")
     tags = []
     seen = set()
     for value in values:
@@ -99,19 +117,16 @@ def validate_tags(values: list[str]) -> list[str]:
         if tag not in seen:
             seen.add(tag)
             tags.append(tag)
+    if len(tags) > TAG_LIMIT:
+        raise ValueError(f"A device may have at most {TAG_LIMIT} tags.")
     return tags
 
 
 def strip_for_text(value) -> str:
-    """Drop control characters and bidi overrides from text shown on a terminal."""
+    """Drop control, format, and separator characters from text shown to a user."""
     if value is None:
         return ""
-    kept = []
-    for char in str(value):
-        if unicodedata.category(char) == "Cc" or char in _BIDI:
-            continue
-        kept.append(char)
-    return "".join(kept)
+    return "".join(char for char in str(value) if not _is_unsafe(char))
 
 
 def present_text(value):
@@ -229,8 +244,20 @@ def set_asset(
     criticality: str | None = None,
     notes: str | None = None,
 ) -> dict:
-    """Update the fields that were passed. None means leave that field alone."""
-    current = get_asset(conn, asset_key) or _empty_asset(asset_key, kind)
+    """Update the fields that were passed. None means leave that field alone.
+
+    A new key is refused once ``ASSET_ROW_CAP`` rows exist. Updating a row
+    that is already stored is still allowed.
+    """
+    current = get_asset(conn, asset_key)
+    if current is None:
+        count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+        if count >= ASSET_ROW_CAP:
+            raise ValueError(
+                f"Lantern stores at most {ASSET_ROW_CAP} inventory records. "
+                "Clear one before adding another."
+            )
+        current = _empty_asset(asset_key, kind)
     if owner is not None:
         current["owner"] = owner
     if location is not None:

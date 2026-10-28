@@ -117,20 +117,20 @@ def build_parser() -> argparse.ArgumentParser:
     diff_p = sub.add_parser("diff", help="Show what changed between the last two saved scans.")
     _add_db_arg(diff_p)
     diff_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope. Matched without regard to case against the name in --config.")
+    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope. Matched without regard to case against the name in --config, or against a unique name already stored on a scan.")
     diff_p.add_argument("--format", choices=["text", "json"], default="text")
 
     report_p = sub.add_parser("report", help="Print a saved scan (latest by default) as JSON or HTML.")
     _add_db_arg(report_p)
     report_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    report_p.add_argument("--scope", help="Report the latest scan of this scope. Matched without regard to case against the name in --config.")
+    report_p.add_argument("--scope", help="Report the latest scan of this scope. Matched without regard to case against the name in --config, or against a unique name already stored on a scan.")
     report_p.add_argument("--scan-id", type=int, help="Scan id from `lantern history`. Default: latest.")
     report_p.add_argument("--format", choices=["json", "html"], default="json")
 
     history_p = sub.add_parser("history", help="List saved scans, newest first.")
     _add_db_arg(history_p)
     history_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config.")
+    history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config, or against a unique name already stored on a scan.")
     history_p.add_argument("--format", choices=["text", "json"], default="text")
 
     asset_p = sub.add_parser("asset", help="Record owner, location, tags, criticality, and notes for a device.")
@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     asset_list = asset_sub.add_parser("list", help="List recorded inventory fields.")
     _add_db_arg(asset_list)
     asset_list.add_argument("--config", help="TOML file used to match --scope without regard to case.")
-    asset_list.add_argument("--scope", help="Only devices that appear in scans of this scope.")
+    asset_list.add_argument("--scope", help="Only devices that appear in scans of this scope. Matched without regard to case against the name in --config, or against a unique name already stored on a scan.")
     asset_list.add_argument("--tag", help="Only devices with this tag.")
     asset_list.add_argument("--criticality", choices=["low", "medium", "high", "critical"])
     asset_list.add_argument("--owner", help="Only devices with this owner.")
@@ -697,12 +697,42 @@ def _scope_names(args) -> list[str]:
     return list(names)
 
 
-def _one_scope_name(args) -> str | None:
-    """A single --scope on history, diff, or report.
+def _stored_scope_name(conn, name: str) -> str:
+    """Scope name already stored on a scan, after the name-format check.
+
+    An exact stored spelling wins. Otherwise a single case-insensitive match
+    is used. Two stored spellings that differ only by case are refused.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT scope_name FROM scans WHERE scope_name IS NOT NULL"
+    ).fetchall()
+    stored_names = []
+    for (stored,) in rows:
+        if isinstance(stored, str) and stored not in stored_names:
+            stored_names.append(stored)
+    if name in stored_names:
+        return name
+    folded = name.casefold()
+    matches = [stored for stored in stored_names if stored.casefold() == folded]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Scope name {name!r} matches more than one stored scope. "
+            "Pass the exact stored spelling."
+        )
+    return name
+
+
+def _one_scope_name(args, conn) -> str | None:
+    """A single --scope on history, diff, report, or asset list.
 
     The typed name is checked against the scope-name rules before any case
-    folding. When a scope file is available, the stored spelling is the one
-    ``select_scope`` returns, so ``lab-2`` finds ``Lab-2``.
+    folding. When a scope file contains the name, that file's spelling is
+    used, so ``lab-2`` finds ``Lab-2``. If the file no longer contains the
+    scope, a unique case-insensitive match against names already stored on
+    scans is used. An exact stored spelling wins when several case variants
+    are stored.
     """
     name = getattr(args, "scope", None)
     if isinstance(name, list):
@@ -713,8 +743,12 @@ def _one_scope_name(args) -> str | None:
     explicit = getattr(args, "config", None)
     path = _scope_config_path(args)
     if explicit or path.is_file():
-        return select_scope(load_scopes(path), name).name
-    return name
+        try:
+            return select_scope(load_scopes(path), name).name
+        except ValueError as exc:
+            if "Unknown scope" not in str(exc):
+                raise
+    return _stored_scope_name(conn, name)
 
 
 def _resolve_scan_subnet(args) -> tuple[str, str | None]:
@@ -888,7 +922,7 @@ def _cmd_asset(args, conn) -> int:
                 _print_asset_text(saved)
             return 0
         if args.asset_command == "list":
-            scope_name = _one_scope_name(args)
+            scope_name = _one_scope_name(args, conn)
             tag = assetlib.validate_tag(args.tag) if args.tag else None
             owner = assetlib.validate_owner(args.owner) if args.owner else None
             criticality = (
@@ -1122,7 +1156,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
 
     if args.command == "diff":
         try:
-            scope_name = _one_scope_name(args)
+            scope_name = _one_scope_name(args, conn)
         except ValueError as exc:
             return _err(str(exc))
         scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scope_name=scope_name))
@@ -1141,7 +1175,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
 
     if args.command == "report":
         try:
-            scope_name = _one_scope_name(args)
+            scope_name = _one_scope_name(args, conn)
         except ValueError as exc:
             return _err(str(exc))
         scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, args.scan_id, scope_name=scope_name))
@@ -1160,7 +1194,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
 
     if args.command == "history":
         try:
-            scope_name = _one_scope_name(args)
+            scope_name = _one_scope_name(args, conn)
         except ValueError as exc:
             return _err(str(exc))
         scans = list_scans(conn, scope_name)

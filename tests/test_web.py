@@ -1774,7 +1774,7 @@ const html = context.renderDevice({
   hostname: payload + "hostname",
   label: payload + "label",
   owner: payload + "owner",
-  tag: payload + "tag",
+  tags: [payload + "tag"],
   notes: payload + "notes",
   trusted: false,
   open_ports: [{ port: 80, banner: payload + "banner" }],
