@@ -779,6 +779,10 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
+            # Windows translates \n to \r\n unless the fd is binary, which
+            # would turn CSV \r\n into \r\r\n. POSIX ignores this flag.
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
             if directory is not None:
                 fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
             else:

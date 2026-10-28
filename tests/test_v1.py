@@ -549,7 +549,9 @@ class CliExportTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, err)
         self.assertIn(f"Wrote {dest}", err)
-        text = dest.read_text(encoding="utf-8")
+        raw = dest.read_bytes()
+        self.assertNotIn(b"\r\r\n", raw)
+        text = raw.decode("utf-8")
         header, *rest = [line for line in text.split("\r\n") if line]
         self.assertNotIn("owner", header)
         self.assertNotIn("location", header)
