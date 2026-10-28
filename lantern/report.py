@@ -150,7 +150,7 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
         <p><strong>Port changes:</strong> {changed}</p></section>"""
 
     return f"""<h1>Lantern scan report</h1>
-<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {_html_text(strip_for_text(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
+<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {_html_text(strip_for_text(scan.get('scope_name') or '') or '-')} | {len(scan['devices'])} devices
 {'| demo data' if scan['demo'] else ''}</p>
 {diff_html}
 {devices_html}
