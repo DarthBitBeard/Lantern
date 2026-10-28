@@ -716,6 +716,22 @@ class WebBindTests(unittest.TestCase):
         self.assertIn("--strict-auth", help_text)
         self.assertIn("valid until Lantern restarts", help_text)
         self.assertNotIn("Open once", help_text)
+        for word in ("1", "true", "yes", "on", "0", "false", "no", "off", "empty"):
+            self.assertIn(word, help_text)
+        self.assertIn("does not override this flag", help_text)
+
+    def test_strict_auth_off_values_do_not_override_the_flag(self):
+        for raw in ("0", "false", "no", "off", "", "  0  "):
+            enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
+            self.assertIsNone(error, raw)
+            self.assertFalse(enabled, raw)
+            enabled, error = cli.strict_auth_requested(True, {cli.STRICT_AUTH_ENV: raw})
+            self.assertIsNone(error, raw)
+            self.assertTrue(enabled, raw)
+        for raw in ("1", "true", "yes", "on", " TRUE "):
+            enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
+            self.assertIsNone(error, raw)
+            self.assertTrue(enabled, raw)
 
 
 class TokenFileTests(unittest.TestCase):

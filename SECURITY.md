@@ -9,7 +9,7 @@ GitHub Private Vulnerability Reporting is the only reporting channel: https://gi
 Please include the Lantern version or commit, your OS and Python version, how you ran it (CLI, dashboard, Docker), the steps to reproduce, and the impact you see.
 Do not include real network data. That means no real IPs, MAC addresses, hostnames, banners, scan databases, or screenshots of your inventory. Use `lantern demo` data or made-up values.
 
-Please test only on localhost, or on networks you own or are authorized to test.
+Please test only on localhost, or on devices and networks you own.
 
 These are targets, not guarantees:
 
@@ -42,7 +42,7 @@ Out of scope: vulnerabilities in the devices Lantern finds; issues that need an 
 
 ## Security model
 
-The dashboard has no user accounts. It does have one access token per process (`X-Lantern-Token`, compared with `hmac.compare_digest`). On loopback the process generates that token, embeds it in the page, and requires it on `POST /api/*` only. `GET /api/*` on loopback does not require the token. With `--allow-lan` the same token is required on every API route, including `GET` inventory and reports, and the page does not contain it. The browser keeps a pasted token in `sessionStorage` for that tab. A presented token that does not match waits 50 ms. The token is not written to the log or the database.
+The dashboard has no user accounts. It does have one access token per process (`X-Lantern-Token`, compared with `hmac.compare_digest`). On loopback the process generates that token, embeds it in the page, and requires it on `POST /api/*` only. `GET /api/*` on loopback does not require the token. With `--allow-lan` the same token is required on every API route, including `GET` inventory and reports, and the page does not contain it. The browser keeps a pasted token in `sessionStorage` for that tab. A presented token that does not match waits 50 ms. The token is not written to the log or the database. Opt-in `--strict-auth` (or `LANTERN_STRICT_AUTH=1`) is off by default: it keeps the token out of the page and requires it on every `/api` route, including `GET`. A Docker user needs `LANTERN_STRICT_AUTH=1` plus a mode-0400 token file, because the container has no terminal.
 
 `--allow-lan` is the only way to bind an address other than loopback. The default bind is `127.0.0.1`. The flag exits 2 before it listens unless one token of at least 128 bits is available (22 to 512 urlsafe characters). Precedence is `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal and `--debug` is not set. A generated token is printed once on that terminal. `--debug` does not print one. When stderr is not a terminal, Lantern does not generate a token. The token file must be a regular file of at most 4 KiB, opened with `O_NOFOLLOW` and `O_NONBLOCK` where the platform has them. A symlink or a FIFO is refused. On non-Windows systems the file must have no group or other permissions (0400 or 0600 recommended; 0500 and 0700 are also accepted). Mode 0444 is refused. Windows does not check the mode.
 
@@ -75,7 +75,7 @@ On loopback:
 
 That other user (other than root or an administrator) cannot read the SQLite database, its migration backup, or the demo HTML report when those files are mode 0600 and owned by the user running Lantern. A directory Lantern created is mode 0700, so that user cannot list it. They also cannot read a token file that has no group or other permission bits. Lantern does not put the token in the log or the database. On Windows, who can read those files is the user profile ACL.
 
-With `--allow-lan`, `GET /` does not include the token, and every API route requires it. Another local user (other than root or an administrator) still cannot read a token file that has no group or other bits. They can call the API if they already have the token. On the network, that token and the data are clear text.
+With `--allow-lan`, `GET /` does not include the token, and every API route requires it. Another local user (other than root or an administrator) still cannot read a token file that has no group or other bits. They can call the API if they already have the token. On the network, that token and the data are clear text. Opt-in `--strict-auth` (or `LANTERN_STRICT_AUTH=1`) leaves that default unchanged: it keeps the token out of the page and requires it on every `/api` route, including `GET`. A Docker user needs `LANTERN_STRICT_AUTH=1` plus a mode-0400 token file.
 
 A scan sends real traffic. It pings every host address in the subnet. Hosts that answer, and hosts already in the local ARP cache, then get TCP connections, banner reads, and a reverse-DNS lookup. Network owners or intrusion-detection tools may notice it. Those lookups go to the configured DNS server, which may be outside your network.
 
