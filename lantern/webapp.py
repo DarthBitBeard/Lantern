@@ -26,9 +26,10 @@ Local-tool hygiene, enforced here:
 - Request targets must be origin-form (a path). An absolute-form URL is
   rejected with 400.
 - POST bodies must be JSON (Content-Type application/json) and at most
-  64 KiB. Reading the request line and headers has a total deadline, not
-  only a per-read socket timeout. The process caps connections overall
-  and per client address. A full cap gets 503.
+  64 KiB. Reading the request line, headers, and body shares one total
+  deadline, not only a per-read socket timeout. Response writes use the
+  idle timeout. The process caps connections overall and per client
+  address. A full cap gets 503.
 - OPTIONS, PUT, DELETE, and PATCH get 405 after the Host check and, when
   LAN-bound, the token check. Transfer-Encoding is rejected and the
   connection is closed. Every POST closes the connection.
@@ -258,6 +259,27 @@ def _bind_host_key(host: str, port: int) -> str:
     return f"{ip}:{port}"
 
 
+def _loose_ipv4(host: str) -> bool:
+    """True for forms ``inet_aton`` accepts and ``ipaddress`` rejects.
+
+    That is shorthand (``127.1``), hex (``0x7f.1``, ``0x7f000001``), octal
+    (``0177.0.0.1``), and leading zeros (``127.000.000.001``).
+    """
+    label_re = re.compile(r"(?:0x[0-9a-f]+|\d+)")
+    labels = host.split(".")
+    if 1 <= len(labels) <= 4 and all(label_re.fullmatch(label) for label in labels):
+        if len(labels) != 4 or any(
+            label.startswith("0x") or (len(label) > 1 and label.startswith("0"))
+            for label in labels
+        ):
+            return True
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return False
+    return True
+
+
 def parse_allow_host(value: str) -> tuple[str, int | None]:
     """Parse one --allow-host value. Raises ValueError with a CLI-facing message.
 
@@ -289,10 +311,9 @@ def parse_allow_host(value: str) -> tuple[str, int | None]:
         raise ValueError(
             f"--allow-host value {value!r} must be a specific host, not an unspecified address."
         )
-    # inet_aton accepts 127.1 and 0x7f000001. They are not strict hosts.
-    if ip is None and (
-        re.fullmatch(r"(?:\d+\.){1,2}\d+", host) or re.fullmatch(r"0x[0-9a-f]+", host)
-    ):
+    # inet_aton accepts 127.1, 0x7f.1, 0177.0.0.1, and 127.000.000.001.
+    # ipaddress does not. None of those are allowed Host values.
+    if ip is None and _loose_ipv4(host):
         raise ValueError(
             f"--allow-host value {value!r} must be a specific host, not an unspecified address."
         )
@@ -473,36 +494,32 @@ def _extra_allowed_hosts(allowed: frozenset[str], bound_port: int) -> list[str]:
 
 
 class _DeadlineRaw(io.RawIOBase):
-    """Socket reader whose blocking calls cannot outlive one header deadline.
+    """Socket reader whose blocking calls cannot outlive the request deadline.
 
-    Each ``recv`` is capped at the time still left, so a byte that arrives
-    just before the per-read timeout does not start a new full window.
+    The deadline covers the request line, the headers, and the body. Each
+    ``recv`` is capped at the time still left, so a byte that arrives just
+    before the per-read timeout does not start a new full window. Response
+    writes are not read through this object; the handler restores the idle
+    timeout before it writes.
     """
 
-    def __init__(self, sock, deadline_fn, per_read: float, headers_done):
+    def __init__(self, sock, deadline_fn, per_read: float):
         self._sock = sock
         self._deadline_fn = deadline_fn
         self._per_read = per_read
-        self._headers_done = headers_done
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer) -> int:
-        # After the headers, body reads and the following response write
-        # use the normal per-read timeout. Leaving the shrinking header
-        # deadline on the socket would cut off a large report.
-        if self._headers_done():
-            self._sock.settimeout(self._per_read)
-            return self._sock.recv_into(buffer)
         remaining = self._deadline_fn() - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("header deadline exceeded")
+            raise TimeoutError("request deadline exceeded")
         self._sock.settimeout(min(self._per_read, remaining))
         try:
             return self._sock.recv_into(buffer)
         except TimeoutError:
-            raise TimeoutError("header deadline exceeded") from None
+            raise TimeoutError("request deadline exceeded") from None
 
 
 class LanternHandler(BaseHTTPRequestHandler):
@@ -515,8 +532,9 @@ class LanternHandler(BaseHTTPRequestHandler):
     # Loopback embeds the token and checks it on POST only. LAN mode
     # (set by the CLI) checks it on every API route and does not embed it.
     lan_bound = False
-    # Per-read socket timeout, and a separate total deadline for the
-    # request line and headers. The deadline is what stops a slow drip.
+    # Per-read idle timeout, and one deadline for reading the request
+    # line, headers, and body. The deadline is what stops a slow drip.
+    # Response writes use the idle timeout, restored in end_headers.
     timeout = REQUEST_TIMEOUT_SECONDS
     header_timeout = HEADER_DEADLINE_SECONDS
     protocol_version = "HTTP/1.1"
@@ -525,30 +543,26 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.connection = self.request
         if self.timeout is not None:
             self.connection.settimeout(self.timeout)
-        self._headers_complete = False
         self._header_deadline = time.monotonic() + float(self.header_timeout)
         raw = _DeadlineRaw(
             self.connection,
             lambda: self._header_deadline,
             float(self.timeout),
-            lambda: self._headers_complete,
         )
         self.rfile = io.BufferedReader(raw)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
     def handle_one_request(self):
-        # A keep-alive request gets its own deadline. The reader consults
-        # this attribute on every recv until the headers are done.
-        self._headers_complete = False
+        # One deadline for this request's line, headers, and body.
+        # Keep-alive gets a fresh window. Response writes restore the
+        # idle timeout so a large report is not cut off.
         self._header_deadline = time.monotonic() + float(self.header_timeout)
         super().handle_one_request()
 
     def parse_request(self) -> bool:
         ok = super().parse_request()
-        self._headers_complete = True
-        self._restore_idle_timeout()
-        # A GET or HEAD body is not read. On keep-alive those bytes would
-        # be the next request. Close instead of parsing them.
+        # Do not restore the idle timeout here. The body is still unread,
+        # and a slow POST must stay under this same deadline.
         if ok and self._framing_requires_close():
             self.close_connection = True
         return ok
@@ -560,6 +574,9 @@ class LanternHandler(BaseHTTPRequestHandler):
             pass
 
     def end_headers(self) -> None:
+        # The read deadline must not carry into the response. A slow client
+        # reading a report gets the normal idle timeout from here on.
+        self._restore_idle_timeout()
         if self.close_connection:
             self.send_header("Connection", "close")
         super().end_headers()
@@ -686,16 +703,23 @@ class LanternHandler(BaseHTTPRequestHandler):
         return self._token_ok()
 
     def _framing_requires_close(self) -> bool:
-        """True when unread bytes must not be parsed as another request."""
+        """True when unread bytes must not be parsed as another request.
+
+        A positive length, more than one Content-Length, or any value that
+        is not a single non-negative integer (``abc``, ``-1``, ``1e3``,
+        ``5, 5``) all close the connection.
+        """
         if "Transfer-Encoding" in self.headers:
             return True
-        for raw in self.headers.get_all("Content-Length") or []:
-            try:
-                if int(str(raw).strip()) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
+        values = self.headers.get_all("Content-Length")
+        if not values:
+            return False
+        if len(values) != 1:
+            return True
+        raw = str(values[0]).strip()
+        if not re.fullmatch(r"\d+", raw):
+            return True
+        return int(raw) > 0
 
     def _reject_transfer_encoding(self) -> bool:
         """True when any Transfer-Encoding header was present and a 400 was sent.

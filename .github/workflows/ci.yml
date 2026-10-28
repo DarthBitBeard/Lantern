@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --require-hashes -r .github/requirements-build.txt
-          python -m build
+          python -m build --no-isolation
           ls -1 dist/*.whl dist/*.tar.gz
       - name: Install the wheel and smoke-test outside the source tree
         run: |

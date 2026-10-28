@@ -530,6 +530,9 @@ class AllowlistUnitTests(unittest.TestCase):
             "127.1",
             "127.0.1",
             "0x7f000001",
+            "0177.0.0.1",
+            "0x7f.1",
+            "127.000.000.001",
             "[::]",
             "[fe80::1%eth0]",
             "http://dash.example",
@@ -1112,7 +1115,7 @@ class HardeningTests(unittest.TestCase):
         self.assertIn(b"Connection: close", data)
         self.assertNotIn(b'"scans"', data)
 
-    def test_socket_timeout_is_restored_after_headers(self):
+    def test_socket_timeout_is_restored_for_the_response_write(self):
         seen = {}
         server = make_server(
             Path(self.tmp.name) / "timeout.db",
@@ -1123,18 +1126,86 @@ class HardeningTests(unittest.TestCase):
         )
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        original = server.RequestHandlerClass.do_GET
+        original = server.RequestHandlerClass.end_headers
 
         def wrapped(handler):
+            original(handler)
             seen["timeout"] = handler.connection.gettimeout()
-            return original(handler)
 
-        server.RequestHandlerClass.do_GET = wrapped
+        server.RequestHandlerClass.end_headers = wrapped
         port = server.server_address[1]
         threading.Thread(target=server.serve_forever, daemon=True).start()
         status, _body, _headers = self.request("/", base=f"http://127.0.0.1:{port}")
         self.assertEqual(status, 200)
         self.assertEqual(seen["timeout"], 5)
+
+    def test_slow_body_drip_is_closed_by_the_request_deadline(self):
+        import time
+
+        server = make_server(
+            Path(self.tmp.name) / "body-drip.db",
+            host="127.0.0.1",
+            port=0,
+            request_timeout=2,
+            header_timeout=3.2,
+        )
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        headers = (
+            f"POST /api/demo HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: 40\r\n"
+            f"{webapp.TOKEN_HEADER}: {self.token}\r\n"
+            f"\r\n"
+        ).encode()
+        started = time.monotonic()
+        sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        self.addCleanup(sock.close)
+        sock.sendall(headers)
+        closed = False
+        while time.monotonic() - started < 8:
+            time.sleep(1.5)
+            try:
+                sock.sendall(b"{")
+            except OSError:
+                closed = True
+                break
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 6, "slow body drip held the connection past the request deadline")
+        self.assertTrue(closed)
+
+    def test_bad_content_length_does_not_serve_a_smuggled_request(self):
+        port = self.port
+        smuggled = (
+            f"GET /api/scans HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"\r\n"
+        ).encode()
+        for value in ("abc", "-1", "1e3", "5, 5"):
+            payload = (
+                f"GET / HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                f"Content-Length: {value}\r\n"
+                f"\r\n"
+            ).encode() + smuggled
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                sock.sendall(payload)
+                sock.settimeout(2)
+                data = b""
+                while True:
+                    try:
+                        chunk = sock.recv(8192)
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    data += chunk
+            self.assertEqual(data.count(b"HTTP/1.1"), 1, (value, data))
+            self.assertIn(b"Connection: close", data, value)
+            self.assertNotIn(b'"scans"', data, value)
 
 
 class LanMethodTests(unittest.TestCase):
