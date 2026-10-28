@@ -8,11 +8,16 @@ addresses, no loopback, no link-local, no IPv6.
 The file may only contain `[scopes.<name>]` tables with `subnet` and an
 optional `description`. Other keys are rejected so a config cannot quietly
 add excludes, extra CIDRs, or a different port list.
+
+A file larger than 64 KiB is refused before it is parsed. A scope file is
+a short list of names and subnets; the limit keeps a huge file from being
+read into memory.
 """
 
 from __future__ import annotations
 
 import re
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +28,9 @@ DEFAULT_CONFIG_NAME = "lantern.toml"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SCOPE_KEYS = frozenset({"subnet", "description"})
 _MAX_DESCRIPTION = 200
+# 64 KiB is the same cap the dashboard uses for a POST body. A scope file
+# is a handful of names and subnets, so anything larger is refused outright.
+MAX_SCOPE_CONFIG_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -32,19 +40,51 @@ class Scope:
     description: str | None = None
 
 
+def _scope_too_large(path: Path) -> ValueError:
+    return ValueError(
+        f"Scope config {path} is too large. "
+        "Lantern refuses scope files larger than 64 KiB."
+    )
+
+
+def _read_scope_text(path: Path) -> str:
+    """Read a scope file, refusing anything larger than 64 KiB.
+
+    The size is checked before the body is parsed, and the read itself is
+    capped, so a huge file is never loaded. The error does not include the
+    file contents.
+    """
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"Cannot read scope config {path}: not a regular file.")
+    if info.st_size > MAX_SCOPE_CONFIG_BYTES:
+        raise _scope_too_large(path)
+    try:
+        with path.open("rb") as handle:
+            blob = handle.read(MAX_SCOPE_CONFIG_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+    if len(blob) > MAX_SCOPE_CONFIG_BYTES:
+        raise _scope_too_large(path)
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Scope config {path} is not UTF-8.") from exc
+
+
 def load_scopes(path: str | Path) -> dict[str, Scope]:
     """Read named scopes from a TOML file. Raise ValueError if unsafe or malformed.
 
     The returned dict keeps the file order. `subnet` is the normalized
-    network (`192.168.1.5/24` becomes `192.168.1.0/24`).
+    network (`192.168.1.5/24` becomes `192.168.1.0/24`). A file larger than
+    64 KiB is refused before it is parsed; the error does not include the
+    file contents.
     """
     path = Path(path)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"Scope config {path} is not UTF-8.") from exc
-    except OSError as exc:
-        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+    text = _read_scope_text(path)
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:

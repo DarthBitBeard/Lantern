@@ -8,13 +8,26 @@ Schema changes are forward-only. The `schema_version` table records each
 applied version. `connect` runs any missing migrations in one transaction.
 For an existing database file it first writes a copy beside it,
 `<file>.v<old>.bak`, and leaves that copy untouched.
+
+On Unix the database, that backup, and any directory Lantern creates for
+them are private to the owner (0600 and 0700). The mode is set when the
+file is created, so umask 022 and a permissive umask both leave it private.
+An existing file or directory is not chmod'd. A database or backup that is
+already group- or world-readable gets one warning on stderr. On Windows
+those bits are not set or checked; the user profile ACL is what keeps the
+file private.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import sqlite3
+import stat
+import sys
+import tempfile
+import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +37,20 @@ from pathlib import Path
 # the schema version moves only when the tables change.
 SCHEMA_VERSION = 1
 
+# Owner read/write for files, owner-only for a directory Lantern creates.
+# Group and other bits stay off so umask cannot widen them.
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
+_OTHERS_CAN_READ = stat.S_IRGRP | stat.S_IROTH
+
 Migration = Callable[[sqlite3.Connection], None]
+
+# One warning per path per process, so a dashboard that opens the database
+# on every request does not fill stderr. Each CLI run is a new process.
+# The dashboard serves requests on several threads, so the sets share a lock.
+_warned_loose: set[str] = set()
+_scanned_backup_dirs: set[str] = set()
+_permission_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -80,6 +106,220 @@ def _persistent_path(db_path: str | Path | None) -> Path | None:
     return Path(text)
 
 
+def _posix_modes() -> bool:
+    """False on Windows, where the user profile ACL is the access check."""
+    return os.name != "nt"
+
+
+def warn_loose_permissions(path: str | Path) -> None:
+    """Warn on stderr when an existing file is group- or world-readable.
+
+    Does not change the file and does not raise. Missing paths, directories,
+    and unreadable stat results are ignored. On Windows this returns without
+    looking at mode bits: Lantern relies on the user profile ACL there.
+
+    The CLI can call this for a database, a ``.vN.bak`` backup, or a future
+    export path. `connect` calls it for a database that already exists.
+    The same path is reported once per process.
+    """
+    if not _posix_modes():
+        return
+    file_path = Path(path)
+    try:
+        mode = file_path.stat().st_mode
+    except OSError:
+        return
+    if not stat.S_ISREG(mode):
+        return
+    bits = stat.S_IMODE(mode)
+    if bits & _OTHERS_CAN_READ == 0:
+        return
+    try:
+        key = str(file_path.resolve())
+    except OSError:
+        key = os.fspath(file_path)
+    with _permission_lock:
+        if key in _warned_loose:
+            return
+        _warned_loose.add(key)
+    try:
+        print(
+            f"Warning: {file_path} is readable by group or others (mode {bits:04o}). "
+            "Lantern will not change an existing file. "
+            "Other local accounts can read this inventory.",
+            file=sys.stderr,
+        )
+    except OSError:
+        return
+
+
+def _create_private_directory(path: Path) -> None:
+    """Create `path` and any missing parents at mode 0700.
+
+    A directory that already exists is left alone, including one the user
+    created before Lantern ran. Lantern does not chmod those.
+    """
+    if path.exists() or path == path.parent:
+        return
+    _create_private_directory(path.parent)
+    try:
+        os.mkdir(path, _PRIVATE_DIR_MODE)
+    except FileExistsError:
+        return
+    if not _posix_modes():
+        return
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fchmod(fd, _PRIVATE_DIR_MODE)
+    finally:
+        os.close(fd)
+
+
+def _create_private_file(path: Path) -> None:
+    """Create an empty file at `path` with mode 0600. The path must be new.
+
+    `os.open` applies the mode as the file is created, before any other
+    library opens it. umask can only clear bits, and 0600 has no group or
+    other bits, so umask 022 and umask 0 both leave the file owner-only.
+    `fchmod` sets that mode again on platforms that honor it.
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+    if _posix_modes():
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, _PRIVATE_FILE_MODE)
+    try:
+        if _posix_modes():
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        count = os.write(fd, payload[offset:])
+        if count <= 0:
+            raise OSError("short write while creating a private file")
+        offset += count
+
+
+def write_private_file(path: str | Path, data: bytes | str) -> None:
+    """Atomically write `data` to `path`, creating the file at mode 0600.
+
+    The bytes land in a temporary file in the same directory and are renamed
+    into place, so a reader never sees a partial file. A missing parent
+    directory is created at mode 0700. A directory that already exists is
+    not modified.
+
+    `data` may be bytes, written unchanged, or str, written as UTF-8.
+    On Windows the mode bits are not applied; the user profile ACL is what
+    keeps the file private. A later CSV or JSON export should call this
+    instead of writing the destination itself.
+
+    This does not warn about a file it replaces. Call
+    `warn_loose_permissions` first when the operator should hear that the
+    old file was group- or world-readable.
+    """
+    if isinstance(data, str):
+        payload = data.encode("utf-8")
+    elif isinstance(data, bytes):
+        payload = data
+    else:
+        raise TypeError("write_private_file data must be str or bytes.")
+
+    destination = Path(path)
+    parent = destination.parent
+    if parent != Path("") and not parent.exists():
+        _create_private_directory(parent)
+    directory = parent if parent != Path("") else Path(".")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        try:
+            if _posix_modes():
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+            _write_all(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, destination)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _is_migration_backup(db_name: str, candidate: str) -> bool:
+    """True for `<db>.v<version>.bak` and `<db>.v<version>.<n>.bak`."""
+    prefix = db_name + ".v"
+    suffix = ".bak"
+    if not candidate.startswith(prefix) or not candidate.endswith(suffix):
+        return False
+    middle = candidate[len(prefix):-len(suffix)]
+    version, sep, extra = middle.partition(".")
+    if not version.isdigit():
+        return False
+    if sep == "":
+        return True
+    return extra.isdigit()
+
+
+def _warn_existing_backups(db_path: Path) -> None:
+    """Warn once per directory about sibling migration backups that are loose."""
+    if not _posix_modes():
+        return
+    parent = db_path.parent
+    if not parent.is_dir():
+        return
+    try:
+        key = str(parent.resolve())
+    except OSError:
+        return
+    with _permission_lock:
+        if key in _scanned_backup_dirs:
+            return
+        _scanned_backup_dirs.add(key)
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    db_name = db_path.name
+    for candidate in entries:
+        if _is_migration_backup(db_name, candidate.name):
+            warn_loose_permissions(candidate)
+
+
+def _prepare_database_file(db_path: str | Path) -> None:
+    """Create a new database path as a private file, or warn if it is loose.
+
+    An in-memory database is skipped. A missing parent directory is created
+    at mode 0700. A parent that already exists is not chmod'd.
+    """
+    persistent = _persistent_path(db_path)
+    if persistent is None:
+        return
+    parent = persistent.parent
+    if parent != Path("") and not parent.exists():
+        _create_private_directory(parent)
+    if persistent.exists():
+        warn_loose_permissions(persistent)
+    else:
+        try:
+            _create_private_file(persistent)
+        except FileExistsError:
+            warn_loose_permissions(persistent)
+    _warn_existing_backups(persistent)
+
+
 def _unused_backup_path(source: Path, from_version: int) -> Path:
     """`<file>.v<from>.bak`, or `<file>.v<from>.N.bak` if that name is taken.
 
@@ -104,7 +344,14 @@ def _backup_database(conn: sqlite3.Connection, source: Path, from_version: int) 
     the same connection while it holds a write lock waits forever.
     """
     dest = _unused_backup_path(source, from_version)
-    saved = sqlite3.connect(dest)
+    # Create the backup before SQLite opens it. sqlite3.connect on a missing
+    # path uses mode 0644, which umask 022 leaves world-readable.
+    _create_private_file(dest)
+    try:
+        saved = sqlite3.connect(dest)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     try:
         conn.backup(saved)
     except Exception:
@@ -218,10 +465,17 @@ def apply_migrations(
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open (and create if needed) the Lantern database.
 
+    A new file is created with mode 0600 before SQLite opens it, and a
+    missing parent directory is created with mode 0700. An existing
+    database or migration backup that is group- or world-readable produces
+    a warning on stderr and is left unchanged. On Windows, POSIX modes are
+    not applied; the user profile ACL is what keeps the file private.
+
     A database from Lantern 0.3.0 is upgraded in place after a backup copy
     is written beside the file. A database newer than this process is
     refused and left unchanged.
     """
+    _prepare_database_file(db_path)
     conn = sqlite3.connect(str(db_path))
     try:
         apply_migrations(conn, db_path=db_path)
