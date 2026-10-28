@@ -105,11 +105,19 @@ def export_filename(what: str, scan_id: int, fmt: str) -> str:
 
 
 def _skippable_prefix(char: str) -> bool:
-    """Whitespace and format characters that must not hide a formula."""
+    """Whitespace and format characters that must not hide a formula.
+
+    Tab and carriage return stay significant so a cell that is only one of
+    those is still treated as a trigger. Vertical tab, form feed, Unicode
+    spaces, line separators, and bidi or other format characters are skipped.
+    """
     if char in "\"'":
         return True
-    category = unicodedata.category(char)
-    return category.startswith("Z") or category == "Cf"
+    if char in "\t\r":
+        return False
+    if char.isspace():
+        return True
+    return unicodedata.category(char) == "Cf"
 
 
 def defuse_cell(value) -> str:

@@ -83,9 +83,14 @@ class CsvTests(unittest.TestCase):
         hidden = (
             "\u00a0",  # no-break space
             "\u3000",  # ideographic space
+            "\v",
+            "\f",
+            "\u2028",  # line separator
             "\u200b",  # zero-width space
             "\ufeff",  # BOM, format
             "\u2060",  # word joiner
+            "\u202e",  # right-to-left override
+            "\u202a",  # left-to-right embedding
             " \u00a0\u200b",
         )
         for prefix in hidden:
