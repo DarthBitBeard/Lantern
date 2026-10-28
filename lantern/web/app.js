@@ -2,7 +2,10 @@
 
 const $ = (id) => document.getElementById(id);
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-const JSON_HEADERS = { "Content-Type": "application/json" };
+function lanternToken() {
+  const meta = document.querySelector('meta[name="lantern-token"]');
+  return meta ? meta.getAttribute("content") || "" : "";
+}
 
 // View state. `viewingId` is null when showing the latest scan.
 let currentScan = null;
@@ -49,7 +52,14 @@ async function api(path, options) {
 }
 
 function postJson(path, body) {
-  return api(path, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body ?? {}) });
+  return api(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Lantern-Token": lanternToken(),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
 }
 
 function describeChange(change) {

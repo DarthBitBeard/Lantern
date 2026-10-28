@@ -124,6 +124,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--port", err)
 
+    def test_web_allow_host_flag(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(out):
+            cli.main(["web", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("--allow-host", out.getvalue())
+
+        args = cli.build_parser().parse_args([
+            "web", "--allow-host", "dash.example", "--allow-host", "[2001:db8::5]",
+        ])
+        self.assertEqual(args.allow_host, ["dash.example", "[2001:db8::5]"])
+
+        code, _, err = self.run_cli("web", "--allow-host", "bad host")
+        self.assertEqual(code, 2)
+        self.assertIn("--allow-host", err)
+        self.assertNotIn("Traceback", err)
+
     def test_web_bind_failure_is_a_clear_error(self):
         import socket
 

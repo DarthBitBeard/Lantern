@@ -26,7 +26,11 @@ Please include the Lantern version, how you ran it, and what you observed, witho
 
 The web dashboard has no login, by design for local use. Bind it to localhost (the default), or reach it only over a private VPN such as Tailscale. Never expose port 8068 to the internet or to an untrusted network.
 
-Against other pages in your own browser, the API refuses POSTs that are not JSON, that are over 64 KiB, or whose `Origin` header is not the dashboard itself, and HTML responses carry a strict Content Security Policy. These limit cross-site mischief; they are not a login.
+The dashboard answers a request only when the `Host` header is `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, or a host you added with `--allow-host` (repeatable; nothing else is allowed by default). That is what stops a public site from rebinding its name onto `127.0.0.1` and calling the API as if it were the dashboard. `POST /api/*` also requires the header `X-Lantern-Token`. Each process generates that token at startup, puts it in the HTML page, and compares it in constant time. The token is not written to the log. Anyone who can load the page from an allowed Host can read the token from it. It blocks other websites. It is not a password.
+
+If a POST includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A POST with no `Origin` is accepted only when the token is valid, which is how curl and other non-browser clients call in. POST bodies must be JSON under 64 KiB. HTML responses carry a strict Content Security Policy. These limits are not a login.
+
+`--allow-host` does not make a non-loopback bind safe. `--host` other than loopback is still an explicit choice, and the process still has no accounts. Scanning rules are separate and unchanged: private ranges only, at most 1024 addresses.
 
 ## Supported versions
 

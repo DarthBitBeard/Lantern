@@ -102,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_arg(web_p)
     web_p.add_argument("--host", default="127.0.0.1", help="Bind address, default 127.0.0.1 (local only).")
     web_p.add_argument("--port", type=int, default=8068, help="Port, default 8068.")
+    web_p.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Extra Host header to accept, besides 127.0.0.1, localhost, and [::1] "
+             "on the bound port. Repeatable. A value with no port uses the bound port.",
+    )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
     return parser
 
@@ -212,10 +220,18 @@ def _dispatch(args, conn, db_path: Path) -> int:
 
         conn.close()
         try:
-            serve(db_path, host=args.host, port=args.port, debug=args.debug)
+            serve(
+                db_path,
+                host=args.host,
+                port=args.port,
+                debug=args.debug,
+                allow_hosts=args.allow_host,
+            )
         except OSError as exc:
             return _err(f"Cannot bind {args.host}:{args.port} ({exc.strerror or exc}). "
                         "Is another Lantern running? Try --port 8069.")
+        except ValueError as exc:
+            return _err(str(exc))
         return 0
 
     if args.command == "demo":

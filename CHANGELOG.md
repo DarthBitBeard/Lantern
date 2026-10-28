@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The dashboard rejects any request whose `Host` header is not loopback on the bound port (`127.0.0.1`, `localhost`, or `[::1]`), or a host named with repeatable `--allow-host`. This blocks DNS rebinding. `POST /api/*` also requires the per-process `X-Lantern-Token` embedded in the page (compared with `hmac.compare_digest`, not logged) and, when `Origin` is sent, an `http` or `https` origin on that same allowlist. A missing `Origin` is accepted only with a valid token. `GET` still has to pass the Host check and does not need the token. Private-subnet limits are unchanged (RFC1918 only, at most 1024 addresses).
 - CI runs the test suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13.
 - CI builds an sdist and a wheel, installs the wheel outside the source tree, and runs an offline `lantern demo` on Linux, macOS, and Windows.
 - Guessing the local subnet gives up on a slow hostname lookup after half a second, so a stuck DNS answer cannot stall the CLI or the dashboard. The UDP route check is unchanged and still does not send a packet.
