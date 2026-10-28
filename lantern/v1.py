@@ -8,6 +8,7 @@ from the CLI.
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import ipaddress
 import json
@@ -821,6 +822,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 temporary_path.unlink(missing_ok=True)
                 raise
     except OSError as exc:
+        if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", None)}:
+            raise ValueError("The export could not be written.") from exc
         raise ValueError("The export path is not allowed.") from exc
     finally:
         if directory is not None:

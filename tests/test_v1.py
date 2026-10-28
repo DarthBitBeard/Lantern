@@ -1,6 +1,7 @@
 """Export files and the read-only /api/v1. Localhost and fake rows only."""
 
 import csv
+import errno
 import io
 import json
 import re
@@ -187,6 +188,23 @@ class PathTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 v1.write_export_file(str(dest), b"truncated", force=False)
         self.assertEqual(dest.read_bytes(), b"keep")
+
+    def test_disk_full_during_force_keeps_the_old_file(self):
+        dest = self.root / "keep.json"
+        dest.write_bytes(b"keep")
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch("lantern.v1.os.write", boom):
+            with self.assertRaises(ValueError) as caught:
+                v1.write_export_file(str(dest), b"new-bytes", force=True)
+        message = str(caught.exception)
+        self.assertNotIn("not allowed", message)
+        self.assertIn("could not be written", message)
+        self.assertNotIn(str(dest), message)
+        self.assertEqual(dest.read_bytes(), b"keep")
+        self.assertEqual(list(self.root.glob(".lantern-export-*")), [])
 
 
 class ApiTests(unittest.TestCase):
