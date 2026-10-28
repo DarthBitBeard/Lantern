@@ -26,9 +26,11 @@ Local-tool hygiene, enforced here:
 - Request targets must be origin-form (a path). An absolute-form URL is
   rejected with 400.
 - POST bodies must be JSON (Content-Type application/json) and at most
-  64 KiB. Reading the request line and headers has a total deadline, not
-  only a per-read socket timeout. The process caps connections overall
-  and per client address. A full cap gets 503.
+  64 KiB. Reading the request line, headers, and body shares one total
+  deadline, not only a per-read socket timeout. The response is sent in
+  chunks: each chunk has an idle write timeout, and the whole response
+  has a longer cap. The process caps connections overall and per client
+  address. A full cap gets 503.
 - OPTIONS, PUT, DELETE, and PATCH get 405 after the Host check and, when
   LAN-bound, the token check. Transfer-Encoding is rejected and the
   connection is closed. Every POST closes the connection.
@@ -75,9 +77,14 @@ MAX_LABEL_CHARS = 80
 # and leak the exception text to the client.
 MAX_SCAN_ID = 2**63 - 1
 REQUEST_TIMEOUT_SECONDS = 10
-# Total time allowed to read one request line and its headers. A client
-# that drips a byte just inside the per-read timeout cannot refresh this.
+# Total time allowed to read one request line, its headers, and its body.
+# A client that drips a byte just inside the per-read timeout cannot refresh this.
 HEADER_DEADLINE_SECONDS = 10
+# Response bodies are written in chunks. Each chunk may block this long
+# waiting for the client to take more bytes. Progress starts a new wait.
+# The whole response also stops at WRITE_DEADLINE_SECONDS.
+WRITE_CHUNK_BYTES = 16 * 1024
+WRITE_DEADLINE_SECONDS = 120
 MAX_CONNECTIONS = 32
 MAX_CONNECTIONS_PER_IP = 8
 # A presented token that does not match waits this long. Guessing a
@@ -258,6 +265,27 @@ def _bind_host_key(host: str, port: int) -> str:
     return f"{ip}:{port}"
 
 
+def _loose_ipv4(host: str) -> bool:
+    """True for forms ``inet_aton`` accepts and ``ipaddress`` rejects.
+
+    That is shorthand (``127.1``), hex (``0x7f.1``, ``0x7f000001``), octal
+    (``0177.0.0.1``), and leading zeros (``127.000.000.001``).
+    """
+    label_re = re.compile(r"(?:0x[0-9a-f]+|\d+)")
+    labels = host.split(".")
+    if 1 <= len(labels) <= 4 and all(label_re.fullmatch(label) for label in labels):
+        if len(labels) != 4 or any(
+            label.startswith("0x") or (len(label) > 1 and label.startswith("0"))
+            for label in labels
+        ):
+            return True
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return False
+    return True
+
+
 def parse_allow_host(value: str) -> tuple[str, int | None]:
     """Parse one --allow-host value. Raises ValueError with a CLI-facing message.
 
@@ -288,6 +316,13 @@ def parse_allow_host(value: str) -> tuple[str, int | None]:
     if ip is None and _NUMERIC_HOST_RE.fullmatch(host):
         raise ValueError(
             f"--allow-host value {value!r} must be a specific host, not an unspecified address."
+        )
+    # inet_aton accepts 127.1, 0x7f.1, 0177.0.0.1, and 127.000.000.001.
+    # ipaddress does not. None of those are allowed Host values.
+    if ip is None and _loose_ipv4(host):
+        raise ValueError(
+            f"--allow-host value {value!r} is not a full dotted IPv4 address. "
+            "Use the full dotted form."
         )
     return host, port
 
@@ -466,10 +501,13 @@ def _extra_allowed_hosts(allowed: frozenset[str], bound_port: int) -> list[str]:
 
 
 class _DeadlineRaw(io.RawIOBase):
-    """Socket reader whose blocking calls cannot outlive one header deadline.
+    """Socket reader whose blocking calls cannot outlive the request deadline.
 
-    Each ``recv`` is capped at the time still left, so a byte that arrives
-    just before the per-read timeout does not start a new full window.
+    The deadline covers the request line, the headers, and the body. Each
+    ``recv`` is capped at the time still left, so a byte that arrives just
+    before the per-read timeout does not start a new full window. Response
+    writes are not read through this object; the handler restores the idle
+    timeout before it writes.
     """
 
     def __init__(self, sock, deadline_fn, per_read: float):
@@ -483,12 +521,12 @@ class _DeadlineRaw(io.RawIOBase):
     def readinto(self, buffer) -> int:
         remaining = self._deadline_fn() - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("header deadline exceeded")
+            raise TimeoutError("request deadline exceeded")
         self._sock.settimeout(min(self._per_read, remaining))
         try:
             return self._sock.recv_into(buffer)
         except TimeoutError:
-            raise TimeoutError("header deadline exceeded") from None
+            raise TimeoutError("request deadline exceeded") from None
 
 
 class LanternHandler(BaseHTTPRequestHandler):
@@ -501,10 +539,14 @@ class LanternHandler(BaseHTTPRequestHandler):
     # Loopback embeds the token and checks it on POST only. LAN mode
     # (set by the CLI) checks it on every API route and does not embed it.
     lan_bound = False
-    # Per-read socket timeout, and a separate total deadline for the
-    # request line and headers. The deadline is what stops a slow drip.
+    # Per-read idle timeout, and one deadline for reading the request
+    # line, headers, and body. The deadline is what stops a slow drip.
+    # Response writes use a fresh idle timeout per chunk, plus an overall cap.
     timeout = REQUEST_TIMEOUT_SECONDS
     header_timeout = HEADER_DEADLINE_SECONDS
+    write_timeout = REQUEST_TIMEOUT_SECONDS
+    write_deadline = WRITE_DEADLINE_SECONDS
+    write_chunk_bytes = WRITE_CHUNK_BYTES
     protocol_version = "HTTP/1.1"
 
     def setup(self):
@@ -512,15 +554,57 @@ class LanternHandler(BaseHTTPRequestHandler):
         if self.timeout is not None:
             self.connection.settimeout(self.timeout)
         self._header_deadline = time.monotonic() + float(self.header_timeout)
-        raw = _DeadlineRaw(self.connection, lambda: self._header_deadline, float(self.timeout))
+        raw = _DeadlineRaw(
+            self.connection,
+            lambda: self._header_deadline,
+            float(self.timeout),
+        )
         self.rfile = io.BufferedReader(raw)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
     def handle_one_request(self):
-        # A keep-alive request gets its own deadline. The reader consults
-        # this attribute on every recv.
+        # One deadline for this request's line, headers, and body.
+        # Keep-alive gets a fresh window. Response writes restore the
+        # idle timeout so a large report is not cut off.
         self._header_deadline = time.monotonic() + float(self.header_timeout)
         super().handle_one_request()
+
+    def parse_request(self) -> bool:
+        ok = super().parse_request()
+        # Do not restore the idle timeout here. The body is still unread,
+        # and a slow POST must stay under this same deadline.
+        if not ok:
+            return False
+        if self._content_length_invalid():
+            # Every method, including ones that would otherwise 200 or 404.
+            self.close_connection = True
+            self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
+            return False
+        if self._framing_requires_close():
+            self.close_connection = True
+        return True
+
+    def _restore_idle_timeout(self) -> None:
+        try:
+            self.connection.settimeout(self.timeout)
+        except OSError:
+            pass
+
+    def _connection_close_already_queued(self) -> bool:
+        for line in getattr(self, "_headers_buffer", ()) or ():
+            if line.lower().startswith(b"connection:") and b"close" in line.lower():
+                return True
+        return False
+
+    def end_headers(self) -> None:
+        # The read deadline must not carry into the response. A slow client
+        # reading a report gets the normal idle timeout from here on.
+        self._restore_idle_timeout()
+        # send_error already queues Connection: close. Adding it again
+        # makes TRACE and CONNECT replies list the header twice.
+        if self.close_connection and not self._connection_close_already_queued():
+            self.send_header("Connection", "close")
+        super().end_headers()
 
     def version_string(self):
         return "Lantern"
@@ -542,11 +626,39 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CSP)
-        if self.close_connection:
-            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(data)
+            self._write_all(data)
+
+    def _write_all(self, data: bytes) -> None:
+        """Write every byte, in chunks, without one timeout for the whole body.
+
+        ``makefile('wb', 0)`` is unbuffered, and a single ``send`` of the
+        whole buffer returns when the kernel buffer fills and drops the
+        rest. Each chunk gets ``write_timeout`` (an idle wait). A reader
+        that keeps accepting data may take longer than that in total.
+        ``write_deadline`` still drops a transfer that runs too long, and
+        a reader that stalls for one chunk's idle timeout is dropped.
+        """
+        view = memoryview(data)
+        chunk = int(self.write_chunk_bytes)
+        if chunk < 1:
+            chunk = WRITE_CHUNK_BYTES
+        deadline = time.monotonic() + float(self.write_deadline)
+        while len(view):
+            if time.monotonic() >= deadline:
+                self.close_connection = True
+                return
+            try:
+                self.connection.settimeout(float(self.write_timeout))
+                sent = self.connection.send(view[:chunk])
+            except OSError:
+                self.close_connection = True
+                return
+            if sent <= 0:
+                self.close_connection = True
+                return
+            view = view[sent:]
 
     def _send_json(self, status: int, payload) -> None:
         self._send_bytes(status, json.dumps(payload).encode(), "application/json")
@@ -645,16 +757,45 @@ class LanternHandler(BaseHTTPRequestHandler):
             return True
         return self._token_ok()
 
-    def _reject_transfer_encoding(self, *, unread_body: bool) -> bool:
-        """True when Transfer-Encoding is present and a 400 was sent.
+    def _content_length_values(self) -> list[str] | None:
+        values = self.headers.get_all("Content-Length")
+        if not values:
+            return None
+        return [str(value).strip() for value in values]
 
+    def _content_length_invalid(self) -> bool:
+        """Duplicate, negative, or non-integer Content-Length values.
+
+        ``+2``, ``-1``, ``abc``, ``1e3``, and ``5, 5`` are invalid. A single
+        non-negative integer is not.
+        """
+        values = self._content_length_values()
+        if values is None:
+            return False
+        if len(values) != 1:
+            return True
+        return re.fullmatch(r"\d+", values[0]) is None
+
+    def _framing_requires_close(self) -> bool:
+        """True when unread bytes must not be parsed as another request."""
+        if "Transfer-Encoding" in self.headers:
+            return True
+        if self._content_length_invalid():
+            return True
+        values = self._content_length_values()
+        if not values:
+            return False
+        return int(values[0]) > 0
+
+    def _reject_transfer_encoding(self) -> bool:
+        """True when any Transfer-Encoding header was present and a 400 was sent.
+
+        An empty value still counts. Truthiness would ignore ``Transfer-Encoding:``.
         The connection is closed so leftover bytes are not a second request.
         """
-        if not self.headers.get("Transfer-Encoding"):
+        if "Transfer-Encoding" not in self.headers:
             return False
         self.close_connection = True
-        if unread_body:
-            self.close_connection = True
         self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
         return True
 
@@ -666,14 +807,22 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding(unread_body=True):
+        if self._reject_transfer_encoding():
             return
         path = urlparse(self.path).path
         if self.lan_bound and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
             return
         self.close_connection = True
-        self._send_json(405, {"error": "Method not allowed."})
+        self.send_response(405)
+        self.send_header("Content-Type", "application/json")
+        body = json.dumps({"error": "Method not allowed."}).encode()
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Allow", "GET, HEAD, POST")
+        self.end_headers()
+        self._write_all(body)
 
     def do_OPTIONS(self):
         self._unsupported_method()
@@ -740,7 +889,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=False)
             return
-        if self._reject_transfer_encoding(unread_body=False):
+        if self._reject_transfer_encoding():
             return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -829,7 +978,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding(unread_body=True):
+        if self._reject_transfer_encoding():
             return
         if not parsed.path.startswith("/api/"):
             self.close_connection = True  # body left unread
@@ -1074,6 +1223,8 @@ def make_server(
     max_connections_per_ip: int = MAX_CONNECTIONS_PER_IP,
     request_timeout: float = REQUEST_TIMEOUT_SECONDS,
     header_timeout: float = HEADER_DEADLINE_SECONDS,
+    write_timeout: float = REQUEST_TIMEOUT_SECONDS,
+    write_deadline: float = WRITE_DEADLINE_SECONDS,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -1103,6 +1254,10 @@ def make_server(
         raise ValueError("request timeout must be a positive number of seconds.")
     if isinstance(header_timeout, bool) or not isinstance(header_timeout, (int, float)) or header_timeout <= 0:
         raise ValueError("header deadline must be a positive number of seconds.")
+    if isinstance(write_timeout, bool) or not isinstance(write_timeout, (int, float)) or write_timeout <= 0:
+        raise ValueError("write timeout must be a positive number of seconds.")
+    if isinstance(write_deadline, bool) or not isinstance(write_deadline, (int, float)) or write_deadline <= 0:
+        raise ValueError("write deadline must be a positive number of seconds.")
 
     socket_host = host if listen_host is None else listen_host
     # Reject a bad --allow-host before opening a socket.
@@ -1132,6 +1287,8 @@ def make_server(
             "lan_bound": bool(lan_bound),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
+            "write_timeout": float(write_timeout),
+            "write_deadline": float(write_deadline),
         },
     )
     family = socket.AF_INET6 if _is_ipv6_literal(socket_host) else socket.AF_INET
