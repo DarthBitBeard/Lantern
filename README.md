@@ -144,13 +144,23 @@ These fields appear in the CLI, in `report`, and in `diff`. The dashboard does n
 
 `lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
 
-Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields to a caller that has the token. The diff uses the same device shape as `/api/v1/devices`.
+Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields when the caller has the token. The diff uses the same device shape as `/api/v1/devices`.
+
+```bash
+TOKEN=the-token-from-the-page-or-startup-link
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/status
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/devices
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/diffs
+curl -s -H "X-Lantern-Token: $TOKEN" "http://127.0.0.1:8068/api/v1/export?what=devices&format=csv"
+```
+
+With `--no-strict-auth`, `/api/v1` still requires a token, and that token is only the one embedded in the page for that process. Loopback without strict auth does not load `LANTERN_API_TOKEN_FILE`, so a token from that file gets 403. Strict auth and `--allow-lan` do use the file.
 
 CSV quotes every cell and prefixes a cell with `'` when it could be a spreadsheet formula (`=`, `+`, `-`, `@`, tab, a line break, `|`, the full-width forms of those signs, or a `cmd|` / `DDE(` payload), including when Unicode spaces or format characters sit in front of the trigger. Spreadsheet behaviour varies; the prefix is a best-effort mitigation, not a promise about how Excel, LibreOffice, or Google Sheets will display the cell. The file is UTF-8 with no byte-order mark.
 
 An `--output` file is created mode 0600. The directory must already exist. Lantern refuses a missing directory, a symlinked directory, a symlink at the final path (including with `--force`), and a hard link when replacing a file. A path that already exists needs `--force`. The API never writes a file; `/api/v1/export` is a download.
 
-`/api/v1` is read-only. Every route, including on loopback with strict auth turned off, requires `X-Lantern-Token`. A bad token is 403, not 401. `GET /api/v1/status` reports `api_version` 1 and `role` `admin`. Other `/api/v1` JSON bodies also carry `api_version`. There are no CORS headers. Paths such as `/api/v1x` are not part of this API. A response that would exceed 100000 rows or 32 MiB is refused before it is sent, and a second export while one is running is 429.
+`/api/v1` is read-only. Every route, including on loopback with strict auth turned off, requires `X-Lantern-Token`. A bad token is 403, not 401. `GET /api/v1/status` reports `api_version` 1 and `role` `admin`. Other `/api/v1` JSON bodies also carry `api_version`. There are no CORS headers. Paths such as `/api/v1x` are not part of this API. A response is limited to 100000 rows. CSV is written a row at a time and JSON a chunk at a time; crossing 32 MiB discards those bytes and nothing partial is sent. The rows for one response are still held in memory up to the row cap. A second export while one is running is 429. Numeric parameters are 1 to 9 digits.
 
 ## Safety rules, enforced in code
 
