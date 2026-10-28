@@ -40,8 +40,21 @@ class Scope:
     description: str | None = None
 
 
-def _scope_too_large(path: Path) -> ValueError:
-    return ValueError(
+class ScopeConfigError(ValueError):
+    """The scope file could not be read, or it breaks the scope rules.
+
+    A typed name that fails the name check, or a name missing from a file
+    that did load, is a different error. Callers that only read stored scans
+    can catch this type instead of matching error text.
+    """
+
+
+class UnknownScopeError(ValueError):
+    """The name is not in a scope file that loaded."""
+
+
+def _scope_too_large(path: Path) -> ScopeConfigError:
+    return ScopeConfigError(
         f"Scope config {path} is too large. "
         "Lantern refuses scope files larger than 64 KiB."
     )
@@ -57,22 +70,22 @@ def _read_scope_text(path: Path) -> str:
     try:
         info = path.stat()
     except OSError as exc:
-        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
     if not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"Cannot read scope config {path}: not a regular file.")
+        raise ScopeConfigError(f"Cannot read scope config {path}: not a regular file.")
     if info.st_size > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         with path.open("rb") as handle:
             blob = handle.read(MAX_SCOPE_CONFIG_BYTES + 1)
     except OSError as exc:
-        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
     if len(blob) > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         return blob.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValueError(f"Scope config {path} is not UTF-8.") from exc
+        raise ScopeConfigError(f"Scope config {path} is not UTF-8.") from exc
 
 
 def load_scopes(path: str | Path) -> dict[str, Scope]:
@@ -88,33 +101,33 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Invalid TOML in {path}: {exc}") from exc
+        raise ScopeConfigError(f"Invalid TOML in {path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{path} is not a TOML table.")
+        raise ScopeConfigError(f"{path} is not a TOML table.")
 
     extra_root = sorted(set(data) - {"scopes"})
     if extra_root:
         listed = ", ".join(extra_root)
-        raise ValueError(
+        raise ScopeConfigError(
             f"Unsupported setting(s) in {path}: {listed}. "
             "The file may only contain [scopes.<name>] tables."
         )
     if "scopes" not in data:
-        raise ValueError(f"{path} has no [scopes] table.")
+        raise ScopeConfigError(f"{path} has no [scopes] table.")
     raw_scopes = data["scopes"]
     if not isinstance(raw_scopes, dict):
-        raise ValueError(
+        raise ScopeConfigError(
             f"{path}: 'scopes' must be a table of named scopes, like [scopes.home]."
         )
     if not raw_scopes:
-        raise ValueError(f"{path} does not define any scopes.")
+        raise ScopeConfigError(f"{path} does not define any scopes.")
 
     scopes: dict[str, Scope] = {}
     folded: dict[str, str] = {}
     for name, body in raw_scopes.items():
         key = name.casefold() if isinstance(name, str) else name
         if key in folded:
-            raise ValueError(
+            raise ScopeConfigError(
                 f"Scope name {name!r} repeats {folded[key]!r} except for case."
             )
         folded[key] = name
@@ -150,43 +163,43 @@ def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
         if len(matches) == 1:
             return matches[0]
         choices = ", ".join(scopes)
-        raise ValueError(f"Unknown scope {name!r}. Choices: {choices}")
+        raise UnknownScopeError(f"Unknown scope {name!r}. Choices: {choices}")
     return scopes[name]
 
 
 def _parse_scope(name: str, body: object) -> Scope:
     if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
-        raise ValueError(
+        raise ScopeConfigError(
             f"Scope name {name!r} is not allowed. "
             "Use 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit."
         )
     if not isinstance(body, dict):
-        raise ValueError(f"Scope {name!r} must be a table with a 'subnet' string.")
+        raise ScopeConfigError(f"Scope {name!r} must be a table with a 'subnet' string.")
     extra = sorted(set(body) - _SCOPE_KEYS)
     if extra:
         listed = ", ".join(extra)
-        raise ValueError(
+        raise ScopeConfigError(
             f"Scope {name!r} has unsupported setting(s): {listed}. "
             "Only 'subnet' and 'description' are allowed."
         )
     if "subnet" not in body:
-        raise ValueError(f"Scope {name!r} is missing 'subnet'.")
+        raise ScopeConfigError(f"Scope {name!r} is missing 'subnet'.")
     subnet = body["subnet"]
     if not isinstance(subnet, str):
-        raise ValueError(f"Scope {name!r}: 'subnet' must be a string like 192.168.1.0/24.")
+        raise ScopeConfigError(f"Scope {name!r}: 'subnet' must be a string like 192.168.1.0/24.")
     try:
         network = validate_subnet(subnet)
     except ValueError as exc:
-        raise ValueError(f"Scope {name!r}: {exc}") from exc
+        raise ScopeConfigError(f"Scope {name!r}: {exc}") from exc
 
     description = None
     if "description" in body:
         raw = body["description"]
         if not isinstance(raw, str):
-            raise ValueError(f"Scope {name!r}: 'description' must be a string.")
+            raise ScopeConfigError(f"Scope {name!r}: 'description' must be a string.")
         description = raw.strip()
         if len(description) > _MAX_DESCRIPTION:
-            raise ValueError(
+            raise ScopeConfigError(
                 f"Scope {name!r}: 'description' is longer than {_MAX_DESCRIPTION} characters."
             )
         description = description or None

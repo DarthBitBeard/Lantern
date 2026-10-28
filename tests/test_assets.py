@@ -2,13 +2,18 @@
 
 import json
 import os
+import sqlite3
 import stat
 import tempfile
+import threading
+import time
 import unicodedata
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lantern import assets, cli
+from lantern.scopes import MAX_SCOPE_CONFIG_BYTES
 from lantern.store import connect, save_scan
 
 
@@ -424,3 +429,221 @@ class AssetCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 2, err)
         self.assertIn("more than one stored scope", err)
+
+    def _lab_asset(self):
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.51.0/24",
+                [_device("192.168.51.10", "aa:bb:cc:dd:ee:21")],
+                scope_name="Lab-2",
+            )
+        finally:
+            conn.close()
+        code, _, err = self.run_cli("asset", "set", "aa:bb:cc:dd:ee:21", "--owner", "Ada")
+        self.assertEqual(code, 0, err)
+
+    def _assert_lab_listed(self, config: Path):
+        code, out, err = self.run_cli(
+            "asset", "list", "--scope", "lab-2", "--config", str(config), "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual([item["owner"] for item in json.loads(out)["assets"]], ["Ada"])
+
+    def test_asset_list_falls_back_when_the_scope_file_cannot_load(self):
+        self._lab_asset()
+        bad = [
+            ("broken.toml", "this is not [toml\n".encode()),
+            ("binary.toml", b"\xff\xfe not utf-8"),
+            ("huge.toml", b"x" * (MAX_SCOPE_CONFIG_BYTES + 1)),
+        ]
+        for name, blob in bad:
+            path = Path(self.tmp.name) / name
+            path.write_bytes(blob)
+            self._assert_lab_listed(path)
+        blocked = Path(self.tmp.name) / "blocked.toml"
+        blocked.write_text('[scopes.home]\nsubnet = "192.168.50.0/24"\n', encoding="utf-8")
+        if os.name == "nt":
+            self._assert_lab_listed(Path(self.tmp.name))
+        else:
+            os.chmod(blocked, 0)
+            try:
+                self._assert_lab_listed(blocked)
+            finally:
+                os.chmod(blocked, 0o600)
+
+    def test_asset_list_falls_back_when_the_scope_file_breaks_the_rules(self):
+        self._lab_asset()
+        texts = [
+            'bogus = 1\n[scopes.Lab-2]\nsubnet = "192.168.51.0/24"\n',
+            '[scopes.Lab-2]\nsubnet = "8.8.8.0/24"\n',
+            '[scopes.Lab-2]\nsubnet = "192.168.51.0/24"\n'
+            '[scopes.lab-2]\nsubnet = "192.168.52.0/24"\n',
+            'scopes = "not-a-table"\n',
+            '[scopes."bad name"]\nsubnet = "192.168.51.0/24"\n',
+            "",
+        ]
+        for index, text in enumerate(texts):
+            path = Path(self.tmp.name) / f"rules-{index}.toml"
+            path.write_text(text, encoding="utf-8")
+            self._assert_lab_listed(path)
+        bogus = Path(self.tmp.name) / "bogus.toml"
+        bogus.write_text(texts[0], encoding="utf-8")
+        code, out, err = self.run_cli(
+            "history", "--scope", "Lab-2", "--config", str(bogus), "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("Lab-2", [row["scope_name"] for row in json.loads(out)["scans"]])
+        code, _, err = self.run_cli(
+            "asset", "list", "--scope", "bad name", "--config", str(bogus),
+        )
+        self.assertEqual(code, 2, err)
+        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+            code, _, err = self.run_cli("scan", "--config", str(bogus), "--scope", "Lab-2")
+        self.assertEqual(code, 2, err)
+        self.assertIn("bogus", err)
+        scan_hosts.assert_not_called()
+        run_scan.assert_not_called()
+
+    def test_refused_insert_releases_the_write_lock(self):
+        with mock.patch.object(assets, "ASSET_ROW_CAP", 1):
+            holder = connect(self.db)
+            try:
+                assets.set_asset(holder, "mac:aa:bb:cc:dd:ee:01", "mac", owner="One")
+                with self.assertRaises(ValueError):
+                    assets.set_asset(holder, "mac:aa:bb:cc:dd:ee:02", "mac", owner="Two")
+                other = sqlite3.connect(self.db, timeout=0.5)
+                try:
+                    other.execute("BEGIN IMMEDIATE")
+                    other.execute(
+                        "UPDATE assets SET owner = ? WHERE asset_key = ?",
+                        ("Updated", "mac:aa:bb:cc:dd:ee:01"),
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+            finally:
+                holder.close()
+        conn = connect(self.db)
+        try:
+            self.assertEqual(
+                assets.get_asset(conn, "mac:aa:bb:cc:dd:ee:01")["owner"],
+                "Updated",
+            )
+        finally:
+            conn.close()
+
+    def test_diff_prints_a_dash_when_the_scope_name_strips_away(self):
+        planted = "\x1b\u202e\x07\u200b"
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.51.0/24",
+                [_device("192.168.51.10", "aa:bb:cc:dd:ee:21")],
+                scope_name=planted,
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("diff")
+        self.assertEqual(code, 0, err)
+        self.assertIn("scope -", out)
+        for char in planted:
+            self.assertNotIn(char, out)
+            self.assertNotIn(char, err)
+
+    def test_two_connections_cannot_both_pass_the_cap(self):
+        holder = connect(self.db)
+        try:
+            holder.execute(
+                "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+                " VALUES ('mac:aa:bb:cc:dd:ee:01', 'mac', 'One', NULL, '[]', NULL, NULL, 't')"
+            )
+            holder.commit()
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute(
+                "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+                " VALUES ('mac:aa:bb:cc:dd:ee:02', 'mac', 'Two', NULL, '[]', NULL, NULL, 't')"
+            )
+            errors = []
+
+            def second():
+                other = connect(self.db)
+                try:
+                    assets.set_asset(other, "mac:aa:bb:cc:dd:ee:03", "mac", owner="Three")
+                except ValueError as exc:
+                    errors.append(str(exc))
+                finally:
+                    other.close()
+
+            with mock.patch.object(assets, "ASSET_ROW_CAP", 2):
+                worker = threading.Thread(target=second)
+                worker.start()
+                time.sleep(0.4)
+                self.assertTrue(worker.is_alive())
+                holder.commit()
+                worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [
+                "Lantern stores at most 2 inventory records. Clear one before adding another."
+            ])
+            count = holder.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            self.assertEqual(count, 2)
+        finally:
+            holder.close()
+
+    def test_diff_json_and_scope_text_strip_planted_controls(self):
+        planted = "lab\x1b\u202e2"
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device("192.168.50.10", "aa:bb:cc:dd:ee:30")],
+                scope_name="home",
+            )
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [
+                    _device("192.168.50.10", "aa:bb:cc:dd:ee:30"),
+                    _device("192.168.50.12", "aa:bb:cc:dd:ee:31"),
+                ],
+                scope_name="home",
+            )
+            conn.execute(
+                "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+                " VALUES ('mac:aa:bb:cc:dd:ee:31', 'mac', ?, NULL, '[]', NULL, NULL, 't')",
+                ("Ada\x1b\u202eBee",),
+            )
+            save_scan(
+                conn,
+                "192.168.51.0/24",
+                [_device("192.168.51.10", "aa:bb:cc:dd:ee:40")],
+                scope_name=planted,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("diff", "--scope", "home", "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        self.assertIn("AdaBee", out)
+        code, out, err = self.run_cli("history")
+        self.assertEqual(code, 0, err)
+        self.assertIn("lab2", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        code, out, err = self.run_cli("diff")
+        self.assertEqual(code, 0, err)
+        self.assertIn("lab2", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)
+        code, out, err = self.run_cli("report", "--format", "html")
+        self.assertEqual(code, 0, err)
+        self.assertIn("lab2", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\u202e", out)

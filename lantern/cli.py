@@ -28,9 +28,16 @@ from .discovery import (
     validate_subnet,
 )
 from .ports import DEFAULT_PORTS, findings_for_ports
-from .report import describe_change, multi_scope_html, to_html, to_json
+from .report import describe_change, diff_to_json, multi_scope_html, to_html, to_json
 from .scanner import scan_host
-from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope, validate_scope_name
+from .scopes import (
+    DEFAULT_CONFIG_NAME,
+    ScopeConfigError,
+    UnknownScopeError,
+    load_scopes,
+    select_scope,
+    validate_scope_name,
+)
 from .store import connect, list_scans, load_scan_with_diff, save_scan, write_private_file
 
 DEFAULT_DB = Path("data/lantern.db")
@@ -773,9 +780,8 @@ def _asset_list_scope(args, conn) -> str | None:
     if explicit or path.is_file():
         try:
             return select_scope(load_scopes(path), name).name
-        except ValueError as exc:
-            if "Unknown scope" not in str(exc):
-                raise
+        except (ScopeConfigError, UnknownScopeError):
+            return _stored_scope_name(conn, name)
     return _stored_scope_name(conn, name)
 
 
@@ -1191,12 +1197,13 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         if scan is None or diff is None:
             label = scope_name or (scan.get("scope_name") if scan else None)
             if label:
-                print(f"Need at least two saved scans for scope {label}.")
+                shown = assetlib.strip_for_text(label) or "-"
+                print(f"Need at least two saved scans for scope {shown}.")
             else:
                 print("Need at least two saved scans. Run `lantern demo` or `lantern scan` twice.")
             return 0
         if args.format == "json":
-            print(json.dumps(diff, indent=2))
+            print(diff_to_json(diff))
         else:
             _print_text_diff(diff)
         return 0
@@ -1235,12 +1242,15 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             else:
                 print("No scans yet. Run `lantern demo` or `lantern scan` first.")
             return 0
-        scope_width = max(16, *(len(scan.get("scope_name") or "-") for scan in scans))
+        shown_scopes = [
+            assetlib.strip_for_text(scan.get("scope_name") or "") or "-" for scan in scans
+        ]
+        scope_width = max(16, *(len(name) for name in shown_scopes))
         print(f"{'id':>4}  {'started (UTC)':<26} {'subnet':<18} {'scope':<{scope_width}} {'devices':>7}  demo")
-        for scan in scans:
+        for scan, scope_label in zip(scans, shown_scopes):
             print(
                 f"{scan['id']:>4}  {scan['started_at'][:26]:<26} {scan['subnet']:<18} "
-                f"{(scan.get('scope_name') or '-'):<{scope_width}} "
+                f"{scope_label:<{scope_width}} "
                 f"{scan['device_count']:>7}  {'yes' if scan['demo'] else ''}"
             )
         return 0
