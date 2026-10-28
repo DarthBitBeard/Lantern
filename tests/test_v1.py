@@ -757,6 +757,37 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(document["items"][0]["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["service"], "telnet")
 
+    def test_seen_bounds_follow_a_normalized_mac(self):
+        conn = connect(self.db)
+        try:
+            first = save_scan(
+                conn, "192.168.50.0/24",
+                [_device("192.168.50.10", " AA:BB:CC:DD:EE:10 ")],
+            )
+            second = save_scan(
+                conn, "192.168.50.0/24",
+                [_device("192.168.50.11", "aa:bb:cc:dd:ee:10")],
+            )
+            conn.execute(
+                "UPDATE scans SET started_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", first),
+            )
+            conn.execute(
+                "UPDATE scans SET started_at = ? WHERE id = ?",
+                ("2024-01-01T00:00:00+00:00", second),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        code, out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "json", "--scan-id", str(second),
+        )
+        self.assertEqual(code, 0, err)
+        item = json.loads(out)["items"][0]
+        self.assertEqual(item["key"], "aa:bb:cc:dd:ee:10")
+        self.assertEqual(item["first_seen"], "2020-01-01T00:00:00Z")
+        self.assertEqual(item["last_seen"], "2024-01-01T00:00:00Z")
+
     def test_device_json_export_matches_json_dumps(self):
         conn = connect(self.db)
         try:

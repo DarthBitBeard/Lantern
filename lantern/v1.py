@@ -311,27 +311,20 @@ def _seen_bounds(conn) -> dict[tuple[str, str], tuple[str, str]]:
     rows = conn.execute(
         """
         SELECT
-            CASE
-                WHEN d.mac IS NOT NULL AND d.mac != ''
-                THEN lower(replace(d.mac, '-', ':'))
-                ELSE NULL
-            END,
+            lower(replace(trim(IFNULL(d.mac, '')), '-', ':')),
             d.ip,
             MIN(s.started_at),
             MAX(s.started_at)
         FROM devices d
         JOIN scans s ON s.id = d.scan_id
-        GROUP BY 1, CASE WHEN d.mac IS NOT NULL AND d.mac != '' THEN '' ELSE d.ip END
+        GROUP BY 1, d.ip
         """
     )
-    for mac_key, ip, first, last in rows:
-        if mac_key:
-            key = (mac_key, "mac")
-        else:
-            try:
-                key = (str(ipaddress.ip_address(str(ip).strip())), "ip")
-            except ValueError:
-                continue
+    for mac_text, ip, first, last in rows:
+        try:
+            key = _device_identity({"ip": ip, "mac": mac_text or None})
+        except ValueError:
+            continue
         previous = found.get(key)
         if previous is None:
             found[key] = (first, last)
