@@ -130,6 +130,31 @@ class LoadScopesTests(unittest.TestCase):
             select_scope(scopes, "office")
         self.assertIn("Unknown scope", str(ctx.exception))
 
+    def test_rejects_scope_config_larger_than_64_kib(self):
+        marker = "NOT-A-PARSE-ERROR-MARKER"
+        prefix = '[scopes.home]\nsubnet = "10.0.0.0/24"\n# '
+        exact = prefix.encode() + b"x" * (64 * 1024 - len(prefix.encode()))
+        self.assertEqual(len(exact), 64 * 1024)
+        self.path.write_bytes(exact)
+        scope = load_scopes(self.path)["home"]
+        self.assertEqual(scope.subnet, "10.0.0.0/24")
+
+        oversized = f'{prefix}{marker}\n'.encode() + b"y" * (64 * 1024)
+        self.assertGreater(len(oversized), 64 * 1024)
+        self.path.write_bytes(oversized)
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        message = str(ctx.exception)
+        self.assertIn("too large", message)
+        self.assertIn("64 KiB", message)
+        self.assertNotIn(marker, message)
+        self.assertNotIn("10.0.0.0/24", message)
+        self.assertNotIn("Invalid TOML", message)
+
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.tmp.name)
+        self.assertIn("not a regular file", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

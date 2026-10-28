@@ -37,3 +37,9 @@ If a POST includes an `Origin` header, that origin must be `http` or `https` and
 ## Supported versions
 
 Only the latest release on the default branch receives security fixes. Older snapshots are provided as-is for review.
+
+## Local inventory files
+
+Scan results stay in one SQLite file on the machine running Lantern. On macOS and Linux, Lantern creates that file, its migration backup, and the demo HTML report mode 0600, and creates a new data directory mode 0700. A directory that already exists keeps the mode you set. If an existing database or backup is readable by other local accounts, Lantern warns on stderr and leaves the file unchanged. A database path that is a symlink is refused. For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
+
+On Windows, Lantern relies on the user profile ACL. Unix permission bits are not applied. Keep the database in your profile.

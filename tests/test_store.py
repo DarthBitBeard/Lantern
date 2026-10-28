@@ -1,9 +1,14 @@
-"""SQLite history, trust, diff, and schema upgrades. No network."""
+"""SQLite history, trust, diff, schema upgrades, and file modes. No network."""
 
+import contextlib
+import io
+import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lantern import demo
 from lantern.store import (
@@ -21,6 +26,8 @@ from lantern.store import (
     save_scan,
     schema_version,
     set_trusted,
+    warn_loose_permissions,
+    write_private_file,
 )
 
 # DDL from Lantern 0.3.0 `connect()`, before `schema_version` existed.
@@ -171,6 +178,10 @@ def _write_v030(path: Path) -> None:
     )
     raw.commit()
     raw.close()
+    # Migration tests are about rows, not modes. A world-readable file would
+    # warn on stderr; that case has its own test. 0600 matches a private file.
+    if os.name != "nt":
+        os.chmod(path, 0o600)
 
 
 class MigrationTests(unittest.TestCase):
@@ -194,6 +205,8 @@ class MigrationTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(list(Path(self.tmp.name).glob("*.bak")), [])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
     def test_v030_database_upgrades_without_losing_rows(self):
         _write_v030(self.path)
@@ -224,6 +237,8 @@ class MigrationTests(unittest.TestCase):
 
         backups = list(Path(self.tmp.name).glob("*.bak"))
         self.assertEqual([p.name for p in backups], ["lantern.db.v0.bak"])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
         saved = sqlite3.connect(backups[0])
         try:
             self.assertIsNone(saved.execute(
@@ -344,6 +359,209 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(schema_version(raw), 2)
         finally:
             raw.close()
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+class PrivateFileTests(unittest.TestCase):
+    """Database, backup, and export files stay private. No network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _umask(self, mask: int) -> None:
+        previous = os.umask(mask)
+        self.addCleanup(os.umask, previous)
+
+    def test_umask_022_new_database_backup_and_directory_are_private(self):
+        """sqlite3.connect alone leaves mode 0644 under umask 022.
+
+        Lantern has to create the database and the `.vN.bak` backup at 0600,
+        and a directory it creates at 0700, or this test fails.
+        """
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
+        self._umask(0o022)
+        nested = Path(self.tmp.name) / "a" / "b" / "lantern.db"
+        fresh = connect(nested)
+        fresh.close()
+
+        legacy_dir = Path(self.tmp.name) / "legacy"
+        legacy_dir.mkdir()
+        legacy = legacy_dir / "lantern.db"
+        _write_v030(legacy)
+        loose_backup = Path(str(legacy) + ".v9.bak")
+        loose_backup.write_bytes(b"previous-backup")
+        if os.name != "nt":
+            os.chmod(legacy_dir, 0o755)
+            os.chmod(legacy, 0o644)
+            os.chmod(loose_backup, 0o644)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            upgraded = connect(legacy)
+            upgraded.close()
+
+        check = sqlite3.connect(nested)
+        try:
+            self.assertEqual(schema_version(check), SCHEMA_VERSION)
+        finally:
+            check.close()
+
+        self.assertEqual(_mode(nested), 0o600)
+        self.assertEqual(_mode(nested.parent), 0o700)
+        self.assertEqual(_mode(nested.parent.parent), 0o700)
+        self.assertEqual(_mode(legacy_dir), 0o755)
+        self.assertEqual(_mode(legacy), 0o644)
+        created_backup = Path(str(legacy) + ".v0.bak")
+        self.assertEqual(_mode(created_backup), 0o600)
+        self.assertEqual(_mode(loose_backup), 0o644)
+        warning = buf.getvalue()
+        self.assertIn("readable by group or others", warning)
+        self.assertIn("0644", warning)
+        self.assertIn(legacy.name, warning)
+        self.assertIn(loose_backup.name, warning)
+        self.assertNotIn(str(nested), warning)
+
+    def test_permissive_umask_cannot_widen_new_files(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
+        self._umask(0o000)
+        root = Path(self.tmp.name) / "wide"
+        db_path = root / "lantern.db"
+        conn = connect(db_path)
+        conn.close()
+        export = root / "nested" / "inventory.json"
+        write_private_file(export, '{"devices": []}')
+        self.assertEqual(export.read_text(encoding="utf-8"), '{"devices": []}')
+        self.assertEqual(_mode(db_path), 0o600)
+        self.assertEqual(_mode(root), 0o700)
+        self.assertEqual(_mode(export.parent), 0o700)
+        self.assertEqual(_mode(export), 0o600)
+        self.assertEqual(_mode(db_path) & 0o077, 0)
+        self.assertEqual(_mode(root) & 0o077, 0)
+        self.assertEqual(_mode(export) & 0o077, 0)
+
+    def test_existing_directory_and_database_are_not_chmodded(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
+        self._umask(0o022)
+        parent = Path(self.tmp.name) / "already"
+        parent.mkdir()
+        db_path = parent / "lantern.db"
+        db_path.write_bytes(b"")
+        if os.name != "nt":
+            os.chmod(parent, 0o755)
+            os.chmod(db_path, 0o640)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(db_path)
+            try:
+                self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            finally:
+                conn.close()
+            write_private_file(parent / "export.json", b"{}")
+        self.assertEqual((parent / "export.json").read_bytes(), b"{}")
+        self.assertEqual(_mode(parent), 0o755)
+        self.assertEqual(_mode(db_path), 0o640)
+        self.assertEqual(_mode(parent / "export.json"), 0o600)
+        self.assertIn("0640", buf.getvalue())
+        self.assertIn(db_path.name, buf.getvalue())
+
+    def test_private_file_does_not_warn_and_loose_modes_do(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
+        self._umask(0o022)
+        private = Path(self.tmp.name) / "private.db"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(private)
+            conn.close()
+            again = connect(private)
+            again.close()
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(_mode(private), 0o600)
+
+        for mode in (0o640, 0o604, 0o644):
+            path = Path(self.tmp.name) / f"loose-{mode:04o}.db"
+            path.write_bytes(b"")
+            os.chmod(path, mode)
+            warned = io.StringIO()
+            with contextlib.redirect_stderr(warned):
+                warn_loose_permissions(path)
+                warn_loose_permissions(path)
+            text = warned.getvalue()
+            self.assertEqual(text.count("readable by group or others"), 1)
+            self.assertIn(f"{mode:04o}", text)
+            self.assertEqual(_mode(path), mode)
+
+    def test_symlink_database_is_refused(self):
+        """A dangling symlink used to be created at the target as mode 0644."""
+        if os.name == "nt":
+            self.skipTest("POSIX symlink refusal is not checked on Windows")
+        self._umask(0o022)
+        dangling_target = Path(self.tmp.name) / "outside.db"
+        dangling = Path(self.tmp.name) / "lantern.db"
+        dangling.symlink_to(dangling_target)
+        with self.assertRaises(ValueError) as ctx:
+            connect(dangling)
+        message = str(ctx.exception)
+        self.assertIn("symlink", message)
+        self.assertIn("will not follow", message)
+        self.assertNotIn(dangling_target.name, message)
+        self.assertFalse(dangling_target.exists())
+        self.assertTrue(dangling.is_symlink())
+
+        real = Path(self.tmp.name) / "real.db"
+        real.write_bytes(b"leave-me")
+        os.chmod(real, 0o644)
+        linked = Path(self.tmp.name) / "linked.db"
+        linked.symlink_to(real)
+        with self.assertRaises(ValueError) as ctx:
+            connect(linked)
+        self.assertIn("symlink", str(ctx.exception))
+        self.assertNotIn(real.name, str(ctx.exception))
+        self.assertEqual(real.read_bytes(), b"leave-me")
+        self.assertEqual(_mode(real), 0o644)
+
+    def test_warn_loose_permissions_does_not_raise(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            warn_loose_permissions(Path(self.tmp.name) / "missing.db")
+            warn_loose_permissions(Path(self.tmp.name))
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_warn_loose_permissions_skips_windows_modes(self):
+        path = Path(self.tmp.name) / "win.db"
+        path.write_bytes(b"inventory")
+        if os.name != "nt":
+            os.chmod(path, 0o644)
+        buf = io.StringIO()
+        with mock.patch("lantern.store.os.name", "nt"), contextlib.redirect_stderr(buf):
+            warn_loose_permissions(path)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(path.read_bytes(), b"inventory")
+
+    def test_write_private_file_replaces_without_leaving_a_temp_file(self):
+        self._umask(0o000)
+        dest = Path(self.tmp.name) / "out.json"
+        write_private_file(dest, "one")
+        write_private_file(dest, "héllo".encode("utf-8"))
+        self.assertEqual(dest.read_bytes(), "héllo".encode("utf-8"))
+        if os.name != "nt":
+            self.assertEqual(_mode(dest), 0o600)
+        blocked = Path(self.tmp.name) / "blocked"
+        blocked.mkdir()
+        before = {path.name for path in Path(self.tmp.name).iterdir()}
+        with self.assertRaises(OSError):
+            write_private_file(blocked, "nope")
+        after = {path.name for path in Path(self.tmp.name).iterdir()}
+        self.assertEqual(before, after)
+        with self.assertRaises(TypeError):
+            write_private_file(dest, object())
 
 
 if __name__ == "__main__":

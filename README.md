@@ -59,6 +59,10 @@ Default database file: `data/lantern.db` (created automatically; gitignored).
 
 Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then stamps schema version 1. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
 
+On macOS and Linux, a new database file, that migration backup, and the HTML file from `lantern demo` are created mode `0600` (readable and writable only by your user). This holds under the usual umask `022` and under a permissive umask. If the directory for a new database does not exist yet, Lantern creates it mode `0700`. A directory that already exists stays at the mode you set. If a database or backup already on disk is readable by the group or by other users, Lantern prints a warning to stderr and leaves that file unchanged. A database path that is a symlink is refused.
+
+On Windows, Lantern does not set or check these Unix permission bits. Who can read the file is the access control list on your user profile. Keep the database in your profile, not in a folder shared with other accounts.
+
 **Debug tips**
 
 - Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --debug --db data/lantern.db`.
@@ -92,7 +96,7 @@ python3 -m lantern scopes --config lantern.toml
 python3 -m lantern scan --config lantern.toml --scope home
 ```
 
-Each scope is one private subnet (`subnet`) plus an optional `description`. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. If it defines several, `--scope` is required. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config` or `--scope` is an error. The dashboard does not read `lantern.toml`; its subnet field is unchanged.
+Each scope is one private subnet (`subnet`) plus an optional `description`. A scope file larger than 64 KiB is refused before it is parsed. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. If it defines several, `--scope` is required. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config` or `--scope` is an error. The dashboard does not read `lantern.toml`; its subnet field is unchanged.
 
 A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then TCP-connects to the 25 risk ports on each live host, 8 hosts at a time. Expect roughly 10 to 30 seconds for a /24. Hosts that block ping and are not in the ARP cache are missed; run the scan twice if your router has just rebooted.
 
@@ -104,9 +108,10 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 
 - Private RFC1918 subnets only. Public, loopback, and link-local addresses are refused.
 - At most 1024 addresses per scan (a /22), normally a /24.
-- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected.
+- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused.
 - No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
 - Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
+- The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set. For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
 
 Only scan networks you own or have explicit permission to scan. See [SECURITY.md](SECURITY.md).
 
@@ -184,7 +189,7 @@ CI (`.github/workflows/docker.yml`) builds the image and runs every container wi
 python3 tests/run_tests.py
 ```
 
-This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guardrails, subnet and ARP parsing, TCP probes against a local listener, SQLite history and diff, the CLI, and the web API (routes, validation, request hygiene, Host allowlist, API token, static path safety) against temporary databases. It ends with a CLI demo smoke test in a fresh process. Nothing touches a real network. The web tests use a localhost listener and fake data only.
+This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guardrails, subnet and ARP parsing, TCP probes against a local listener, SQLite history and diff, database file permissions, scope files, the CLI, and the web API (routes, validation, request hygiene, Host allowlist, API token, static path safety) against temporary databases. It ends with a CLI demo smoke test in a fresh process. Nothing touches a real network. The web tests use a localhost listener and fake data only. On Windows the permission tests skip Unix mode bits.
 
 GitHub Actions runs that same suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13. A second job builds an sdist and a wheel, installs the wheel in a clean directory (so it is not importing the checkout), and runs `lantern demo`. The demo uses fake data; CI does not scan a network.
 
