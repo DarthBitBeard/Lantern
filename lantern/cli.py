@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
 from . import __version__, demo
 from .discovery import arp_table, guess_subnet, ping_host, reverse_hostname, validate_subnet
@@ -133,6 +134,19 @@ def build_parser() -> argparse.ArgumentParser:
             ":: also needs --allow-host with the LAN address clients will use."
         ),
     )
+    web_p.add_argument(
+        "--strict-auth",
+        action="store_true",
+        help=(
+            "Do not embed the API token in the page, and require it on every "
+            "/api route, including GET. Also enabled by LANTERN_STRICT_AUTH=1. "
+            "On a terminal, a generated token is printed once as a link. "
+            "The token is valid until Lantern restarts. The #token fragment "
+            "is not sent to the server. Without a terminal, set "
+            "LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN. "
+            "The default dashboard does not use this flag."
+        ),
+    )
     return parser
 
 
@@ -143,15 +157,18 @@ def _err(message: str) -> int:
 
 TOKEN_FILE_ENV = "LANTERN_API_TOKEN_FILE"
 TOKEN_ENV = "LANTERN_API_TOKEN"
+STRICT_AUTH_ENV = "LANTERN_STRICT_AUTH"
+_STRICT_TRUE = frozenset({"1", "true", "yes", "on"})
+_STRICT_FALSE = frozenset({"0", "false", "no", "off", ""})
 
 
 class WebBind(NamedTuple):
     """Decision for `lantern web` before the server is constructed.
 
-    ``token`` is passed into ``serve(api_token=...)`` when ``lan_bound`` is
-    set. It is printed only when ``print_token`` is true, which is an
-    auto-generated token on an interactive terminal. ``warning`` never
-    contains the token.
+    ``token`` is passed into ``serve(api_token=...)`` when ``lan_bound`` or
+    ``strict_auth`` is set. It is printed only when ``print_token`` is true,
+    which is an auto-generated token on an interactive terminal. ``warning``
+    never contains the token.
     """
 
     error: str | None = None
@@ -159,6 +176,7 @@ class WebBind(NamedTuple):
     token: str | None = None
     lan_bound: bool = False
     print_token: bool = False
+    strict_auth: bool = False
 
 
 def is_loopback_host(host: str) -> bool:
@@ -180,6 +198,41 @@ def is_loopback_host(host: str) -> bool:
         return True
     mapped = getattr(addr, "ipv4_mapped", None)
     return bool(mapped is not None and mapped.is_loopback)
+
+
+def strict_auth_requested(flag: bool, environ: dict) -> tuple[bool, str | None]:
+    """True when ``--strict-auth`` is set or ``LANTERN_STRICT_AUTH`` is true.
+
+    The environment variable is the non-flag setting, the same way the API
+    token is configured. An unknown value is an error. A false value does
+    not turn the CLI flag off.
+    """
+    if STRICT_AUTH_ENV not in environ:
+        return bool(flag), None
+    raw = environ.get(STRICT_AUTH_ENV)
+    if not isinstance(raw, str):
+        return False, f"{STRICT_AUTH_ENV} must be 1 or 0. Refusing to start."
+    value = raw.strip().lower()
+    if value in _STRICT_TRUE:
+        return True, None
+    if value in _STRICT_FALSE:
+        return bool(flag), None
+    return False, (
+        f"{STRICT_AUTH_ENV} must be 1, true, yes, on, 0, false, no, or off. "
+        "Refusing to start."
+    )
+
+
+def one_time_open_link(host: str, port: int, token: str) -> str:
+    """Browser URL whose fragment carries the token. The fragment is not a request.
+
+    ``localhost`` is written as 127.0.0.1 so the printed link matches the
+    default bind. The token is urlsafe and is not placed in the path or query.
+    """
+    shown = "127.0.0.1" if str(host).lower() == "localhost" else str(host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{int(port)}/#token={quote(token, safe='-_.~')}"
 
 
 def new_api_token() -> str:
@@ -372,6 +425,18 @@ def _lan_warning(host: str, allowed: frozenset[str], source: str | None) -> str:
     return "\n".join(lines)
 
 
+def _strict_note(source: str | None) -> str:
+    lines = [
+        "Strict auth is on. The page does not contain the API token.",
+        "Every API route requires it.",
+    ]
+    if source == "file":
+        lines.append(f"API token loaded from {TOKEN_FILE_ENV}. It is not printed.")
+    elif source == "env":
+        lines.append(f"API token loaded from {TOKEN_ENV}. It is not printed.")
+    return "\n".join(lines)
+
+
 def resolve_web_bind(
     host: str,
     allow_lan: bool,
@@ -382,16 +447,20 @@ def resolve_web_bind(
     tty: bool = False,
     debug: bool = False,
     token_factory=None,
+    strict_auth: bool = False,
 ) -> WebBind:
     """Decide whether `lantern web` may bind `host`.
 
-    Loopback is always allowed and does not mint a LAN token. Any other
-    address needs ``--allow-lan`` and one valid startup token. This function
-    does not open a socket and does not put the token in ``warning``.
+    Loopback is always allowed. Without ``strict_auth`` it does not mint a
+    token here; the server embeds one in the page. ``strict_auth`` on
+    loopback uses the same token sources as a LAN bind and does not embed
+    that token. Any other address needs ``--allow-lan`` and one valid
+    startup token. This function does not open a socket and does not put
+    the token in ``warning``.
     """
-    if is_loopback_host(host):
+    if is_loopback_host(host) and not strict_auth:
         return WebBind()
-    if not allow_lan:
+    if not is_loopback_host(host) and not allow_lan:
         return WebBind(error=(
             f"refusing to bind {host}. The dashboard listens on loopback "
             f"only (127.0.0.1, localhost, or ::1) unless you pass --allow-lan."
@@ -402,6 +471,14 @@ def resolve_web_bind(
     )
     if error:
         return WebBind(error=error)
+    if is_loopback_host(host):
+        return WebBind(
+            warning=_strict_note(source),
+            token=token,
+            lan_bound=False,
+            print_token=print_token,
+            strict_auth=True,
+        )
     from .webapp import build_lan_allowlist
 
     try:
@@ -414,6 +491,7 @@ def resolve_web_bind(
         token=token,
         lan_bound=True,
         print_token=print_token,
+        strict_auth=bool(strict_auth),
     )
 
 
@@ -507,6 +585,11 @@ def main(argv=None) -> int:
                 parse_allow_host(item)
         except ValueError as exc:
             return _err(str(exc))
+        strict_auth, strict_error = strict_auth_requested(
+            bool(args.strict_auth), os.environ,
+        )
+        if strict_error:
+            return _err(strict_error)
         web_bind = resolve_web_bind(
             args.host,
             bool(args.allow_lan),
@@ -515,6 +598,7 @@ def main(argv=None) -> int:
             environ=os.environ,
             tty=_stderr_is_tty(),
             debug=bool(args.debug),
+            strict_auth=strict_auth,
         )
         if web_bind.error:
             return _err(web_bind.error)
@@ -538,6 +622,11 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
     if args.command == "web":
         serve = _load_serve()
         if web_bind is None:
+            strict_auth, strict_error = strict_auth_requested(
+                bool(getattr(args, "strict_auth", False)), os.environ,
+            )
+            if strict_error:
+                return _err(strict_error)
             web_bind = resolve_web_bind(
                 args.host,
                 bool(getattr(args, "allow_lan", False)),
@@ -546,6 +635,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 environ=os.environ,
                 tty=_stderr_is_tty(),
                 debug=bool(getattr(args, "debug", False)),
+                strict_auth=strict_auth,
             )
             if web_bind.error:
                 return _err(web_bind.error)
@@ -555,19 +645,30 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         if web_bind.print_token and web_bind.token and not args.debug:
             # Interactive console only, and never with --debug. print_token
             # is also false when stderr is not a TTY (`docker logs`).
-            print(
-                f"API token (printed once, not logged): {web_bind.token}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if web_bind.strict_auth:
+                link = one_time_open_link(args.host, args.port, web_bind.token)
+                print(
+                    "Open this link (the token is valid until Lantern restarts; "
+                    "the #token fragment is not sent to the server): "
+                    + link,
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"API token (printed once, not logged): {web_bind.token}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         kwargs = {
             "host": args.host,
             "port": args.port,
             "debug": args.debug,
             "allow_hosts": args.allow_host,
             "lan_bound": web_bind.lan_bound,
+            "strict_auth": web_bind.strict_auth,
         }
-        if web_bind.lan_bound:
+        if web_bind.lan_bound or web_bind.strict_auth:
             kwargs["api_token"] = web_bind.token
         try:
             serve(db_path, **kwargs)

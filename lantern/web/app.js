@@ -20,12 +20,54 @@ function storedToken() {
 }
 
 function lanternToken() {
-  return storedToken() || pageToken();
+  // Default mode trusts the token embedded in the page. A stored value must
+  // not override it, or a crafted #token= link would break later requests.
+  if (needsStoredToken()) return storedToken() || pageToken();
+  return pageToken() || storedToken();
+}
+
+function authMode() {
+  const meta = document.querySelector('meta[name="lantern-auth"]');
+  return meta ? meta.getAttribute("content") || "" : "";
 }
 
 function lanMode() {
-  const meta = document.querySelector('meta[name="lantern-auth"]');
-  return !!(meta && meta.getAttribute("content") === "token");
+  return authMode() === "token";
+}
+
+function needsStoredToken() {
+  const mode = authMode();
+  return mode === "token" || mode === "strict";
+}
+
+function takeFragmentToken() {
+  // The fragment is never sent to the server. Move it into this tab and
+  // strip it from the address bar so a copied URL does not keep the token.
+  let hash = "";
+  try {
+    hash = window.location.hash || "";
+  } catch (err) {
+    return "";
+  }
+  const mark = "#token=";
+  if (hash.indexOf(mark) !== 0) return "";
+  let value = hash.slice(mark.length);
+  try {
+    value = decodeURIComponent(value);
+  } catch (err) {
+    value = hash.slice(mark.length);
+  }
+  value = value.trim();
+  if (value) {
+    try {
+      sessionStorage.setItem(TOKEN_STORAGE, value);
+    } catch (err) { /* private mode */ }
+  }
+  try {
+    const path = (window.location.pathname || "/") + (window.location.search || "");
+    history.replaceState(null, "", path);
+  } catch (err) { /* cannot rewrite this URL */ }
+  return value;
 }
 
 function showTokenPrompt() {
@@ -80,7 +122,7 @@ async function api(path, options) {
   opts.headers = headers;
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (res.status === 403 && lanMode()) {
+  if (res.status === 403 && needsStoredToken()) {
     try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (err) { /* private mode */ }
     showTokenPrompt();
   }
@@ -337,6 +379,10 @@ $("report-link").addEventListener("click", async (event) => {
     const token = lanternToken();
     if (token) headers["X-Lantern-Token"] = token;
     const res = await fetch($("report-link").getAttribute("href"), { headers });
+    if (res.status === 403 && needsStoredToken()) {
+      try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (err) { /* private mode */ }
+      showTokenPrompt();
+    }
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `Request failed (${res.status})`);
@@ -394,10 +440,13 @@ if (tokenForm) {
   });
 }
 
-if (lanMode()) {
+if (needsStoredToken()) {
+  takeFragmentToken();
   const note = $("exposure-note");
-  if (note) {
+  if (note && lanMode()) {
     note.textContent = "LAN mode. Every API call needs the startup token. Data stays in one SQLite file on this machine. Never expose this port to the internet.";
+  } else if (note) {
+    note.textContent = "Strict auth. Every API call needs the startup token. It is not in this page.";
   }
   if (!storedToken()) showTokenPrompt();
   else startDashboard();

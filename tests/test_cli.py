@@ -549,6 +549,90 @@ class WebBindTests(unittest.TestCase):
         self.assertIn("API token (printed once, not logged):", err)
         self.assertEqual(serve.call_args.kwargs["api_token"], token)
         self.assertFalse(serve.call_args.kwargs["debug"])
+        self.assertFalse(serve.call_args.kwargs["strict_auth"])
+
+    def test_strict_auth_link_uses_loopback_and_a_fragment(self):
+        token = "u" * 32
+        self.assertEqual(
+            cli.one_time_open_link("127.0.0.1", 9, token),
+            f"http://127.0.0.1:9/#token={token}",
+        )
+        self.assertEqual(
+            cli.one_time_open_link("localhost", 8068, token),
+            f"http://127.0.0.1:8068/#token={token}",
+        )
+        self.assertNotIn("?", cli.one_time_open_link("127.0.0.1", 9, token).split("#", 1)[0])
+
+    def test_cli_strict_auth_on_a_tty_prints_one_fragment_link(self):
+        token = "k" * 43
+        env = self._no_token_env()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", return_value=token), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli("web", "--strict-auth", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertEqual(err.count(token), 1)
+        self.assertIn(f"http://127.0.0.1:9/#token={token}", err)
+        self.assertIn(
+            "Open this link (the token is valid until Lantern restarts; "
+            "the #token fragment is not sent to the server):",
+            err,
+        )
+        self.assertNotIn("Open once", err)
+        self.assertNotIn("API token (printed once", err)
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertTrue(serve.call_args.kwargs["strict_auth"])
+        self.assertFalse(serve.call_args.kwargs["lan_bound"])
+        self.assertEqual(serve.call_args.kwargs["host"], "127.0.0.1")
+
+    def test_cli_strict_auth_without_a_terminal_refuses_to_mint(self):
+        env = self._no_token_env()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve")):
+            code, out, err = self.run_cli("web", "--strict-auth", "--port", "9")
+        self.assertEqual(code, 2)
+        self.assertIn(cli.TOKEN_FILE_ENV, err)
+        self.assertIn(cli.TOKEN_ENV, err)
+        self.assertNotIn("#token=", err)
+        self.assertEqual(out, "")
+        self.assertFalse(Path(self.db).exists())
+
+    def test_cli_strict_auth_env_enables_it_and_a_file_is_not_printed(self):
+        token = "e" * 32
+        path = Path(self.tmp.name) / "strict-token"
+        path.write_text(token + "\n", encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(path, 0o400)
+        env = self._no_token_env()
+        env[cli.STRICT_AUTH_ENV] = "1"
+        env[cli.TOKEN_FILE_ENV] = str(path)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli("web", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertNotIn(token, err)
+        self.assertNotIn("#token=", err)
+        self.assertIn("Strict auth is on", err)
+        self.assertTrue(serve.call_args.kwargs["strict_auth"])
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertFalse(serve.call_args.kwargs["lan_bound"])
+
+    def test_cli_strict_auth_rejects_an_unknown_env_value(self):
+        env = self._no_token_env()
+        env[cli.STRICT_AUTH_ENV] = "maybe"
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve")):
+            code, _out, err = self.run_cli("web", "--port", "9")
+        self.assertEqual(code, 2)
+        self.assertIn(cli.STRICT_AUTH_ENV, err)
+        self.assertFalse(Path(self.db).exists())
 
     def test_cli_debug_on_a_tty_does_not_print_a_generated_token(self):
         token = "d" * 43
@@ -628,6 +712,10 @@ class WebBindTests(unittest.TestCase):
             cli.main(["web", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--allow-lan", out.getvalue())
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("--strict-auth", help_text)
+        self.assertIn("valid until Lantern restarts", help_text)
+        self.assertNotIn("Open once", help_text)
 
 
 class TokenFileTests(unittest.TestCase):

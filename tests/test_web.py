@@ -1438,5 +1438,195 @@ class LanMethodTests(unittest.TestCase):
         self.assertEqual(status, 403, body)
 
 
+class StrictAuthTests(unittest.TestCase):
+    """Opt-in strict auth. Loopback only. The default server is a separate test."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.token = "s" * 32
+        self.server = make_server(
+            Path(self.tmp.name) / "strict.db",
+            host="127.0.0.1",
+            port=0,
+            api_token=self.token,
+            strict_auth=True,
+        )
+        self.addCleanup(self._close)
+        self.port = self.server.server_address[1]
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        self.base = f"http://127.0.0.1:{self.port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def _close(self):
+        server = getattr(self, "server", None)
+        if server is not None:
+            self.server = None
+            server.shutdown()
+            server.server_close()
+        tmp = getattr(self, "tmp", None)
+        if tmp is not None:
+            self.tmp = None
+            tmp.cleanup()
+
+    def request(self, path, method="GET", body=None, token=False):
+        hdrs = {"Host": f"127.0.0.1:{self.port}", "Content-Type": "application/json"}
+        if token is not False:
+            hdrs[webapp.TOKEN_HEADER] = self.token if token is None else token
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.read().decode(), resp.headers
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode(), exc.headers
+
+    def test_page_and_headers_do_not_contain_the_token(self):
+        status, page, headers = self.request("/")
+        self.assertEqual(status, 200, page)
+        self.assertNotIn(self.token, page)
+        self.assertNotIn(webapp.TOKEN_PLACEHOLDER, page)
+        self.assertIn('name="lantern-auth" content="strict"', page)
+        self.assertIn('name="lantern-token" content=""', page)
+        for key, value in headers.items():
+            self.assertNotIn(self.token, str(key))
+            self.assertNotIn(self.token, str(value))
+        self.assertIsNone(headers.get("Set-Cookie"))
+        status, page, headers = self.request("/index.html")
+        self.assertEqual(status, 200)
+        self.assertNotIn(self.token, page)
+        for _key, value in headers.items():
+            self.assertNotIn(self.token, str(value))
+        status, script, _ = self.request("/app.js")
+        self.assertEqual(status, 200)
+        self.assertNotIn(self.token, script)
+
+    def test_every_get_api_route_requires_the_token(self):
+        paths = (
+            "/api/status",
+            "/api/scans",
+            "/api/scans/latest",
+            "/api/diff",
+            "/api/report?format=json",
+            "/api/report?format=html",
+        )
+        for path in paths:
+            with mock.patch("lantern.webapp.time.sleep") as slept:
+                status, body, _headers = self.request(path)
+            self.assertEqual(status, 403, (path, body))
+            self.assertEqual(json.loads(body), {"error": webapp.FORBIDDEN_MESSAGE})
+            self.assertNotIn(self.token, body)
+            slept.assert_not_called()
+        for path in ("/api/status", "/api/scans", "/api/scans/latest", "/api/diff"):
+            status, body, _headers = self.request(path, token=self.token)
+            self.assertEqual(status, 200, (path, body))
+            self.assertNotIn(self.token, body)
+        for path in ("/api/report?format=json", "/api/report?format=html"):
+            status, body, _headers = self.request(path, token=self.token)
+            self.assertEqual(status, 404, (path, body))
+            self.assertIn("No scans yet", body)
+            self.assertNotIn(self.token, body)
+
+    def test_presented_mismatch_uses_the_same_delay(self):
+        with mock.patch("lantern.webapp.time.sleep") as slept, \
+                mock.patch("lantern.webapp.hmac.compare_digest", return_value=False) as compare:
+            status, body, _headers = self.request("/api/status", token="w" * 32)
+        self.assertEqual(status, 403, body)
+        compare.assert_called()
+        slept.assert_called_with(webapp.TOKEN_FAILURE_DELAY_SECONDS)
+
+    def test_post_scan_requires_the_token_and_then_runs(self):
+        with mock.patch("lantern.cli.run_scan", side_effect=AssertionError("scan started")):
+            status, body, _headers = self.request(
+                "/api/scan", method="POST", body={"subnet": "192.168.1.0/24"},
+            )
+        self.assertEqual(status, 403, body)
+        with mock.patch("lantern.cli.run_scan", return_value=[]) as run_scan:
+            status, body, _headers = self.request(
+                "/api/scan", method="POST", body={"subnet": "192.168.1.0/24"}, token=self.token,
+            )
+        self.assertEqual(status, 200, body)
+        run_scan.assert_called_once()
+
+    def test_legacy_loopback_still_embeds_the_token_and_allows_get(self):
+        server = make_server(Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.assertFalse(server.RequestHandlerClass.strict_auth)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            page = resp.read().decode()
+        match = _TOKEN_RE.search(page)
+        self.assertIsNotNone(match)
+        token = match.group(1)
+        self.assertEqual(token, server.RequestHandlerClass.api_token)
+        status_req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status", method="GET")
+        with urllib.request.urlopen(status_req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_fragment_handler_keeps_the_token_out_of_the_request(self):
+        script = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        start = script.index("function takeFragmentToken()")
+        body = script[start:script.index("function showTokenPrompt")]
+        self.assertIn("#token=", body)
+        self.assertIn("decodeURIComponent", body)
+        self.assertIn("sessionStorage.setItem(TOKEN_STORAGE, value)", body)
+        self.assertIn("history.replaceState", body)
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("XMLHttpRequest", body)
+        call = script.index("takeFragmentToken();")
+        guard = script.rfind("if (needsStoredToken())", 0, call)
+        self.assertGreater(guard, start)
+        self.assertNotIn("else", script[guard:call])
+        self.assertEqual(script.count("takeFragmentToken();"), 1)
+        self.assertIn('headers["X-Lantern-Token"] = token', script)
+
+    def test_stale_token_is_cleared_for_strict_auth_and_not_for_default_mode(self):
+        """A 403 re-prompts whenever the page has no embedded token.
+
+        Default mode must prefer the page token, so a stored #token= value
+        cannot replace it. These checks read app.js. They do not open a browser.
+        """
+        script = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(script.count("403 && needsStoredToken()"), 2)
+        self.assertNotIn("403 && lanMode()", script)
+        report = script[
+            script.index('$("report-link").addEventListener'):
+            script.index('$("search").addEventListener')
+        ]
+        self.assertIn("403 && needsStoredToken()", report)
+        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", report)
+        self.assertIn("showTokenPrompt()", report)
+        api_fn = script[script.index("async function api("):script.index("function postJson(")]
+        self.assertIn("403 && needsStoredToken()", api_fn)
+        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", api_fn)
+        choose = script[script.index("function lanternToken()"):script.index("function authMode()")]
+        self.assertIn("if (needsStoredToken()) return storedToken() || pageToken();", choose)
+        self.assertIn("return pageToken() || storedToken();", choose)
+        self.assertLess(
+            choose.index("storedToken() || pageToken()"),
+            choose.index("return pageToken() || storedToken();"),
+        )
+
+        def choose_token(page, stored, needs_stored):
+            if needs_stored:
+                return stored or page
+            return page or stored
+
+        self.assertEqual(choose_token("page-token", "junk", False), "page-token")
+        self.assertEqual(choose_token("", "stored-token", True), "stored-token")
+        self.assertEqual(choose_token("page-token", "", False), "page-token")
+
+    def test_strict_auth_without_a_token_is_refused(self):
+        with self.assertRaises(ValueError):
+            make_server(
+                Path(self.tmp.name) / "missing.db",
+                host="127.0.0.1",
+                port=0,
+                strict_auth=True,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
