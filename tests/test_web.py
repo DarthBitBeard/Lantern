@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1583,40 +1585,104 @@ class StrictAuthTests(unittest.TestCase):
         self.assertIn('headers["X-Lantern-Token"] = token', script)
 
     def test_stale_token_is_cleared_for_strict_auth_and_not_for_default_mode(self):
-        """A 403 re-prompts whenever the page has no embedded token.
+        """Run app.js under node with a fake page. Skip when node is absent.
 
-        Default mode must prefer the page token, so a stored #token= value
-        cannot replace it. These checks read app.js. They do not open a browser.
+        Default mode must ignore a #token= fragment and prefer the page token.
+        Strict mode must store the fragment, then clear it and show the prompt
+        after a 403 from the API and from the report link.
         """
-        script = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
-        self.assertEqual(script.count("403 && needsStoredToken()"), 2)
-        self.assertNotIn("403 && lanMode()", script)
-        report = script[
-            script.index('$("report-link").addEventListener'):
-            script.index('$("search").addEventListener')
-        ]
-        self.assertIn("403 && needsStoredToken()", report)
-        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", report)
-        self.assertIn("showTokenPrompt()", report)
-        api_fn = script[script.index("async function api("):script.index("function postJson(")]
-        self.assertIn("403 && needsStoredToken()", api_fn)
-        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", api_fn)
-        choose = script[script.index("function lanternToken()"):script.index("function authMode()")]
-        self.assertIn("if (needsStoredToken()) return storedToken() || pageToken();", choose)
-        self.assertIn("return pageToken() || storedToken();", choose)
-        self.assertLess(
-            choose.index("storedToken() || pageToken()"),
-            choose.index("return pageToken() || storedToken();"),
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const app = fs.readFileSync(process.argv[1], "utf8");
+
+function load(auth, pageToken, hash) {
+  const store = {};
+  const meta = { "lantern-token": pageToken, "lantern-auth": auth };
+  const listeners = {};
+  const elements = {};
+  function el(id) {
+    if (!elements[id]) {
+      elements[id] = {
+        id, hidden: true, textContent: "", value: "", className: "",
+        href: "/api/report?format=html", disabled: false,
+        addEventListener(type, fn) { listeners[id + ":" + type] = fn; },
+        getAttribute(name) { return name === "href" ? this.href : ""; },
+      };
+    }
+    return elements[id];
+  }
+  let fetchMode = "ok";
+  const context = {
+    sessionStorage: {
+      getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: (k) => { delete store[k]; },
+    },
+    document: {
+      getElementById: el,
+      querySelector(sel) {
+        const match = /meta\[name="([^"]+)"\]/.exec(sel);
+        if (!match) return null;
+        const name = match[1];
+        return { getAttribute: (attr) => (attr === "content" ? meta[name] || "" : "") };
+      },
+      body: { setAttribute() {} },
+    },
+    window: { open() {} },
+    history: { replaceState() {} },
+    URL: { createObjectURL: () => "blob:test" },
+    fetch: async () => {
+      if (fetchMode === "403") {
+        return { ok: false, status: 403, json: async () => ({ error: "Forbidden." }), text: async () => "" };
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          scan_count: 0, latest_scan_id: null, scan_running: false, version: "t",
+          scans: [], scan: null, diff: null,
+        }),
+        text: async () => "<p>ok</p>",
+      };
+    },
+    console,
+  };
+  context.window.location = { hash, pathname: "/", search: "" };
+  vm.createContext(context);
+  vm.runInContext(app, context);
+  return { context, store, elements, listeners, setFetch: (mode) => { fetchMode = mode; } };
+}
+
+const fallback = load("page", "page-token", "#token=junk");
+if (fallback.store["lantern-token"]) process.exit(2);
+fallback.store["lantern-token"] = "junk";
+if (fallback.context.lanternToken() !== "page-token") process.exit(3);
+fallback.setFetch("403");
+fallback.context.api("/api/status").catch(() => {}).then(() => {
+  if (fallback.store["lantern-token"] !== "junk") process.exit(4);
+  const strict = load("strict", "", "#token=from-fragment");
+  if (strict.store["lantern-token"] !== "from-fragment") process.exit(5);
+  strict.setFetch("403");
+  return strict.context.api("/api/status").catch((err) => {
+    if (!String(err).includes("Forbidden")) throw err;
+  }).then(() => {
+    if (Object.prototype.hasOwnProperty.call(strict.store, "lantern-token")) process.exit(6);
+    if (strict.elements["token-entry"].hidden !== false) process.exit(7);
+    strict.store["lantern-token"] = "stale";
+    return strict.listeners["report-link:click"]({ preventDefault() {} });
+  }).then(() => {
+    if (Object.prototype.hasOwnProperty.call(strict.store, "lantern-token")) process.exit(8);
+  });
+}).catch((err) => { console.error(err); process.exit(9); });
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=15, check=False,
         )
-
-        def choose_token(page, stored, needs_stored):
-            if needs_stored:
-                return stored or page
-            return page or stored
-
-        self.assertEqual(choose_token("page-token", "junk", False), "page-token")
-        self.assertEqual(choose_token("", "stored-token", True), "stored-token")
-        self.assertEqual(choose_token("page-token", "", False), "page-token")
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
     def test_strict_auth_without_a_token_is_refused(self):
         with self.assertRaises(ValueError):

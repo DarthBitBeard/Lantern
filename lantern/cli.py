@@ -139,7 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Do not embed the API token in the page, and require it on every "
-            "/api route, including GET. Also enabled by LANTERN_STRICT_AUTH=1. "
+            "/api route, including GET. LANTERN_STRICT_AUTH accepts 1, true, "
+            "yes, or on to enable, and 0, false, no, off, or empty to leave "
+            "it off. 0 does not override this flag. "
             "On a terminal, a generated token is printed once as a link. "
             "The token is valid until Lantern restarts. The #token fragment "
             "is not sent to the server. Without a terminal, set "

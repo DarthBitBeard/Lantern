@@ -34,9 +34,6 @@ services:
     #     LANTERN_API_TOKEN_FILE: /run/secrets/lantern_token
     #   secrets:
     #     - lantern_token
-    # secrets:
-    #   lantern_token:
-    #     file: ./lantern_token
     # Do not add a ports: key. Host networking does not publish ports that
     # way. If you ever switch this service to a bridge network, publish
     # loopback on the host only: "127.0.0.1:8068:8068". Never expose 8068
@@ -61,3 +58,9 @@ services:
       #   mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
       - ./data:/data
     restart: unless-stopped
+
+# Top-level secret definition. Uncomment this with the service `secrets:`
+# list above. It stays at column 0 so the uncommented key is not nested.
+# secrets:
+#   lantern_token:
+#     file: ./lantern_token
