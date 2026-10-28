@@ -4,7 +4,7 @@
 
 Please report privately. Do not open a public issue, discussion, or pull request for a security problem.
 
-GitHub Private Vulnerability Reporting is the only reporting channel. Open https://github.com/DarthBitBeard/Lantern/security/advisories/new or use the "Report a vulnerability" button on the repository's Security tab.
+GitHub Private Vulnerability Reporting is the only reporting channel: https://github.com/DarthBitBeard/Lantern/security/advisories/new (or the "Report a vulnerability" button on the Security tab).
 
 Please include the Lantern version or commit, your OS and Python version, how you ran it (CLI, dashboard, Docker), the steps to reproduce, and the impact you see.
 Do not include real network data. That means no real IPs, MAC addresses, hostnames, banners, scan databases, or screenshots of your inventory. Use `lantern demo` data or made-up values.
@@ -15,7 +15,7 @@ Reports are handled by the maintainer on a best-effort basis. There is no guaran
 
 ## Supported versions
 
-This repository has no git tags and no GitHub releases. The version string in `pyproject.toml` is not a published release. Security fixes go to the `main` branch, which is the current development version, until a real release exists. Older versions are not maintained.
+Only `main` is supported. That branch is currently version 0.3.0 in `pyproject.toml`. There are no tagged releases yet. Security fixes go to `main`. Older versions are not maintained.
 
 ## Scope
 
@@ -27,42 +27,44 @@ Out of scope: vulnerabilities in the devices Lantern finds; issues that need an 
 
 ## Security model
 
-The behavior below is the code on `main` at `05791cefbb4e794bacf408b774ce258a316aaace`.
-
 The dashboard has no user accounts. It does have one access token per process (`X-Lantern-Token`, compared with `hmac.compare_digest`). On loopback the process generates that token, embeds it in the page, and requires it on `POST /api/*` only. `GET /api/*` on loopback does not require the token. With `--allow-lan` the same token is required on every API route, including `GET` inventory and reports, and the page does not contain it. The browser keeps a pasted token in `sessionStorage` for that tab. A presented token that does not match waits 50 ms. The token is not written to the log or the database.
 
-`--allow-lan` is the only way to bind an address other than loopback. The default bind is `127.0.0.1`. The flag exits 2 before it listens unless one token of at least 128 bits is available (22 to 512 urlsafe characters). Precedence is `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal and `--debug` is not set. A generated token is printed once on that terminal. `--debug` does not print one. When stderr is not a terminal, Lantern does not generate a token. The token file must be a regular file of at most 4 KiB, opened with `O_NOFOLLOW` and `O_NONBLOCK` where the platform has them. A symlink or a FIFO is refused. On macOS and Linux the file must have no group or other permissions (0400 or 0600 recommended). Mode 0700 is accepted. A mode the owner cannot read, such as 0200, does not start. Any group or other bit, including 0444, is refused.
+`--allow-lan` is the only way to bind an address other than loopback. The default bind is `127.0.0.1`. The flag exits 2 before it listens unless one token of at least 128 bits is available (22 to 512 urlsafe characters). Precedence is `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal and `--debug` is not set. A generated token is printed once on that terminal. `--debug` does not print one. When stderr is not a terminal, Lantern does not generate a token. The token file must be a regular file of at most 4 KiB, opened with `O_NOFOLLOW` and `O_NONBLOCK` where the platform has them. A symlink or a FIFO is refused. On every non-Windows OS the file is refused if any group or other permission bit is set. Mode 0400 or 0600 is recommended. Mode 0444 is refused. Windows does not check the mode.
 
 Every request needs an allowed `Host`. On loopback that is `127.0.0.1`, `localhost`, or `[::1]` on the bound port, plus any host named with `--allow-host`. With `--allow-lan` the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added. A `POST` that includes `Origin` must use `http` or `https`, and that origin's host and port must be on the same allowlist. A missing `Origin` is accepted only after the token matches. `--allow-host` rejects unspecified addresses, zone ids, wildcards, CIDR, all-digit names, and loose IPv4 forms such as `127.1`.
 
-Reading one request (the request line, the headers, and the body) shares a 10 second deadline. Responses are written in chunks under a separate overall write deadline, `WRITE_DEADLINE_SECONDS` in `lantern/webapp.py`. This policy does not restate that constant. The process serves at most 32 connections at once and at most 8 from one client address. A full cap is 503.
+Reading one request (the request line, the headers, and the body) shares a 10 second deadline. A request body larger than 64 KiB is refused with 413. Responses are written in 16 KiB chunks. Each chunk waits at most 10 seconds, and never longer than the time left on a 60 second overall deadline. The process serves at most 32 connections at once and at most 8 from one client address. A full cap is 503. Those caps limit how many connections run at once. They do not stop a client from holding the slots it already has until a deadline.
 
 Scans go through `validate_subnet`, including every subnet in `lantern.toml`. IPv6 is refused. Loopback and link-local are refused. A network of more than 1024 addresses is refused. A host such as `192.168.1.5/24` is normalized to the network. There is no flag, config key, API field, or confirmation step that authorizes a range this check refuses. Extra keys in a scope file are rejected, and a scope file larger than 64 KiB is refused before it is parsed.
 
-The check uses `IPv4Network.is_private`, which is wider than RFC1918. Comments in the code describe the limit as RFC1918. On Python 3.12.3 the function also accepts some special-use ranges that fit in 1024 addresses, including `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `198.18.0.0/24`, `0.1.2.0/24`, and `240.0.0.1/32`. It refuses public ranges such as `8.8.8.8/32`, `11.0.0.0/24`, and `100.64.1.0/24`. Those results were run against this function. They are not an authorization path.
+The check uses Python's `ipaddress` `IPv4Network.is_private`, which is wider than RFC1918, and the exact set can vary slightly between Python versions. It is not a hand-written list of RFC1918 networks. Ranges that flag treats as private are accepted when they are IPv4, not loopback, not link-local, and at most 1024 addresses. That includes RFC1918 networks of that size. It also includes some special-use ranges, for example `0.0.0.0/32`, `255.255.255.255/32`, `255.255.255.0/24`, `240.0.0.0/24`, `192.0.0.0/29`, and `192.0.0.170/31`. It refuses loopback, link-local, multicast, and shared CGNAT space (`100.64.0.0/10`, including `100.64.1.0/24`). `100.64.1.0/24` is CGNAT, not a public range. Public addresses such as `8.8.8.8/32` and `11.0.0.0/24` are refused. This is a scope check, not an authorization step.
 
-Discovery does not phone home. The package has no telemetry, no update check, and no dependency that uploads results. A scan can ping hosts on the chosen subnet, read the local ARP cache, open a TCP connection to a fixed list of common ports, and read a short banner. On a few HTTP ports, if the service stays silent, it sends `HEAD / HTTP/1.0` and reads up to 256 bytes. Reverse DNS uses the system resolver (`socket.gethostbyaddr`), and guessing this machine's hostname can also ask the resolver. Guessing the local subnet connects a UDP socket to `8.8.8.8` and does not send a packet. Results stay in a local SQLite file.
+Discovery does not phone home. The package has no telemetry, no update check, and no dependency that uploads results. A scan can ping hosts on the chosen subnet, read the local ARP cache, open a TCP connection to a fixed list of common ports, and read a short banner. On a few HTTP ports, if the service stays silent, it sends `HEAD / HTTP/1.0` and reads up to 256 bytes. Reverse DNS uses the system resolver (`socket.gethostbyaddr`). Those lookups go to the configured DNS server, which may be outside your network. Guessing this machine's hostname can also ask that resolver. Guessing the local subnet connects a UDP socket to `8.8.8.8` and does not send a packet. Results stay in a local SQLite file.
 
-On macOS and Linux, a new database, its migration backup, and the demo HTML report are created mode 0600. A directory Lantern creates is mode 0700. A directory or file Lantern did not create is left as it is; a mode looser than that gets a warning on stderr and is not changed. A database path that is a symlink is refused. On Windows those Unix mode bits are not set or checked.
+On non-Windows systems, a new database, its migration backup, and the demo HTML report are created mode 0600. A directory Lantern creates is mode 0700. A directory or file Lantern did not create is left as it is; a mode looser than that gets a warning on stderr and is not changed. A database path that is a symlink is refused. On Windows those Unix mode bits are not set or checked. Keep the database in your user profile.
 
-The Docker image runs as uid/gid 10001. Its command binds `127.0.0.1`. It does not install ping. `docker-compose.yml` uses host networking, does not publish a port, sets `user: 10001:10001`, a read-only root filesystem, a tmpfs on `/tmp`, `cap_drop: ALL`, and `no-new-privileges`. This description is from those files. The image was not rebuilt for this policy text. The server is `ThreadingHTTPServer`. It does not wrap the socket in TLS.
+The Docker image runs as uid/gid 10001. Its command binds `127.0.0.1`. The Dockerfile does not install ping. `docker-compose.yml` uses host networking, does not publish a port, sets `user: 10001:10001`, a read-only root filesystem, a tmpfs on `/tmp`, `cap_drop: ALL`, and `no-new-privileges`. With that host networking, `127.0.0.1` is the host's loopback, so any local user or process on the host can reach the dashboard. The server is `ThreadingHTTPServer`. It does not wrap the socket in TLS.
 
 ## Known limitations
 
-The dashboard speaks plain HTTP. There is no TLS. With `--allow-lan`, the access token is sent in the `X-Lantern-Token` header on the LAN in clear text. The page does not contain the token in that mode. Prefer an SSH tunnel or Tailscale to `127.0.0.1`, which is what `docker-compose.yml` already recommends. Do not expose port 8068 to the internet.
+The dashboard speaks plain HTTP. There is no TLS. With `--allow-lan`, the access token and the scan data cross the network in clear text. Do not use LAN mode on an untrusted or shared network. Prefer loopback plus an SSH tunnel or Tailscale to `127.0.0.1`, which is what `docker-compose.yml` already recommends. Do not expose port 8068 to the internet.
 
-Loopback is the machine's loopback interface, not a per-user socket. Any local user or process that can open a TCP connection to `127.0.0.1` or `[::1]` on the bound port can reach the dashboard.
+Loopback is the machine's loopback interface, not a per-user socket. Any local user or process that can open a TCP connection to `127.0.0.1` or `[::1]` on the bound port can reach the dashboard. With Docker host networking, that address is the host's loopback.
 
-On loopback, checked in `do_GET` and `_index_bytes`:
+On loopback:
 
-- `GET /` does not require the token. The HTML puts it in `<meta name="lantern-token">`. Any local client that can connect can read that token. It is not limited to the user who started Lantern.
-- `GET /api/*` (inventory, status, and reports) does not require the token. Another unprivileged user on the same machine can read that data through the dashboard.
-- `POST /api/*` requires the token. The token is in the page, so that same local client can call `POST` after reading it.
+- `GET /` does not require the token. The HTML puts it in `<meta name="lantern-token">`, so any local client that can connect can read it.
+- `GET /api/*` (inventory, status, and reports) does not require the token, so that client can read scan results.
+- `POST /api/*` does require the token. That includes `POST /api/scan`, `POST /api/demo`, and `POST /api/trust`. The token is in the page, so the same local client can read it and then start a scan or change a trust label.
 - `app.js` and the other static files do not contain the token.
 
-What that other user cannot read, when the files keep the modes Lantern sets and are owned by the user running Lantern: the SQLite database, its migration backup, and the demo HTML report (mode 0600), and a token file with no group or other permission bits. A directory Lantern created is mode 0700, so other users cannot list it. Lantern does not put the token in the log or the database. On Windows, privacy of those files is the user profile ACL, which this policy does not describe beyond that.
+That other user cannot read the SQLite database, its migration backup, or the demo HTML report when those files are mode 0600 and owned by the user running Lantern. A directory Lantern created is mode 0700, so other users cannot list it. They also cannot read a token file that has no group or other permission bits. Lantern does not put the token in the log or the database. On Windows, who can read those files is the user profile ACL.
 
-With `--allow-lan`, `GET /` does not include the token, and every API route requires it. Another local user still cannot read a token file that has no group or other bits. They can call the API if they already have the token.
+With `--allow-lan`, `GET /` does not include the token, and every API route requires it. Another local user still cannot read a token file that has no group or other bits. They can call the API if they already have the token. On the network, that token and the data are clear text.
+
+A scan sends real traffic: ping, TCP connections, banner reads, and reverse-DNS lookups. The lookups go to the configured DNS server, which may be outside your network. A network owner or an intrusion-detection system may notice the traffic.
+
+The scope check can accept some non-RFC1918 special-use ranges. See the security model above. The 64 KiB body limit, the 10 second request deadline, and the 60 second response deadline still apply.
 
 ## Responsible use
 
