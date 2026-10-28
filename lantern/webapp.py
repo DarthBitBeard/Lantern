@@ -544,9 +544,10 @@ class LanternHandler(BaseHTTPRequestHandler):
     api_token = ""
     allowed_hosts = frozenset()
     bound_port = 0
-    # Loopback embeds the token and checks it on POST only. LAN mode
-    # (set by the CLI) checks it on every API route and does not embed it.
-    # strict_auth is the opt-in loopback mode that does the same.
+    # The CLI default sets strict_auth: the page does not contain the token
+    # and every API route requires it. strict_auth False is --no-strict-auth:
+    # loopback embeds the token and checks it on POST only. LAN mode checks
+    # it on every API route and does not embed it.
     lan_bound = False
     strict_auth = False
     # Per-read idle timeout, and one deadline for reading the request
