@@ -810,6 +810,22 @@ class CliExportTests(unittest.TestCase):
         self.assertIn("+SUM(1)", row["fix"])
         self.assertEqual(len(parsed[1]), len(parsed[0]))
 
+    def test_path_depth_guard_refuses_before_the_missing_directory_check(self):
+        conn = connect(self.db)
+        try:
+            save_scan(conn, "192.168.50.0/24", [_device("192.168.50.10")])
+        finally:
+            conn.close()
+        deep = "/".join(["nest"] * 41) + "/out.json"
+        self.assertGreater(deep.count("/"), 40)
+        code, _out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "json", "--output", deep,
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("not allowed", err)
+        self.assertNotIn("must already exist", err)
+        self.assertNotIn("nest/nest", err)
+
     def test_export_does_not_create_a_missing_database(self):
         import contextlib
         from lantern import cli
