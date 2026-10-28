@@ -171,6 +171,19 @@ def build_parser() -> argparse.ArgumentParser:
     asset_clear.add_argument("key", help="MAC address, or an IPv4 address when the device has no MAC.")
     asset_clear.add_argument("--field", help="One of owner, location, tags, criticality, notes. Omit to remove the whole record.")
 
+    export_p = sub.add_parser("export", help="Write devices, findings, or scan history as JSON or CSV.")
+    _add_db_arg(export_p)
+    export_p.add_argument("--what", required=True, choices=["devices", "findings", "history"])
+    export_p.add_argument("--format", choices=["json", "csv"], default="json")
+    export_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    export_p.add_argument("--scope", help="Limit the export to this scope. Matched the same way as history --scope.")
+    export_p.add_argument("--scan-id", type=int, help="Scan to export. Default: latest of --scope, or the latest scan.")
+    export_p.add_argument("--tag", action="append", help="Only devices with this tag. Repeat to require every tag. Not valid for history.")
+    export_p.add_argument("--criticality", choices=["low", "medium", "high", "critical"], help="Only devices with this criticality. Not valid for history.")
+    export_p.add_argument("--include-private-fields", action="store_true", help="Include owner, location, and notes. They are omitted by default.")
+    export_p.add_argument("--output", help="Write this file instead of stdout. The directory must already exist.")
+    export_p.add_argument("--force", action="store_true", help="Replace an existing regular file. Refuses a symlink or a hard link.")
+
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
     _add_db_arg(web_p)
     web_p.add_argument(
@@ -233,6 +246,48 @@ def build_parser() -> argparse.ArgumentParser:
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
     return 2
+
+
+def _cmd_export(args, conn) -> int:
+    from .v1 import V1Error, MESSAGES, render_export, write_export_file
+
+    try:
+        scope = _one_scope_name(args)
+    except ValueError as exc:
+        return _err(str(exc))
+    query = {
+        "what": [args.what],
+        "format": [args.format],
+    }
+    if scope:
+        query["scope"] = [scope]
+    if args.scan_id is not None:
+        query["scan_id"] = [str(args.scan_id)]
+    if args.tag:
+        query["tag"] = list(args.tag)
+    if args.criticality:
+        query["criticality"] = [args.criticality]
+    try:
+        payload, _fmt, _scan_id, _what, _fmt_name = render_export(
+            conn, query, private=bool(args.include_private_fields),
+        )
+    except V1Error as exc:
+        if exc.status == 404:
+            print(f"lantern: {MESSAGES['not_found']}", file=sys.stderr)
+            return 1
+        return _err(MESSAGES[exc.code])
+    if args.output:
+        try:
+            written = write_export_file(args.output, payload, force=bool(args.force))
+        except ValueError as exc:
+            return _err(str(exc))
+        print(f"Wrote {written}", file=sys.stderr)
+        return 0
+    text = payload.decode("utf-8")
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
 
 
 TOKEN_FILE_ENV = "LANTERN_API_TOKEN_FILE"
@@ -1226,6 +1281,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             return 0
         print(to_json(scan, diff) if args.format == "json" else to_html(scan, diff))
         return 0
+
+    if args.command == "export":
+        return _cmd_export(args, conn)
 
     if args.command == "history":
         try:

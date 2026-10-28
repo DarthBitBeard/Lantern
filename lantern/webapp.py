@@ -628,7 +628,15 @@ class LanternHandler(BaseHTTPRequestHandler):
 
     # -- helpers ------------------------------------------------------
 
-    def _send_bytes(self, status: int, data: bytes, content_type: str, cache: str = "no-store") -> None:
+    def _send_bytes(
+        self, status: int, data: bytes, content_type: str,
+        cache: str = "no-store", headers: dict | None = None,
+    ) -> None:
+        from .v1 import header_value
+
+        extra = {str(key): header_value(value) for key, value in (headers or {}).items()}
+        content_type = header_value(content_type)
+        cache = header_value(cache)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -637,6 +645,8 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CSP)
+        for key, value in extra.items():
+            self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
             self._write_all(data)
@@ -814,8 +824,7 @@ class LanternHandler(BaseHTTPRequestHandler):
 
     def _unsupported_method(self) -> None:
         """405 after the Host check and, on a LAN API route, the token check."""
-        if not self._host_allowed():
-            self._forbid(unread_body=True)
+        if self._reject_host(unread_body=True):
             return
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
@@ -823,6 +832,13 @@ class LanternHandler(BaseHTTPRequestHandler):
         if self._reject_transfer_encoding():
             return
         path = urlparse(self.path).path
+        if self._is_v1(path):
+            self.close_connection = True
+            if not self._token_ok():
+                self._send_v1_error(403, "forbidden")
+                return
+            self._send_v1_error(405, "method_not_allowed", headers={"Allow": "GET, HEAD"})
+            return
         if (self.lan_bound or self.strict_auth) and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
             return
@@ -896,9 +912,20 @@ class LanternHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def _reject_host(self, *, unread_body: bool) -> bool:
+        if self._host_allowed():
+            return False
+        path = urlparse(self.path).path
+        if self._is_v1(path):
+            if unread_body:
+                self.close_connection = True
+            self._send_v1_error(403, "forbidden")
+        else:
+            self._forbid(unread_body=unread_body)
+        return True
+
     def do_GET(self):
-        if not self._host_allowed():
-            self._forbid(unread_body=False)
+        if self._reject_host(unread_body=False):
             return
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=False)
@@ -907,6 +934,9 @@ class LanternHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if self._is_v1(parsed.path):
+            self._dispatch_v1("GET", parsed, query)
+            return
         if parsed.path.startswith("/api/") and not self._api_get_allowed():
             self._forbid(unread_body=False)
             return
@@ -931,6 +961,133 @@ class LanternHandler(BaseHTTPRequestHandler):
         if number < 1 or number > MAX_SCAN_ID:
             raise ValueError(f"{name} must be a positive number.")
         return number
+
+    @staticmethod
+    def _is_v1(path: str) -> bool:
+        from .v1 import is_v1_path
+
+        return is_v1_path(path)
+
+    def _send_v1_error(self, status: int, code: str, fields: dict | None = None, headers: dict | None = None) -> None:
+        from .v1 import content_type, error_body
+
+        self._send_bytes(
+            status,
+            json.dumps(error_body(code, fields)).encode("utf-8"),
+            content_type("json"),
+            headers=headers,
+        )
+
+    def _dispatch_v1(self, method: str, parsed, query: dict) -> None:
+        """v1 has its own errors. Legacy handlers must not answer these paths."""
+        from .v1 import V1Error
+
+        try:
+            if not self._token_ok():
+                self._send_v1_error(403, "forbidden")
+                return
+            if method != "GET":
+                self._send_v1_error(405, "method_not_allowed", headers={"Allow": "GET, HEAD"})
+                return
+            if not self._api_get_allowed():
+                self._send_v1_error(403, "forbidden")
+                return
+            self._handle_v1_get(parsed.path, query)
+        except V1Error as exc:
+            self._send_v1_error(exc.status, exc.code, exc.fields)
+        except Exception as exc:
+            self._server_error_v1(exc)
+
+    def _server_error_v1(self, exc: BaseException) -> None:
+        if self.debug:
+            try:
+                print(
+                    f"Lantern server error: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except OSError:
+                pass
+        self._send_v1_error(500, "server_error")
+
+    def _handle_v1_get(self, path: str, query: dict) -> None:
+        from .v1 import (
+            V1Error,
+            content_type,
+            devices_document,
+            diff_document,
+            export_filename,
+            export_locked,
+            findings_document,
+            one_scan_document,
+            render_export,
+            scans_document,
+            scopes_document,
+            status_document,
+            _finish,
+            _number,
+        )
+
+        conn = self._db()
+        try:
+            if path in ("/api/v1", "/api/v1/"):
+                raise V1Error(404, "not_found")
+            if path == "/api/v1/status":
+                body = _finish(status_document())
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/scopes":
+                body = _finish(scopes_document(conn))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/devices":
+                body = _finish(devices_document(conn, query))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/scans":
+                body = _finish(scans_document(conn, query))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path.startswith("/api/v1/scans/"):
+                scan_id = _number({"scan_id": [path[len("/api/v1/scans/"):]]}, "scan_id")
+                if scan_id is None:
+                    raise V1Error(404, "not_found")
+                body = _finish(one_scan_document(conn, scan_id))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/diffs":
+                body = _finish(diff_document(conn, query))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/findings":
+                body = _finish(findings_document(conn, query))
+                self._send_bytes(200, body, content_type("json"))
+                return
+            if path == "/api/v1/export":
+                include = (query.get("include") or [""])[0] == "private"
+                if query.get("include") and query["include"][0] not in ("", "private"):
+                    raise V1Error(400, "bad_request")
+
+                def build():
+                    payload, fmt, scan_id, what, _fmt = render_export(
+                        conn, query, private=include,
+                    )
+                    return payload, fmt, scan_id, what
+
+                payload, fmt, scan_id, what = export_locked(build)
+                self._send_bytes(
+                    200,
+                    payload,
+                    content_type(fmt),
+                    headers={
+                        "Content-Disposition": export_filename(what, scan_id, fmt),
+                        "Content-Security-Policy": "default-src 'none'; sandbox",
+                    },
+                )
+                return
+            raise V1Error(404, "not_found")
+        finally:
+            conn.close()
 
     def _handle_api_get(self, path: str, query: dict) -> None:
         conn = self._db()
@@ -986,13 +1143,15 @@ class LanternHandler(BaseHTTPRequestHandler):
         # Always close. Extra bytes after the body must not be a new request.
         self.close_connection = True
         parsed = urlparse(self.path)
-        if not self._host_allowed():
-            self._forbid(unread_body=True)
+        if self._reject_host(unread_body=True):
             return
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
         if self._reject_transfer_encoding():
+            return
+        if self._is_v1(parsed.path):
+            self._dispatch_v1("POST", parsed, {})
             return
         if not parsed.path.startswith("/api/"):
             self.close_connection = True  # body left unread
