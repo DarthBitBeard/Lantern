@@ -40,8 +40,20 @@ class Scope:
     description: str | None = None
 
 
-def _scope_too_large(path: Path) -> ValueError:
-    return ValueError(
+class ScopeConfigError(ValueError):
+    """The scope file could not be read or parsed.
+
+    A bad name or an unknown scope is a different error. Callers that only
+    read stored scans can catch this type instead of matching error text.
+    """
+
+
+class UnknownScopeError(ValueError):
+    """The name is not in a scope file that loaded."""
+
+
+def _scope_too_large(path: Path) -> ScopeConfigError:
+    return ScopeConfigError(
         f"Scope config {path} is too large. "
         "Lantern refuses scope files larger than 64 KiB."
     )
@@ -57,22 +69,22 @@ def _read_scope_text(path: Path) -> str:
     try:
         info = path.stat()
     except OSError as exc:
-        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
     if not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"Cannot read scope config {path}: not a regular file.")
+        raise ScopeConfigError(f"Cannot read scope config {path}: not a regular file.")
     if info.st_size > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         with path.open("rb") as handle:
             blob = handle.read(MAX_SCOPE_CONFIG_BYTES + 1)
     except OSError as exc:
-        raise ValueError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
     if len(blob) > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         return blob.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValueError(f"Scope config {path} is not UTF-8.") from exc
+        raise ScopeConfigError(f"Scope config {path} is not UTF-8.") from exc
 
 
 def load_scopes(path: str | Path) -> dict[str, Scope]:
@@ -88,9 +100,9 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Invalid TOML in {path}: {exc}") from exc
+        raise ScopeConfigError(f"Invalid TOML in {path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{path} is not a TOML table.")
+        raise ScopeConfigError(f"{path} is not a TOML table.")
 
     extra_root = sorted(set(data) - {"scopes"})
     if extra_root:
@@ -150,7 +162,7 @@ def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
         if len(matches) == 1:
             return matches[0]
         choices = ", ".join(scopes)
-        raise ValueError(f"Unknown scope {name!r}. Choices: {choices}")
+        raise UnknownScopeError(f"Unknown scope {name!r}. Choices: {choices}")
     return scopes[name]
 
 

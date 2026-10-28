@@ -249,26 +249,29 @@ def set_asset(
     A new key is refused once ``ASSET_ROW_CAP`` rows exist. Updating a row
     that is already stored is still allowed.
     """
-    current = get_asset(conn, asset_key)
-    if current is None:
-        count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
-        if count >= ASSET_ROW_CAP:
-            raise ValueError(
-                f"Lantern stores at most {ASSET_ROW_CAP} inventory records. "
-                "Clear one before adding another."
-            )
-        current = _empty_asset(asset_key, kind)
-    if owner is not None:
-        current["owner"] = owner
-    if location is not None:
-        current["location"] = location
-    if tags is not None:
-        current["tags"] = tags
-    if criticality is not None:
-        current["criticality"] = criticality
-    if notes is not None:
-        current["notes"] = notes
-    with conn:
+    # Count and write share one reserved lock so two `asset set` processes
+    # cannot both pass the cap.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = get_asset(conn, asset_key)
+        if current is None:
+            count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            if count >= ASSET_ROW_CAP:
+                raise ValueError(
+                    f"Lantern stores at most {ASSET_ROW_CAP} inventory records. "
+                    "Clear one before adding another."
+                )
+            current = _empty_asset(asset_key, kind)
+        if owner is not None:
+            current["owner"] = owner
+        if location is not None:
+            current["location"] = location
+        if tags is not None:
+            current["tags"] = tags
+        if criticality is not None:
+            current["criticality"] = criticality
+        if notes is not None:
+            current["notes"] = notes
         conn.execute(
             "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -287,6 +290,10 @@ def set_asset(
                 _now(),
             ),
         )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return get_asset(conn, asset_key)
 
 

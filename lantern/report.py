@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 
-from .assets import device_asset_fields
+from .assets import device_asset_fields, strip_for_text
 
 
 def _device_for_report(device: dict) -> dict:
@@ -150,7 +150,7 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
         <p><strong>Port changes:</strong> {changed}</p></section>"""
 
     return f"""<h1>Lantern scan report</h1>
-<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {html.escape(str(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
+<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {_html_text(strip_for_text(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
 {'| demo data' if scan['demo'] else ''}</p>
 {diff_html}
 {devices_html}
@@ -174,7 +174,7 @@ def to_html(scan: dict, diff: dict | None = None) -> str:
 
 def multi_scope_html(scans: list[tuple[dict, dict | None]], failed: list[tuple[str, str]]) -> str:
     """One HTML document for every scope in a multi-scope run."""
-    ran = [scan.get("scope_name") or "" for scan, _diff in scans]
+    ran = [strip_for_text(scan.get("scope_name") or "") for scan, _diff in scans]
     parts = [
         "<h1>Lantern multi-scope scan</h1>",
         f"<p>Scopes ran: {html.escape(', '.join(ran) if ran else '(none)')}</p>",
@@ -193,3 +193,8 @@ def multi_scope_html(scans: list[tuple[dict, dict | None]], failed: list[tuple[s
 
 def to_json(scan: dict, diff: dict | None = None) -> str:
     return json.dumps(scan_to_dict(scan, diff), indent=2)
+
+
+def diff_to_json(diff: dict) -> str:
+    """Diff JSON with the same inventory-field stripping as a report."""
+    return json.dumps(_diff_for_report(diff), indent=2)
