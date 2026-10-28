@@ -68,12 +68,23 @@ jobs:
           esac
 
           # Unsafe subnets are refused in-process, before any probe.
-          # A zero exit would mean the safety check did not run.
+          # The database has to be writable, or a read-only filesystem
+          # fails first and this check would pass for the wrong reason.
           for subnet in 127.0.0.1/32 8.8.8.0/24; do
-            if docker run --rm "${runtime[@]}" lantern:ci lantern scan --subnet "$subnet"; then
+            set +e
+            scan_out=$(docker run --rm "${runtime[@]}" --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+              lantern:ci lantern scan --subnet "$subnet" --db /tmp/lantern-scan.db 2>&1)
+            scan_code=$?
+            set -e
+            echo "$scan_out"
+            if [[ "$scan_code" -eq 0 ]]; then
               echo "unsafe subnet $subnet was not refused" >&2
               exit 1
             fi
+            case "$scan_out" in
+              *"private home networks"*) ;;
+              *) echo "unsafe subnet $subnet was not refused by the safety check" >&2; exit 1 ;;
+            esac
           done
 
           # A LAN bind without --allow-lan is refused before any listen and
@@ -123,9 +134,14 @@ jobs:
           # Default command: prove the listening socket is 127.0.0.1:8068
           # (0x1F84). The startup line rewrites 0.0.0.0 to 127.0.0.1 in the
           # URL text, so the log line alone is not the check.
+          # /data is a host directory owned by uid 10001, same as the README.
+          # A tmpfs on the image VOLUME path is not writable by that user.
+          data_dir=$(mktemp -d)
+          sudo chown 10001:10001 "$data_dir"
+          sudo chmod 700 "$data_dir"
           cid=$(docker run -d "${runtime[@]}" \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m \
-            --tmpfs /data:rw,nosuid,nodev,size=64m \
+            -v "$data_dir:/data" \
             lantern:ci)
           cleanup() {
             docker rm -f "$cid" >/dev/null 2>&1 || true
