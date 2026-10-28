@@ -41,6 +41,14 @@ DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
 _NUM_RE = re.compile(r"^[0-9]{1,9}$")
 _DDE_RE = re.compile(r"""(?i)^\s*["']*\s*[=+\-@].*\|""")
+_PATH_ERRNOS = frozenset({
+    errno.EEXIST,
+    errno.ELOOP,
+    errno.EISDIR,
+    errno.ENOTDIR,
+    errno.EINVAL,
+    errno.ENAMETOOLONG,
+})
 _FORMULA_FIRST = set("=+-@\t\r\n|") | {
     "\uff1d",  # fullwidth equals
     "\uff0b",  # fullwidth plus
@@ -905,9 +913,9 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 temporary_path.unlink(missing_ok=True)
                 raise
     except OSError as exc:
-        if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", None)}:
-            raise ValueError("The export could not be written.") from exc
-        raise ValueError("The export path is not allowed.") from exc
+        if exc.errno in _PATH_ERRNOS:
+            raise ValueError("The export path is not allowed.") from exc
+        raise ValueError("The export could not be written.") from exc
     finally:
         if directory is not None:
             os.close(directory)

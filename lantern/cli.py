@@ -243,6 +243,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_EXPORT_VALUE_ERRORS = frozenset({
+    "Pass a file path to --output, or omit it to write to stdout.",
+    "The export path is not allowed.",
+    "The export directory must already exist.",
+    "The export directory must not be a symlink.",
+    "The export path must not be a symlink.",
+    "The export path must be a regular file.",
+    "The export file already exists. Pass --force to replace it.",
+    "The export path must not be a hard link.",
+    "The export path must be a file.",
+    "The export path must not use ~.",
+    "The export could not be written.",
+})
+
+
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
     return 2
@@ -281,7 +296,10 @@ def _cmd_export(args, conn) -> int:
             return 1
         return _err(MESSAGES[exc.code])
     except ValueError as exc:
-        return _err(str(exc))
+        text = str(exc)
+        if text not in _EXPORT_VALUE_ERRORS:
+            return _err("The export could not be written.")
+        return _err(text)
     except Exception:
         return _err(MESSAGES["server_error"])
     if args.output:

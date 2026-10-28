@@ -260,6 +260,23 @@ class PathTests(unittest.TestCase):
                 v1.write_export_file(str(dest), b"truncated", force=False)
         self.assertEqual(dest.read_bytes(), b"keep")
 
+    def test_other_io_errors_use_the_generic_write_message(self):
+        dest = self.root / "keep.json"
+        dest.write_bytes(b"keep")
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.EIO, "boom-secret")
+
+        with mock.patch("lantern.v1.os.write", boom):
+            with self.assertRaises(ValueError) as caught:
+                v1.write_export_file(str(dest), b"new-bytes", force=True)
+        message = str(caught.exception)
+        self.assertEqual(message, "The export could not be written.")
+        self.assertNotIn("boom-secret", message)
+        self.assertNotIn("not allowed", message)
+        self.assertEqual(dest.read_bytes(), b"keep")
+        self.assertEqual(list(self.root.glob(".lantern-export-*")), [])
+
     def test_disk_full_during_force_keeps_the_old_file(self):
         dest = self.root / "keep.json"
         dest.write_bytes(b"keep")
@@ -840,6 +857,31 @@ class CliExportTests(unittest.TestCase):
         self.assertTrue(row["fix"].startswith("'"), row["fix"])
         self.assertIn("+SUM(1)", row["fix"])
         self.assertEqual(len(parsed[1]), len(parsed[0]))
+
+    def test_cli_hides_the_raw_io_error(self):
+        conn = connect(self.db)
+        try:
+            save_scan(conn, "192.168.50.0/24", [_device("192.168.50.10")])
+        finally:
+            conn.close()
+        dest = self.root / "keep.json"
+        dest.write_text("keep", encoding="utf-8")
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.EIO, "boom-secret")
+
+        with mock.patch("lantern.v1.os.write", boom):
+            code, out, err = self.run_cli(
+                "export", "--what", "devices", "--format", "json",
+                "--output", str(dest), "--force",
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("could not be written", err)
+        self.assertNotIn("not allowed", err)
+        self.assertNotIn("boom-secret", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(out, "")
+        self.assertEqual(dest.read_text(encoding="utf-8"), "keep")
 
     def test_path_depth_guard_refuses_before_the_missing_directory_check(self):
         conn = connect(self.db)
