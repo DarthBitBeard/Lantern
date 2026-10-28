@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__, demo
@@ -15,6 +16,7 @@ from .discovery import arp_table, guess_subnet, ping_host, reverse_hostname, val
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .report import describe_change, to_html, to_json
 from .scanner import scan_host
+from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope
 from .store import connect, list_scans, load_scan_with_diff, save_scan
 
 DEFAULT_DB = Path("data/lantern.db")
@@ -71,8 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p = sub.add_parser("scan", help="Scan your private subnet.")
     _add_db_arg(scan_p)
     scan_p.add_argument("--subnet", help="e.g. 192.168.1.0/24. Auto-detected if omitted.")
+    scan_p.add_argument("--config", help="TOML file of named scopes. With --scope, default is ./lantern.toml.")
+    scan_p.add_argument("--scope", help="Scope name in --config. Required when the file defines more than one.")
     scan_p.add_argument("--demo", action="store_true", help="Use fake demo data, no network scan.")
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
+
+    scopes_p = sub.add_parser("scopes", help="List named scan scopes from a TOML file. Does not scan.")
+    scopes_p.add_argument("--config", help="TOML file, default ./lantern.toml.")
+    scopes_p.add_argument("--format", choices=["text", "json"], default="text")
 
     demo_p = sub.add_parser("demo", help="Run two demo scans and show the diff. No network touched.")
     _add_db_arg(demo_p)
@@ -125,9 +133,59 @@ def _print_text_diff(diff: dict) -> None:
         print("Nothing changed since the previous scan.")
 
 
+def _scope_config_path(args) -> Path:
+    if getattr(args, "config", None):
+        return Path(args.config)
+    return Path(DEFAULT_CONFIG_NAME)
+
+
+def _resolve_scan_subnet(args) -> str:
+    """Choose the subnet string before any discovery or probing.
+
+    `--subnet` still works on its own. A scope file is optional and is
+    checked with the same rules as `--subnet`.
+    """
+    if args.demo:
+        if args.config or args.scope:
+            raise ValueError("--demo cannot be combined with --config or --scope.")
+        return demo.DEMO_SUBNET
+    if args.subnet and (args.config or args.scope):
+        raise ValueError("Pass either --subnet or --config/--scope, not both.")
+    if args.config or args.scope:
+        scope = select_scope(load_scopes(_scope_config_path(args)), args.scope)
+        return scope.subnet
+    if args.subnet:
+        return args.subnet
+    guessed = guess_subnet()
+    if not guessed:
+        raise ValueError("Could not auto-detect your subnet. Pass --subnet 192.168.1.0/24")
+    return guessed
+
+
+def _cmd_scopes(args) -> int:
+    try:
+        scopes = list(load_scopes(_scope_config_path(args)).values())
+    except ValueError as exc:
+        return _err(str(exc))
+    if args.format == "json":
+        print(json.dumps({"scopes": [asdict(scope) for scope in scopes]}, indent=2))
+        return 0
+    if not scopes:
+        print("No scopes defined.")
+        return 0
+    name_width = max(len(scope.name) for scope in scopes)
+    subnet_width = max(len(scope.subnet) for scope in scopes)
+    print(f"{'name':<{name_width}}  {'subnet':<{subnet_width}}  description")
+    for scope in scopes:
+        print(f"{scope.name:<{name_width}}  {scope.subnet:<{subnet_width}}  {scope.description or ''}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "scopes":
+        return _cmd_scopes(args)
     db_path = Path(getattr(args, "db", str(DEFAULT_DB)))
 
     if args.command == "web":
@@ -175,13 +233,8 @@ def _dispatch(args, conn, db_path: Path) -> int:
         return 0
 
     if args.command == "scan":
-        if args.demo:
-            subnet = demo.DEMO_SUBNET
-        else:
-            subnet = args.subnet or guess_subnet()
-            if not subnet:
-                return _err("Could not auto-detect your subnet. Pass --subnet 192.168.1.0/24")
         try:
+            subnet = _resolve_scan_subnet(args)
             network = validate_subnet(subnet)
             subnet = str(network)
             if not args.demo and args.format == "text":

@@ -4,7 +4,7 @@
 
 Lantern is a defensive scanner for your own home or small office network. Only scan a network you own, or one where you have explicit permission from the owner to scan it. Scanning someone else's network without permission may be unlawful and is out of scope for this project.
 
-Lantern enforces part of this in code: it refuses public, loopback, and link-local addresses, and subnets larger than 1024 addresses (a /22). That is a guardrail, not a substitute for permission.
+Lantern enforces part of this in code: it refuses public, loopback, and link-local addresses, and subnets larger than 1024 addresses (a /22). That is a guardrail, not a substitute for permission. A scope in `lantern.toml` is checked with the same function as `--subnet`, so the file cannot raise the cap or allow a public, loopback, or link-local range.
 
 ## Reporting a vulnerability in Lantern
 

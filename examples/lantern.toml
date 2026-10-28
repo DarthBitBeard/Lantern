@@ -1,0 +1,27 @@
+# Lantern scan scopes.
+# Copy this file to lantern.toml (in the directory you run lantern from)
+# and replace the subnets with networks you are allowed to scan.
+#
+# Each scope is one private IPv4 network. The same rules as
+# `lantern scan --subnet` apply:
+#   - private RFC1918 ranges only (10/8, 172.16/12, 192.168/16)
+#   - at most 1024 addresses (a /22); a /24 is the normal size
+#   - no loopback, no link-local, no public addresses, no IPv6
+# One subnet per scope. Any setting other than "subnet" and "description"
+# is rejected, so this file cannot turn on excludes, extra CIDRs, or a
+# different port list.
+#
+#   python3 -m lantern scopes --config lantern.toml
+#   python3 -m lantern scan --config lantern.toml --scope home
+
+[scopes.home]
+subnet = "192.168.1.0/24"
+description = "Home LAN"
+
+[scopes.lab]
+subnet = "10.10.10.0/24"
+description = "Lab bench"
+
+[scopes.guest]
+subnet = "172.16.8.0/24"
+description = "Guest Wi-Fi"
