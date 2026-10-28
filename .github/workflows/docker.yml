@@ -153,7 +153,9 @@ jobs:
             --port 8068 --db /tmp/lantern-lan.db)
           cleanup_lan() {
             docker rm -f "$lan_cid" >/dev/null 2>&1 || true
-            rm -f "$token_file"
+            # The file is mode 0400 and owned by uid 10001. Sticky /tmp
+            # will not let the runner unlink a file it no longer owns.
+            sudo rm -f "$token_file"
           }
           trap cleanup_lan EXIT
 
@@ -217,7 +219,7 @@ jobs:
           '
 
           docker rm -f "$lan_cid" >/dev/null 2>&1 || true
-          rm -f "$token_file"
+          sudo rm -f "$token_file"
           trap - EXIT
           unset token
 
