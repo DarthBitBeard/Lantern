@@ -81,7 +81,7 @@ Strict auth is the default, on loopback and in LAN mode. It keeps the token out 
 
 A scan sends real traffic. It pings every host address in the subnet. Hosts that answer, and hosts already in the local ARP cache, then get TCP connections, banner reads, and a reverse-DNS lookup. Network owners or intrusion-detection tools may notice it. Those lookups go to the configured DNS server, which may be outside your network.
 
-The scope check can accept some non-RFC1918 special-use ranges. See the security model above. The 64 KiB body limit, the 10 second request deadline, and the 60 second response deadline still apply.
+The scope check accepts only networks fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`. See the security model above. The 64 KiB body limit, the 10 second request deadline, and the 60 second response deadline still apply.
 
 ## Responsible use
 
