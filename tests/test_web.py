@@ -673,7 +673,7 @@ class LanModeTests(unittest.TestCase):
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers

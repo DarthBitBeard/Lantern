@@ -772,7 +772,7 @@ class WebBindTests(unittest.TestCase):
         enabled, error = cli.strict_auth_requested(False, {})
         self.assertIsNone(error)
         self.assertTrue(enabled)
-        for raw in ("0", "false", "no", "off", "", "  0  "):
+        for raw in ("0", "false", "no", "off", "  0  "):
             enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
             self.assertIsNone(error, raw)
             self.assertFalse(enabled, raw)
@@ -783,6 +783,19 @@ class WebBindTests(unittest.TestCase):
                 False, {cli.STRICT_AUTH_ENV: raw}, opt_out=True,
             )
             self.assertFalse(enabled, raw)
+        for raw in ("", "   "):
+            enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
+            self.assertIsNone(error, raw)
+            self.assertTrue(enabled, raw)
+        for raw in ("garbage", "2", "enable"):
+            enabled, error = cli.strict_auth_requested(True, {cli.STRICT_AUTH_ENV: raw})
+            self.assertIsNotNone(error, raw)
+            self.assertFalse(enabled)
+            enabled, error = cli.strict_auth_requested(
+                False, {cli.STRICT_AUTH_ENV: raw}, opt_out=True,
+            )
+            self.assertIsNotNone(error, raw)
+            self.assertFalse(enabled)
         for raw in ("1", "true", "yes", "on", " TRUE "):
             enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
             self.assertIsNone(error, raw)
