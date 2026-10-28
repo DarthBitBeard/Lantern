@@ -11,7 +11,22 @@ Do not include real network data. That means no real IPs, MAC addresses, hostnam
 
 Please test only on localhost, or on networks you own or are authorized to test.
 
-Reports are handled by the maintainer on a best-effort basis. There is no guaranteed response time or fix time. Fixes are announced with a GitHub Security Advisory when practical.
+These are targets, not guarantees:
+
+- Acknowledgement within 3 business days.
+- Triage and a severity assessment within 7 days.
+- Fix target: 30 days for Critical and High, 90 days for Medium and Low. If a fix will take longer, we will say why and agree a new date.
+- Coordinated disclosure: a GitHub Security Advisory is published when the fix lands. We credit you unless you ask us not to. A CVE may be requested where appropriate.
+
+## Safe harbor
+
+We will not pursue or support legal action against good-faith research that:
+
+- tests only on localhost, your own devices, or networks you own or are explicitly authorized to test;
+- avoids privacy violations, data destruction, and service disruption;
+- reports privately and gives us reasonable time to fix before disclosure.
+
+This does not authorize testing against anyone else's network or devices. This is not legal advice.
 
 ## Supported versions
 
@@ -31,7 +46,7 @@ The dashboard has no user accounts. It does have one access token per process (`
 
 `--allow-lan` is the only way to bind an address other than loopback. The default bind is `127.0.0.1`. The flag exits 2 before it listens unless one token of at least 128 bits is available (22 to 512 urlsafe characters). Precedence is `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal and `--debug` is not set. A generated token is printed once on that terminal. `--debug` does not print one. When stderr is not a terminal, Lantern does not generate a token. The token file must be a regular file of at most 4 KiB, opened with `O_NOFOLLOW` and `O_NONBLOCK` where the platform has them. A symlink or a FIFO is refused. On non-Windows systems the file must have no group or other permissions (0400 or 0600 recommended; 0500 and 0700 are also accepted). Mode 0444 is refused. Windows does not check the mode.
 
-Every request needs an allowed `Host`. On loopback that is `127.0.0.1`, `localhost`, or `[::1]` on the bound port, plus any host named with `--allow-host`. With `--allow-lan` the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added. A `POST` that includes `Origin` must use `http` or `https`, and that origin's host and port must be on the same allowlist. A missing `Origin` is accepted only after the token matches. `--allow-host` rejects unspecified addresses, zone ids, wildcards, CIDR, all-digit names, and loose IPv4 forms such as `127.1`.
+Every request needs an allowed `Host`. On loopback that is `127.0.0.1`, `localhost`, or `[::1]` on the bound port (case-insensitive; a trailing dot such as `localhost.` is accepted), plus any host named with `--allow-host`. With `--allow-lan` the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added. A `POST` that includes `Origin` must use `http` or `https`, and that origin's host and port must be on the same allowlist. A missing `Origin` is accepted only after the token matches. `--allow-host` rejects unspecified addresses, zone ids, wildcards, CIDR, all-digit names, and loose IPv4 forms such as `127.1`.
 
 Reading one request (the request line, the headers, and the body) shares a 10 second deadline. A request body larger than 64 KiB is refused with 413. Responses are written in 16 KiB chunks. Each chunk waits at most 10 seconds, and never longer than the time left on a 60 second overall deadline. The process serves at most 32 connections at once and at most 8 from one client address. A full cap is 503. Those caps limit how many connections run at once. They do not stop a client from holding the slots it already has until a deadline.
 
