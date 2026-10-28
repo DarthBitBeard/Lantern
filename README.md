@@ -135,7 +135,7 @@ docker compose up -d
 
 The compose file uses host networking, because a scan from inside a normal container only sees the container network. See `docker-compose.yml` for the warning. The image's default command is unchanged.
 
-CI (`.github/workflows/docker.yml`) builds the image and runs `lantern --version` and `lantern demo` inside it with container networking disabled. That job does not start the dashboard and does not scan a network. The demo uses the built-in fake devices.
+CI (`.github/workflows/docker.yml`) builds the image and, with container networking disabled, runs `lantern --version`, `lantern demo`, and a check that loopback and public subnets are refused. That job does not start the dashboard and does not scan a network. The demo uses the built-in fake devices.
 
 ## What it scans
 

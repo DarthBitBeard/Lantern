@@ -7,7 +7,7 @@
 - Guessing the local subnet gives up on a slow hostname lookup after half a second, so a stuck DNS answer cannot stall the CLI or the dashboard. The UDP route check is unchanged and still does not send a packet.
 - SQLite files record a `schema_version`. Opening a database created by 0.3.0 upgrades it in place and keeps its scans, devices, and trusted devices. Before that upgrade, Lantern writes a sibling copy (`<file>.v0.bak`). Migrations only move forward. A file written by a newer Lantern is refused and left unchanged.
 - `lantern.toml` can name scan scopes (`subnet` plus an optional `description`). `lantern scopes` lists them and does not scan. `lantern scan --config lantern.toml --scope home` scans that one subnet. `--subnet` still works on its own. Each scope is checked with the same rules as `--subnet`: private RFC1918 only, at most 1024 addresses, no loopback or link-local. Extra keys (excludes, more than one CIDR, a custom port list) are rejected. See `examples/lantern.toml`. The dashboard does not read this file.
-- CI builds the Docker image and runs `lantern --version` and an offline `lantern demo` inside it, with container networking disabled. The job does not start the dashboard. The image's default bind address and compose networking are unchanged.
+- CI builds the Docker image and, with container networking disabled, runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not start the dashboard. The image's default bind address and compose networking are unchanged.
 
 ## 0.3.0 - 2026-10-27
 
