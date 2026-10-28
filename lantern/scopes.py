@@ -41,10 +41,11 @@ class Scope:
 
 
 class ScopeConfigError(ValueError):
-    """The scope file could not be read or parsed.
+    """The scope file could not be read, or it breaks the scope rules.
 
-    A bad name or an unknown scope is a different error. Callers that only
-    read stored scans can catch this type instead of matching error text.
+    A typed name that fails the name check, or a name missing from a file
+    that did load, is a different error. Callers that only read stored scans
+    can catch this type instead of matching error text.
     """
 
 
@@ -107,26 +108,26 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
     extra_root = sorted(set(data) - {"scopes"})
     if extra_root:
         listed = ", ".join(extra_root)
-        raise ValueError(
+        raise ScopeConfigError(
             f"Unsupported setting(s) in {path}: {listed}. "
             "The file may only contain [scopes.<name>] tables."
         )
     if "scopes" not in data:
-        raise ValueError(f"{path} has no [scopes] table.")
+        raise ScopeConfigError(f"{path} has no [scopes] table.")
     raw_scopes = data["scopes"]
     if not isinstance(raw_scopes, dict):
-        raise ValueError(
+        raise ScopeConfigError(
             f"{path}: 'scopes' must be a table of named scopes, like [scopes.home]."
         )
     if not raw_scopes:
-        raise ValueError(f"{path} does not define any scopes.")
+        raise ScopeConfigError(f"{path} does not define any scopes.")
 
     scopes: dict[str, Scope] = {}
     folded: dict[str, str] = {}
     for name, body in raw_scopes.items():
         key = name.casefold() if isinstance(name, str) else name
         if key in folded:
-            raise ValueError(
+            raise ScopeConfigError(
                 f"Scope name {name!r} repeats {folded[key]!r} except for case."
             )
         folded[key] = name
@@ -168,37 +169,37 @@ def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
 
 def _parse_scope(name: str, body: object) -> Scope:
     if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
-        raise ValueError(
+        raise ScopeConfigError(
             f"Scope name {name!r} is not allowed. "
             "Use 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit."
         )
     if not isinstance(body, dict):
-        raise ValueError(f"Scope {name!r} must be a table with a 'subnet' string.")
+        raise ScopeConfigError(f"Scope {name!r} must be a table with a 'subnet' string.")
     extra = sorted(set(body) - _SCOPE_KEYS)
     if extra:
         listed = ", ".join(extra)
-        raise ValueError(
+        raise ScopeConfigError(
             f"Scope {name!r} has unsupported setting(s): {listed}. "
             "Only 'subnet' and 'description' are allowed."
         )
     if "subnet" not in body:
-        raise ValueError(f"Scope {name!r} is missing 'subnet'.")
+        raise ScopeConfigError(f"Scope {name!r} is missing 'subnet'.")
     subnet = body["subnet"]
     if not isinstance(subnet, str):
-        raise ValueError(f"Scope {name!r}: 'subnet' must be a string like 192.168.1.0/24.")
+        raise ScopeConfigError(f"Scope {name!r}: 'subnet' must be a string like 192.168.1.0/24.")
     try:
         network = validate_subnet(subnet)
     except ValueError as exc:
-        raise ValueError(f"Scope {name!r}: {exc}") from exc
+        raise ScopeConfigError(f"Scope {name!r}: {exc}") from exc
 
     description = None
     if "description" in body:
         raw = body["description"]
         if not isinstance(raw, str):
-            raise ValueError(f"Scope {name!r}: 'description' must be a string.")
+            raise ScopeConfigError(f"Scope {name!r}: 'description' must be a string.")
         description = raw.strip()
         if len(description) > _MAX_DESCRIPTION:
-            raise ValueError(
+            raise ScopeConfigError(
                 f"Scope {name!r}: 'description' is longer than {_MAX_DESCRIPTION} characters."
             )
         description = description or None

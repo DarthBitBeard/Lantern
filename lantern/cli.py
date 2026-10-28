@@ -1197,7 +1197,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         if scan is None or diff is None:
             label = scope_name or (scan.get("scope_name") if scan else None)
             if label:
-                shown = assetlib.strip_for_text(label) or label
+                shown = assetlib.strip_for_text(label) or "-"
                 print(f"Need at least two saved scans for scope {shown}.")
             else:
                 print("Need at least two saved scans. Run `lantern demo` or `lantern scan` twice.")

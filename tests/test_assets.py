@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -471,6 +472,87 @@ class AssetCommandTests(unittest.TestCase):
                 self._assert_lab_listed(blocked)
             finally:
                 os.chmod(blocked, 0o600)
+
+    def test_asset_list_falls_back_when_the_scope_file_breaks_the_rules(self):
+        self._lab_asset()
+        texts = [
+            'bogus = 1\n[scopes.Lab-2]\nsubnet = "192.168.51.0/24"\n',
+            '[scopes.Lab-2]\nsubnet = "8.8.8.0/24"\n',
+            '[scopes.Lab-2]\nsubnet = "192.168.51.0/24"\n'
+            '[scopes.lab-2]\nsubnet = "192.168.52.0/24"\n',
+            'scopes = "not-a-table"\n',
+            '[scopes."bad name"]\nsubnet = "192.168.51.0/24"\n',
+            "",
+        ]
+        for index, text in enumerate(texts):
+            path = Path(self.tmp.name) / f"rules-{index}.toml"
+            path.write_text(text, encoding="utf-8")
+            self._assert_lab_listed(path)
+        bogus = Path(self.tmp.name) / "bogus.toml"
+        bogus.write_text(texts[0], encoding="utf-8")
+        code, out, err = self.run_cli(
+            "history", "--scope", "Lab-2", "--config", str(bogus), "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("Lab-2", [row["scope_name"] for row in json.loads(out)["scans"]])
+        code, _, err = self.run_cli(
+            "asset", "list", "--scope", "bad name", "--config", str(bogus),
+        )
+        self.assertEqual(code, 2, err)
+        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+            code, _, err = self.run_cli("scan", "--config", str(bogus), "--scope", "Lab-2")
+        self.assertEqual(code, 2, err)
+        self.assertIn("bogus", err)
+        scan_hosts.assert_not_called()
+        run_scan.assert_not_called()
+
+    def test_refused_insert_releases_the_write_lock(self):
+        with mock.patch.object(assets, "ASSET_ROW_CAP", 1):
+            holder = connect(self.db)
+            try:
+                assets.set_asset(holder, "mac:aa:bb:cc:dd:ee:01", "mac", owner="One")
+                with self.assertRaises(ValueError):
+                    assets.set_asset(holder, "mac:aa:bb:cc:dd:ee:02", "mac", owner="Two")
+                other = sqlite3.connect(self.db, timeout=0.5)
+                try:
+                    other.execute("BEGIN IMMEDIATE")
+                    other.execute(
+                        "UPDATE assets SET owner = ? WHERE asset_key = ?",
+                        ("Updated", "mac:aa:bb:cc:dd:ee:01"),
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+            finally:
+                holder.close()
+        conn = connect(self.db)
+        try:
+            self.assertEqual(
+                assets.get_asset(conn, "mac:aa:bb:cc:dd:ee:01")["owner"],
+                "Updated",
+            )
+        finally:
+            conn.close()
+
+    def test_diff_prints_a_dash_when_the_scope_name_strips_away(self):
+        planted = "\x1b\u202e\x07\u200b"
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.51.0/24",
+                [_device("192.168.51.10", "aa:bb:cc:dd:ee:21")],
+                scope_name=planted,
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("diff")
+        self.assertEqual(code, 0, err)
+        self.assertIn("scope -", out)
+        for char in planted:
+            self.assertNotIn(char, out)
+            self.assertNotIn(char, err)
 
     def test_two_connections_cannot_both_pass_the_cap(self):
         holder = connect(self.db)

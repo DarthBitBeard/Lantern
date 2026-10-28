@@ -85,3 +85,13 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertNotIn("<script>", page)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertIn("lab", page)
+
+    def test_multi_scope_html_strips_a_planted_scope_name(self):
+        planted = "lab\x1b\u202e\x07\u200bhome"
+        scan = _scan()
+        scan["scope_name"] = planted
+        scan["devices"] = []
+        page = multi_scope_html([(scan, None)], [])
+        self.assertIn("labhome", page)
+        for char in ("\x1b", "\u202e", "\x07", "\u200b"):
+            self.assertNotIn(char, page)
