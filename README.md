@@ -1,6 +1,14 @@
-# Lantern
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lantern_lockup_horizontal_dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/lantern_lockup_horizontal_light.svg">
+    <img alt="Lantern" src="docs/assets/lantern_lockup_horizontal_light.svg" width="450">
+  </picture>
+</p>
 
-Lantern is a local-first home network scanner. It finds the devices on your network, flags risky open ports in plain English, and shows what changed since the last scan.
+<p align="center">A local-first home network scanner.</p>
+
+It finds the devices on your network, flags risky open ports in plain English, and shows what changed since the last scan.
 
 It is defensive only. It scans your own private network, with your permission. It never guesses passwords, never sends exploits, and never phones home. All results stay in one local SQLite file.
 
@@ -232,6 +240,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: keep it stdlib only, 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
+
+## Logo
+
+The mark at the top is original vector artwork for this project. The wordmark outlines are Manrope (Copyright 2019 The Manrope Project Authors, SIL Open Font License 1.1). The font file is not in this repo; the SVG glyphs are outlines. The OFL notice is [docs/assets/OFL-Manrope.txt](docs/assets/OFL-Manrope.txt). The artwork is included under this repository's MIT licence unless the maintainer states otherwise.
 
 ## License
 
