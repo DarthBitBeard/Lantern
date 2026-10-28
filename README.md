@@ -54,6 +54,8 @@ Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <comma
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
+Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then stamps schema version 1. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
+
 **Debug tips**
 
 - Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --debug --db data/lantern.db`.

@@ -3,6 +3,11 @@
 A scan is a snapshot: devices found, their open ports, and findings.
 Diffing two snapshots is the core value: what is new, what left,
 what opened, what closed.
+
+Schema changes are forward-only. The `schema_version` table records each
+applied version. `connect` runs any missing migrations in one transaction.
+For an existing database file it first writes a copy beside it,
+`<file>.v<old>.bak`, and leaves that copy untouched.
 """
 
 from __future__ import annotations
@@ -10,17 +15,127 @@ from __future__ import annotations
 import ipaddress
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
+# plus this version table. The package version stays put until a release;
+# the schema version moves only when the tables change.
+SCHEMA_VERSION = 1
+
+Migration = Callable[[sqlite3.Connection], None]
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    """Open (and create if needed) the Lantern database."""
-    conn = sqlite3.connect(str(db_path))
+def _newer_message(found: int, target: int) -> str:
+    return (
+        f"Database schema version {found} is newer than this Lantern "
+        f"(schema {target}). Refusing to change it. Upgrade Lantern to open this file."
+    )
+
+
+def _require_migration_keys(migrations: dict[int, Migration], target: int) -> None:
+    expected = list(range(1, target + 1))
+    got = sorted(migrations)
+    if target < 1 or got != expected:
+        raise RuntimeError(
+            f"Migrations must be exactly versions 1..{target}, got {got}."
+        )
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    """Highest applied schema version, or 0 when the file has never been stamped.
+
+    A Lantern 0.3.0 database has the scan tables and no `schema_version`
+    table, so it reports 0.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ).fetchone()
+    if row is None:
+        return 0
+    found = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    if not found or found[0] is None:
+        return 0
+    return int(found[0])
+
+
+def _has_user_tables(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return any(row[0] != "schema_version" for row in rows)
+
+
+def _persistent_path(db_path: str | Path | None) -> Path | None:
+    if db_path is None:
+        return None
+    text = str(db_path)
+    if text == ":memory:" or text.startswith("file::memory:"):
+        return None
+    return Path(text)
+
+
+def _unused_backup_path(source: Path, from_version: int) -> Path:
+    """`<file>.v<from>.bak`, or `<file>.v<from>.N.bak` if that name is taken.
+
+    The first file is never overwritten, so a later attempt cannot replace
+    the pre-upgrade copy with an already-upgraded one.
+    """
+    first = Path(str(source) + f".v{from_version}.bak")
+    if not first.exists():
+        return first
+    number = 1
+    while True:
+        candidate = Path(str(source) + f".v{from_version}.{number}.bak")
+        if not candidate.exists():
+            return candidate
+        number += 1
+
+
+def _backup_database(conn: sqlite3.Connection, source: Path, from_version: int) -> Path:
+    """Write a consistent copy of `source` using the SQLite backup API.
+
+    Call this when `conn` is not already inside a transaction. Backing up
+    the same connection while it holds a write lock waits forever.
+    """
+    dest = _unused_backup_path(source, from_version)
+    saved = sqlite3.connect(dest)
+    try:
+        conn.backup(saved)
+    except Exception:
+        saved.close()
+        dest.unlink(missing_ok=True)
+        raise
+    saved.close()
+    return dest
+
+
+def _write_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS schema_version (
+               version INTEGER PRIMARY KEY,
+               applied_at TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+        (version, _now()),
+    )
+
+
+def _migration_1_v030_baseline(conn: sqlite3.Connection) -> None:
+    """Schema 1: the tables Lantern 0.3.0 already created.
+
+    `CREATE TABLE IF NOT EXISTS` is what makes an on-disk 0.3.0 file
+    upgrade without rewriting its rows. Do not add columns here. A later
+    change is the next numbered migration, and it must not edit this one.
+    Migrations must not commit; the runner owns the transaction.
+    """
     conn.execute(
         """CREATE TABLE IF NOT EXISTS scans (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +165,69 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
                updated_at TEXT NOT NULL
            )"""
     )
-    conn.commit()
+
+
+_MIGRATIONS: dict[int, Migration] = {
+    1: _migration_1_v030_baseline,
+}
+_require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
+
+
+def apply_migrations(
+    conn: sqlite3.Connection,
+    *,
+    migrations: dict[int, Migration] | None = None,
+    target: int | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """Upgrade `conn` to `target` and return the version now stored.
+
+    Versions only increase. A database newer than `target` raises
+    ValueError and is not modified. When `db_path` is a real file that
+    already has data, a backup is written beside it before the upgrade.
+    """
+    migrations = _MIGRATIONS if migrations is None else migrations
+    target = SCHEMA_VERSION if target is None else target
+    _require_migration_keys(migrations, target)
+
+    current = schema_version(conn)
+    if current == target:
+        return current
+    if current > target:
+        raise ValueError(_newer_message(current, target))
+
+    source = _persistent_path(db_path)
+    if source is not None and (current > 0 or _has_user_tables(conn)):
+        _backup_database(conn, source, current)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = schema_version(conn)
+        if current > target:
+            raise ValueError(_newer_message(current, target))
+        for version in range(current + 1, target + 1):
+            migrations[version](conn)
+            _write_schema_version(conn, version)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return schema_version(conn)
+
+
+def connect(db_path: str | Path) -> sqlite3.Connection:
+    """Open (and create if needed) the Lantern database.
+
+    A database from Lantern 0.3.0 is upgraded in place after a backup copy
+    is written beside the file. A database newer than this process is
+    refused and left unchanged.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        apply_migrations(conn, db_path=db_path)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
