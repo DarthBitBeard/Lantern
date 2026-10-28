@@ -1691,6 +1691,95 @@ fallback.context.api("/api/status").catch(() => {}).then(() => {
         )
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
+    def test_dashboard_escapes_scope_and_device_fields(self):
+        """app.js must escape scope, banner, hostname, label, owner, tag, and notes."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const app = fs.readFileSync(process.argv[1], "utf8");
+const elements = {};
+function el(id) {
+  if (!elements[id]) {
+    elements[id] = {
+      id, hidden: true, textContent: "", value: "", className: "",
+      innerHTML: "", href: "", disabled: false,
+      addEventListener() {},
+      getAttribute() { return ""; },
+      querySelectorAll() { return []; },
+    };
+  }
+  return elements[id];
+}
+const context = {
+  sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  document: {
+    getElementById: el,
+    querySelector() { return { getAttribute() { return ""; } }; },
+    body: { setAttribute() {} },
+  },
+  window: { open() {} },
+  history: { replaceState() {} },
+  URL: { createObjectURL: () => "blob:test" },
+  fetch: async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      scan_count: 0, latest_scan_id: null, scan_running: false, version: "t",
+      scans: [], scan: null, diff: null,
+    }),
+    text: async () => "",
+  }),
+  console,
+};
+context.window.location = { hash: "", pathname: "/", search: "" };
+vm.createContext(context);
+vm.runInContext(app, context);
+const payload = "<script>alert(1)</script>";
+const html = context.renderDevice({
+  ip: "192.168.50.10",
+  mac: "aa:bb:cc:dd:ee:10",
+  hostname: payload + "hostname",
+  label: payload + "label",
+  owner: payload + "owner",
+  tag: payload + "tag",
+  notes: payload + "notes",
+  trusted: false,
+  open_ports: [{ port: 80, banner: payload + "banner" }],
+  findings: [],
+});
+if (html.includes("<script>")) process.exit(2);
+for (const field of ["hostname", "label", "owner", "tag", "notes", "banner"]) {
+  if (!html.includes("&lt;script&gt;alert(1)&lt;/script&gt;" + field)) {
+    console.error("missing " + field);
+    process.exit(3);
+  }
+}
+context.renderSummary({
+  id: 1, devices: [], subnet: "192.168.50.0/24",
+  scope_name: payload + "scope", started_at: "2026-10-28T00:00:00Z", demo: false,
+}, null);
+const summary = elements.summary.innerHTML;
+if (summary.includes("<script>") || !summary.includes("&lt;script&gt;alert(1)&lt;/script&gt;scope")) {
+  console.error(summary);
+  process.exit(4);
+}
+const option = context.historyOption({
+  id: 3, started_at: "2026-10-28T00:00:00Z", device_count: 1, demo: false,
+  scope_name: payload + "scope",
+});
+if (option.includes("<script>") || !option.includes("&lt;script&gt;alert(1)&lt;/script&gt;scope")) {
+  console.error(option);
+  process.exit(5);
+}
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
     def test_strict_auth_without_a_token_is_refused(self):
         with self.assertRaises(ValueError):
             make_server(

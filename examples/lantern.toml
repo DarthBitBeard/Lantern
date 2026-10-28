@@ -13,6 +13,9 @@
 #
 #   python3 -m lantern scopes --config lantern.toml
 #   python3 -m lantern scan --config lantern.toml --scope home
+#   python3 -m lantern scan --config lantern.toml --scope home --scope lab
+#   python3 -m lantern scan --config lantern.toml --all
+#   python3 -m lantern history --scope home
 
 [scopes.home]
 subnet = "192.168.1.0/24"

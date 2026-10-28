@@ -6,11 +6,24 @@ import html
 import json
 
 
+def defuse_csv_cell(value) -> str:
+    """Stop a cell from being read as a spreadsheet formula.
+
+    A leading ``=``, ``+``, ``-``, ``@``, tab, or carriage return is prefixed
+    with a single quote. The quote is the cell text, not a file mode.
+    """
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
 def scan_to_dict(scan: dict, diff: dict | None = None) -> dict:
     return {
         "id": scan["id"],
         "started_at": scan["started_at"],
         "subnet": scan["subnet"],
+        "scope_name": scan.get("scope_name"),
         "demo": scan["demo"],
         "device_count": len(scan["devices"]),
         "devices": scan["devices"],
@@ -32,6 +45,18 @@ def describe_change(change: dict) -> str:
     return f"{ip}: " + "; ".join(parts) if parts else f"{ip}: no change"
 
 
+def _device_extra(device: dict) -> str:
+    """Escaped lines for fields a report may show beside the address."""
+    lines = []
+    if device.get("label") and device.get("hostname"):
+        lines.append(f"<p>Hostname: {html.escape(str(device['hostname']))}</p>")
+    for key, title in (("owner", "Owner"), ("tag", "Tag"), ("notes", "Notes")):
+        value = device.get(key)
+        if value:
+            lines.append(f"<p>{title}: {html.escape(str(value))}</p>")
+    return "".join(lines)
+
+
 def _finding_rows(device: dict) -> str:
     rows = ""
     for finding in device["findings"]:
@@ -48,6 +73,14 @@ def to_html(scan: dict, diff: dict | None = None) -> str:
     for device in scan["devices"]:
         name = device.get("label") or device.get("hostname") or device["ip"]
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
+        banners = [
+            str(port.get("banner"))
+            for port in device.get("open_ports") or []
+            if port.get("banner")
+        ]
+        banner_html = ""
+        if banners:
+            banner_html = f"<p>Banner: {html.escape(' | '.join(banners))}</p>"
         trust = ""
         if device.get("trusted"):
             trust = " <small>(trusted)</small>"
@@ -55,6 +88,8 @@ def to_html(scan: dict, diff: dict | None = None) -> str:
         <section>
           <h2>{html.escape(str(name))} <small>{html.escape(device['ip'])}</small>{trust}</h2>
           <p>MAC: {html.escape(device.get('mac') or 'unknown')} | Open ports: {html.escape(ports)}</p>
+          {_device_extra(device)}
+          {banner_html}
           <table><tr><th>Port</th><th>Service</th><th>Risk</th><th>What it means</th></tr>
           {_finding_rows(device)}
           </table>
@@ -78,7 +113,7 @@ def to_html(scan: dict, diff: dict | None = None) -> str:
 table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:.4rem;text-align:left;vertical-align:top}}
 h1{{margin-bottom:.2rem}}</style></head><body>
 <h1>Lantern scan report</h1>
-<p>Scan #{int(scan['id'])} | {html.escape(scan['started_at'])} | {html.escape(scan['subnet'])} | {len(scan['devices'])} devices
+<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {html.escape(str(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
 {'| demo data' if scan['demo'] else ''}</p>
 {diff_html}
 {devices_html}
