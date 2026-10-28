@@ -623,6 +623,23 @@ class CliExportTests(unittest.TestCase):
         self.assertIn("+SUM(1)", row["fix"])
         self.assertEqual(len(parsed[1]), len(parsed[0]))
 
+    def test_export_does_not_create_a_missing_database(self):
+        import contextlib
+        from lantern import cli
+
+        missing = Path(self.tmp.name) / "absent" / "lantern.db"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main([
+                "--db", str(missing), "export", "--what", "history",
+            ])
+        self.assertEqual(code, 2)
+        self.assertFalse(missing.exists())
+        self.assertFalse(missing.parent.exists())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertIn("does not create", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
     def test_export_stdout_writes_bytes(self):
         import contextlib
         import sys

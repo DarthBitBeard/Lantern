@@ -1093,6 +1093,9 @@ def main(argv=None) -> int:
         if web_bind.error:
             return _err(web_bind.error)
 
+    if args.command == "export" and not db_path.is_file():
+        return _err("No database file to export. This command does not create one.")
+
     try:
         # connect() creates a missing parent at mode 0700. A mkdir here
         # would leave that directory at 0755 under umask 022.
