@@ -386,38 +386,12 @@ class AssetCommandTests(unittest.TestCase):
             "asset", "set", "aa:bb:cc:dd:ee:21", "--owner", "Ada",
         )
         self.assertEqual(code, 0, err)
-        conn = connect(self.db)
-        try:
-            save_scan(
-                conn,
-                "192.168.51.0/24",
-                [_device("192.168.51.10", "aa:bb:cc:dd:ee:21")],
-                scope_name="Lab-2",
-            )
-        finally:
-            conn.close()
         code, out, err = self.run_cli(
             "asset", "list", "--scope", "lab-2", "--config", str(config), "--format", "json",
         )
         self.assertEqual(code, 0, err)
         listed = json.loads(out)["assets"]
         self.assertEqual([item["owner"] for item in listed], ["Ada"])
-        code, out, err = self.run_cli(
-            "history", "--scope", "lab-2", "--config", str(config), "--format", "json",
-        )
-        self.assertEqual(code, 0, err)
-        scopes = {item["scope_name"] for item in json.loads(out)["scans"]}
-        self.assertEqual(scopes, {"Lab-2"})
-        code, out, err = self.run_cli(
-            "report", "--scope", "lab-2", "--config", str(config), "--format", "json",
-        )
-        self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
-        code, out, err = self.run_cli(
-            "diff", "--scope", "lab-2", "--config", str(config), "--format", "json",
-        )
-        self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["added"], [])
 
     def test_asset_list_scope_keeps_an_exact_stored_spelling(self):
         config = Path(self.tmp.name) / "scopes.toml"
@@ -450,7 +424,3 @@ class AssetCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 2, err)
         self.assertIn("more than one stored scope", err)
-        for command in ("history", "diff", "report"):
-            code, _, err = self.run_cli(command, "--scope", "lab-2", "--config", str(config))
-            self.assertEqual(code, 2, err)
-            self.assertIn("more than one stored scope", err)
