@@ -110,7 +110,14 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
         raise ValueError(f"{path} does not define any scopes.")
 
     scopes: dict[str, Scope] = {}
+    folded: dict[str, str] = {}
     for name, body in raw_scopes.items():
+        key = name.casefold() if isinstance(name, str) else name
+        if key in folded:
+            raise ValueError(
+                f"Scope name {name!r} repeats {folded[key]!r} except for case."
+            )
+        folded[key] = name
         scopes[name] = _parse_scope(name, body)
     return scopes
 
@@ -135,6 +142,10 @@ def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
         choices = ", ".join(scopes)
         raise ValueError(f"Config defines more than one scope. Pass --scope. Choices: {choices}")
     if name not in scopes:
+        folded = name.casefold()
+        matches = [scope for key, scope in scopes.items() if key.casefold() == folded]
+        if len(matches) == 1:
+            return matches[0]
         choices = ", ".join(scopes)
         raise ValueError(f"Unknown scope {name!r}. Choices: {choices}")
     return scopes[name]

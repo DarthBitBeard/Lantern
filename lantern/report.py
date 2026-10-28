@@ -56,7 +56,8 @@ def _finding_rows(device: dict) -> str:
     return rows or "<tr><td colspan='4'>No risky open ports found.</td></tr>"
 
 
-def to_html(scan: dict, diff: dict | None = None) -> str:
+def scan_body(scan: dict, diff: dict | None = None) -> str:
+    """Escaped HTML for one scan, without the document wrapper."""
     devices_html = ""
     for device in scan["devices"]:
         name = device.get("label") or device.get("hostname") or device["ip"]
@@ -94,19 +95,46 @@ def to_html(scan: dict, diff: dict | None = None) -> str:
         <p><strong>Devices gone:</strong> {html.escape(removed)}</p>
         <p><strong>Port changes:</strong> {html.escape(changed)}</p></section>"""
 
+    return f"""<h1>Lantern scan report</h1>
+<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {html.escape(str(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
+{'| demo data' if scan['demo'] else ''}</p>
+{diff_html}
+{devices_html}
+<p><small>Lantern is defensive only. It scans your own private network, with your permission. It never guesses passwords or sends exploits.</small></p>"""
+
+
+def _html_document(body: str) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lantern scan report</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}}
 table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:.4rem;text-align:left;vertical-align:top}}
 h1{{margin-bottom:.2rem}}</style></head><body>
-<h1>Lantern scan report</h1>
-<p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {html.escape(str(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices
-{'| demo data' if scan['demo'] else ''}</p>
-{diff_html}
-{devices_html}
-<p><small>Lantern is defensive only. It scans your own private network, with your permission. It never guesses passwords or sends exploits.</small></p>
+{body}
 </body></html>"""
+
+
+def to_html(scan: dict, diff: dict | None = None) -> str:
+    return _html_document(scan_body(scan, diff))
+
+
+def multi_scope_html(scans: list[tuple[dict, dict | None]], failed: list[tuple[str, str]]) -> str:
+    """One HTML document for every scope in a multi-scope run."""
+    ran = [scan.get("scope_name") or "" for scan, _diff in scans]
+    parts = [
+        "<h1>Lantern multi-scope scan</h1>",
+        f"<p>Scopes ran: {html.escape(', '.join(ran) if ran else '(none)')}</p>",
+    ]
+    if failed:
+        names = ", ".join(name for name, _error in failed)
+        parts.append(f"<p>Scopes failed: {html.escape(names)}</p>")
+        for name, error in failed:
+            parts.append(f"<p>{html.escape(name)}: {html.escape(error)}</p>")
+    else:
+        parts.append("<p>Scopes failed: (none)</p>")
+    for scan, diff in scans:
+        parts.append(scan_body(scan, diff))
+    return _html_document("".join(parts))
 
 
 def to_json(scan: dict, diff: dict | None = None) -> str:

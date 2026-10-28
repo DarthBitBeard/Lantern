@@ -87,6 +87,37 @@ class WebTests(unittest.TestCase):
         status, body, _ = self.request(path)
         return status, json.loads(body)
 
+    def test_latest_diff_stays_inside_one_scope(self):
+        from lantern.store import connect, save_scan
+
+        def device(ip):
+            return {
+                "ip": ip, "mac": None, "hostname": None, "label": None,
+                "open_ports": [], "findings": [],
+            }
+
+        conn = connect(Path(self.tmp.name) / "test.db")
+        try:
+            save_scan(conn, "192.168.50.0/24", [device("192.168.50.10")], scope_name="home")
+            save_scan(conn, "10.50.0.0/24", [device("10.50.0.10")], scope_name="lab")
+            home_b = save_scan(
+                conn, "192.168.50.0/24",
+                [device("192.168.50.10"), device("192.168.50.11")],
+                scope_name="home",
+            )
+            save_scan(conn, "10.50.0.0/24", [device("10.50.0.10")], scope_name="lab")
+        finally:
+            conn.close()
+        status, data = self.get_json("/api/diff")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["scan"]["scope_name"], "lab")
+        self.assertEqual(data["diff"]["added"], [])
+        self.assertEqual(data["diff"]["removed"], [])
+        status, data = self.get_json(f"/api/scans/{home_b}")
+        self.assertEqual(status, 200, data)
+        self.assertEqual([d["ip"] for d in data["diff"]["added"]], ["192.168.50.11"])
+        self.assertEqual(data["diff"]["removed"], [])
+
     def test_flow(self):
         status, body, headers = self.request("/")
         self.assertEqual(status, 200)

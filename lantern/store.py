@@ -657,12 +657,16 @@ def latest_scan_id(conn: sqlite3.Connection, scope_name: str | None = None) -> i
 def previous_scan_id(
     conn: sqlite3.Connection, scan_id: int, scope_name: str | None = None,
 ) -> int | None:
-    """The scan saved just before `scan_id`, or None if it is the first.
+    """The earlier scan with the same scope name, or None if this is the first.
 
-    When `scope_name` is set, only earlier scans with that same name count.
+    ``scope_name`` None matches only unscoped scans (``scope_name IS NULL``).
+    It does not mean "any scope".
     """
     if scope_name is None:
-        row = conn.execute("SELECT MAX(id) FROM scans WHERE id < ?", (scan_id,)).fetchone()
+        row = conn.execute(
+            "SELECT MAX(id) FROM scans WHERE id < ? AND scope_name IS NULL",
+            (scan_id,),
+        ).fetchone()
     else:
         row = conn.execute(
             "SELECT MAX(id) FROM scans WHERE id < ? AND scope_name = ?",
@@ -757,10 +761,13 @@ def load_scan_with_diff(
     scope_name: str | None = None,
 ) -> tuple[dict | None, dict | None]:
     """Load a scan (latest when scan_id is None) plus its diff against the
-    scan before it. Labels and trust flags are applied to both sides.
+    previous scan of the same scope. Labels and trust flags are applied
+    to both sides.
 
-    When `scope_name` is set, the scan and the one before it are limited
-    to that scope. Returns (None, None) when there are no scans or the id
+    When `scope_name` is set, the loaded scan must already have that name.
+    The comparison never crosses into a different scope, including when
+    the caller does not pass one. Unscoped scans compare only to earlier
+    unscoped scans. Returns (None, None) when there are no scans or the id
     is unknown or belongs to a different scope.
     """
     if scan_id is None:
@@ -774,8 +781,7 @@ def load_scan_with_diff(
     if scope_name is not None and scan.get("scope_name") != scope_name:
         return None, None
     diff = None
-    prev_scope = scope_name if scope_name is not None else None
-    prev_id = previous_scan_id(conn, scan_id, prev_scope)
+    prev_id = previous_scan_id(conn, scan_id, scan.get("scope_name"))
     if prev_id is not None:
         diff = diff_scans(apply_trust(load_scan(conn, prev_id), trusted), scan)
     return scan, diff
