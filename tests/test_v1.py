@@ -623,6 +623,45 @@ class CliExportTests(unittest.TestCase):
         self.assertIn("+SUM(1)", row["fix"])
         self.assertEqual(len(parsed[1]), len(parsed[0]))
 
+    def test_export_stdout_writes_bytes(self):
+        import contextlib
+        import sys
+        from lantern import cli
+
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device("192.168.50.10", "aa:bb:cc:dd:ee:10", hostname="\uff21")],
+            )
+        finally:
+            conn.close()
+
+        class Out:
+            def __init__(self):
+                self.buffer = io.BytesIO()
+
+            def write(self, text):
+                raise AssertionError("export used the text stream")
+
+        out = Out()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            previous = sys.stdout
+            sys.stdout = out
+            try:
+                code = cli.main([
+                    "--db", self.db, "export", "--what", "devices", "--format", "csv",
+                ])
+            finally:
+                sys.stdout = previous
+        self.assertEqual(code, 0, err.getvalue())
+        raw = out.buffer.getvalue()
+        self.assertIn("\uff21".encode("utf-8"), raw)
+        self.assertIn(b"\r\n", raw)
+        self.assertNotIn(b"\r\r\n", raw)
+
     def test_export_errors_do_not_print_a_traceback(self):
         self._finding_scan()
         with mock.patch("lantern.v1.render_export", side_effect=RuntimeError("secret-boom")):

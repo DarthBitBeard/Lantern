@@ -287,10 +287,13 @@ def _cmd_export(args, conn) -> int:
     if args.output:
         print(f"Wrote {written}", file=sys.stderr)
         return 0
-    text = payload.decode("utf-8")
-    sys.stdout.write(text)
-    if not text.endswith("\n"):
-        sys.stdout.write("\n")
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(payload)
+    else:
+        sys.stdout.write(payload.decode("utf-8"))
     return 0
 
 
