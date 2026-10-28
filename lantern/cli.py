@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
 import json
 import os
@@ -198,49 +199,101 @@ def _load_serve():
     return serve
 
 
+# A token file larger than this is refused before it is read into memory.
+MAX_TOKEN_FILE_BYTES = 4 * 1024
+
+
+def _token_open_flags() -> int:
+    flags = os.O_RDONLY
+    # O_NOFOLLOW refuses a symlink. O_NONBLOCK keeps a FIFO from hanging
+    # the open. Either flag is omitted where the platform does not have it.
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_BINARY"):
+        flags |= getattr(os, name, 0)
+    return flags
+
+
 def _read_token_file(path: str) -> str:
-    """Read a token file. The error does not include the file contents."""
+    """Read a regular token file. The error does not include the contents.
+
+    Symlinks are refused. A FIFO or other non-regular file is refused
+    without a blocking read. Files larger than 4 KiB are refused. On POSIX,
+    a mode other than 0400 or 0600 (any group or other bit) is refused.
+    Docker's 0444 secret mount is not accepted: the host file must be
+    mode 0400 and owned by the user that runs Lantern.
+    """
     file_path = Path(path)
     try:
-        data = file_path.read_text(encoding="utf-8")
+        if file_path.is_symlink():
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} must be a regular file, not a symlink. "
+                "Refusing to start."
+            )
     except OSError as exc:
         raise ValueError(
             f"Cannot read {TOKEN_FILE_ENV} ({file_path}): {exc.strerror or exc}. "
             "Refusing to start."
         ) from exc
-    token = data.strip()
+    try:
+        fd = os.open(file_path, _token_open_flags())
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} must be a regular file, not a symlink. "
+                "Refusing to start."
+            ) from exc
+        # A FIFO with no writer can fail open immediately under O_NONBLOCK
+        # (ENXIO) instead of returning a descriptor. That is still a refusal,
+        # and it must not block.
+        if exc.errno == errno.ENXIO:
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} must be a regular file. Refusing to start."
+            ) from exc
+        raise ValueError(
+            f"Cannot read {TOKEN_FILE_ENV} ({file_path}): {exc.strerror or exc}. "
+            "Refusing to start."
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} must be a regular file. Refusing to start."
+            )
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            mode = stat.S_IMODE(info.st_mode)
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} is readable by group or others (mode {mode:04o}). "
+                "Use mode 0400, owned by the user that runs Lantern. "
+                "Refusing to start."
+            )
+        if info.st_size > MAX_TOKEN_FILE_BYTES:
+            raise ValueError(
+                f"{TOKEN_FILE_ENV} is larger than 4 KiB. Refusing to start."
+            )
+        blob = os.read(fd, MAX_TOKEN_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(blob) > MAX_TOKEN_FILE_BYTES:
+        raise ValueError(
+            f"{TOKEN_FILE_ENV} is larger than 4 KiB. Refusing to start."
+        )
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError(
+            f"{TOKEN_FILE_ENV} is not valid UTF-8. Refusing to start."
+        ) from exc
+    token = text.strip()
     from .webapp import api_token_error
 
     if api_token_error(token):
         raise ValueError(
             f"{TOKEN_FILE_ENV} does not contain a valid API token "
-            "(at least 128 bits, 22 urlsafe characters). Refusing to start."
+            "(at least 128 bits, 22 to 512 urlsafe characters). Refusing to start."
         )
     return token
 
 
-def _warn_token_file_mode(path: str) -> None:
-    """Warn when the token file is group- or world-readable. Do not chmod it."""
-    if os.name == "nt":
-        return
-    file_path = Path(path)
-    try:
-        mode = stat.S_IMODE(file_path.stat().st_mode)
-    except OSError:
-        return
-    if mode & 0o077 == 0:
-        return
-    try:
-        print(
-            f"Warning: {file_path} is readable by group or others (mode {mode:04o}). "
-            "A token file should be mode 0400. Lantern will not change it.",
-            file=sys.stderr,
-        )
-    except OSError:
-        return
-
-
-def load_api_token(environ: dict, *, tty: bool, token_factory=None):
+def load_api_token(environ: dict, *, tty: bool, debug: bool = False, token_factory=None):
     """Resolve the LAN token. Returns (token, error, print_token, source).
 
     Precedence is ``LANTERN_API_TOKEN_FILE``, then ``LANTERN_API_TOKEN``,
@@ -261,7 +314,6 @@ def load_api_token(environ: dict, *, tty: bool, token_factory=None):
             token = _read_token_file(raw_path.strip())
         except ValueError as exc:
             return None, str(exc), False, None
-        _warn_token_file_mode(raw_path.strip())
         return token, None, False, "file"
 
     if TOKEN_ENV in environ:
@@ -269,10 +321,20 @@ def load_api_token(environ: dict, *, tty: bool, token_factory=None):
         token = raw.strip() if isinstance(raw, str) else ""
         if api_token_error(token):
             return None, (
-                f"refusing to start: {TOKEN_ENV} is missing or shorter than "
-                "128 bits (22 urlsafe characters)."
+                f"refusing to start: {TOKEN_ENV} is missing or not 22 to 512 "
+                "urlsafe characters (at least 128 bits)."
             ), False, None
         return token, None, False, "env"
+
+    # --debug must not print a generated token, including on a TTY.
+    # Require a file or the environment variable instead of minting one
+    # that the operator cannot see.
+    if debug:
+        return None, (
+            "refusing to start without a valid API token. "
+            "--debug does not print a generated token. "
+            f"Set {TOKEN_FILE_ENV} or {TOKEN_ENV}."
+        ), False, None
 
     if not tty:
         return None, (
@@ -318,6 +380,7 @@ def resolve_web_bind(
     port: int = 8068,
     environ: dict | None = None,
     tty: bool = False,
+    debug: bool = False,
     token_factory=None,
 ) -> WebBind:
     """Decide whether `lantern web` may bind `host`.
@@ -335,7 +398,7 @@ def resolve_web_bind(
         ))
     env = os.environ if environ is None else environ
     token, error, print_token, source = load_api_token(
-        env, tty=tty, token_factory=token_factory,
+        env, tty=tty, debug=debug, token_factory=token_factory,
     )
     if error:
         return WebBind(error=error)
@@ -451,6 +514,7 @@ def main(argv=None) -> int:
             port=args.port,
             environ=os.environ,
             tty=_stderr_is_tty(),
+            debug=bool(args.debug),
         )
         if web_bind.error:
             return _err(web_bind.error)
@@ -481,15 +545,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 port=args.port,
                 environ=os.environ,
                 tty=_stderr_is_tty(),
+                debug=bool(getattr(args, "debug", False)),
             )
             if web_bind.error:
                 return _err(web_bind.error)
         conn.close()
         if web_bind.warning:
             print(web_bind.warning, file=sys.stderr, flush=True)
-        if web_bind.print_token and web_bind.token:
-            # Interactive console only. print_token is false when stderr is
-            # not a TTY, which is what `docker logs` captures.
+        if web_bind.print_token and web_bind.token and not args.debug:
+            # Interactive console only, and never with --debug. print_token
+            # is also false when stderr is not a TTY (`docker logs`).
             print(
                 f"API token (printed once, not logged): {web_bind.token}",
                 file=sys.stderr,

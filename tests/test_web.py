@@ -523,6 +523,10 @@ class AllowlistUnitTests(unittest.TestCase):
             "192.168.1.0/24",
             "0.0.0.0",
             "0.0.0.0:8068",
+            "0",
+            "00",
+            "0:8068",
+            "2130706433",
             "[::]",
             "[fe80::1%eth0]",
             "http://dash.example",
@@ -914,6 +918,169 @@ class HardeningTests(unittest.TestCase):
         self.assertGreaterEqual(len(match.group(1)), 32)
         self.assertNotEqual(match.group(1), self.token)
         self.assertEqual(server.RequestHandlerClass.api_token, match.group(1))
+
+    def test_slow_drip_cannot_hold_a_connection_past_the_header_deadline(self):
+        import time
+
+        server = make_server(
+            Path(self.tmp.name) / "drip.db",
+            host="127.0.0.1",
+            port=0,
+            request_timeout=2,
+            header_timeout=0.5,
+            max_connections=4,
+        )
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        self.assertEqual(server.server_address[0], "127.0.0.1")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        started = time.monotonic()
+        sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        self.addCleanup(sock.close)
+        sock.sendall(b"GET / HTTP/1.1\r\n")
+        closed = False
+        while time.monotonic() - started < 3:
+            time.sleep(0.15)
+            try:
+                sock.sendall(b"Y")
+            except OSError:
+                closed = True
+                break
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5, "slow drip held the connection past the header deadline")
+        self.assertTrue(closed or elapsed < 1.2)
+
+    def test_per_ip_cap_returns_503_before_the_global_cap(self):
+        import time
+
+        server = make_server(
+            Path(self.tmp.name) / "perip.db",
+            host="127.0.0.1",
+            port=0,
+            max_connections=4,
+            max_connections_per_ip=1,
+            request_timeout=2,
+            header_timeout=2,
+        )
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        held = socket.create_connection(("127.0.0.1", port), timeout=2)
+        self.addCleanup(held.close)
+        time.sleep(0.2)
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as extra:
+            extra.settimeout(2)
+            data = b""
+            while True:
+                try:
+                    chunk = extra.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        self.assertIn(b"503", data)
+        self.assertIn(b"busy", data)
+
+    def test_unknown_methods_are_405_after_host_and_token_checks(self):
+        port = self.port
+        for method in ("OPTIONS", "PUT", "DELETE", "PATCH"):
+            status, body, _ = self.request(f"/api/scans", method=method, token=False)
+            self.assertEqual(status, 405, (method, body))
+            self.assertNotIn("<html", body.lower())
+            self.assertEqual(json.loads(body)["error"], "Method not allowed.")
+        status, body, _ = self.request(
+            "/api/scans", method="OPTIONS", token=False,
+            headers={"Host": f"evil.example:{port}"},
+        )
+        self.assertEqual(status, 403, body)
+
+    def test_chunked_body_is_rejected_and_not_parsed_as_another_request(self):
+        port = self.port
+        payload = (
+            f"POST /api/demo HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Transfer-Encoding: chunked\r\n"
+            f"{webapp.TOKEN_HEADER}: {self.token}\r\n"
+            f"\r\n"
+            f"2\r\n{{}}\r\n0\r\n\r\n"
+            f"GET /api/scans HTTP/1.1\r\n"
+            f"Host: evil.example:{port}\r\n"
+            f"\r\n"
+        ).encode()
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(payload)
+            sock.settimeout(2)
+            data = b""
+            while True:
+                try:
+                    chunk = sock.recv(8192)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        self.assertTrue(data.startswith(b"HTTP/1.1 400"), data)
+        self.assertEqual(data.count(b"HTTP/1.1"), 1)
+        self.assertNotIn(b"evil.example", data)
+        self.assertNotIn(self.token.encode(), data)
+        self.assertIn(b"Connection: close", data)
+
+
+class LanMethodTests(unittest.TestCase):
+    """PUT and OPTIONS in LAN mode. The listener is 127.0.0.1."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.token = "LanternTokenValue0123456789abcdEF"
+        self.server = make_server(
+            Path(self.tmp.name) / "lan.db",
+            host="192.168.1.50",
+            listen_host="127.0.0.1",
+            port=0,
+            lan_bound=True,
+            api_token=self.token,
+        )
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.host = f"192.168.1.50:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def request(self, method, token=False, host=None):
+        hdrs = {"Host": host or self.host, "Content-Type": "application/json"}
+        if token is not False:
+            hdrs[webapp.TOKEN_HEADER] = self.token if token is None else token
+        req = urllib.request.Request(self.base + "/api/scans", method=method, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode()
+
+    def test_put_and_options_need_the_token_then_return_405(self):
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        for method in ("PUT", "OPTIONS", "DELETE", "PATCH"):
+            status, body = self.request(method)
+            self.assertEqual(status, 403, (method, body))
+            self.assertNotIn(self.token, body)
+            status, body = self.request(method, token=self.token)
+            self.assertEqual(status, 405, (method, body))
+            self.assertEqual(json.loads(body), {"error": "Method not allowed."})
+            self.assertNotIn("<html", body.lower())
+        status, body = self.request(
+            "OPTIONS", token=self.token, host=f"evil.example:{self.port}",
+        )
+        self.assertEqual(status, 403, body)
+        status, body = self.request("OPTIONS", token="not-the-token-but-long-enoughxx")
+        self.assertEqual(status, 403, body)
 
 
 if __name__ == "__main__":

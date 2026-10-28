@@ -26,8 +26,12 @@ Local-tool hygiene, enforced here:
 - Request targets must be origin-form (a path). An absolute-form URL is
   rejected with 400.
 - POST bodies must be JSON (Content-Type application/json) and at most
-  64 KiB. Each connection has a socket timeout and the process caps how
-  many connections it handles at once.
+  64 KiB. Reading the request line and headers has a total deadline, not
+  only a per-read socket timeout. The process caps connections overall
+  and per client address. A full cap gets 503.
+- OPTIONS, PUT, DELETE, and PATCH get 405 after the Host check and, when
+  LAN-bound, the token check. Transfer-Encoding is rejected and the
+  connection is closed. Every POST closes the connection.
 - Unexpected errors return a generic 500. The exception text is written
   only when --debug is on, and only to stderr.
 - Responses carry nosniff, a strict CSP on HTML, and no-store caching.
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 import hmac
 import html
+import io
 import ipaddress
 import json
 import re
@@ -44,6 +49,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -69,7 +75,14 @@ MAX_LABEL_CHARS = 80
 # and leak the exception text to the client.
 MAX_SCAN_ID = 2**63 - 1
 REQUEST_TIMEOUT_SECONDS = 10
+# Total time allowed to read one request line and its headers. A client
+# that drips a byte just inside the per-read timeout cannot refresh this.
+HEADER_DEADLINE_SECONDS = 10
 MAX_CONNECTIONS = 32
+MAX_CONNECTIONS_PER_IP = 8
+# A presented token that does not match waits this long. Guessing a
+# 128-bit token is not practical; the delay only slows a tight loop.
+TOKEN_FAILURE_DELAY_SECONDS = 0.05
 CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
 TOKEN_HEADER = "X-Lantern-Token"
 TOKEN_PLACEHOLDER = "__LANTERN_TOKEN__"
@@ -81,7 +94,9 @@ BAD_REQUEST_MESSAGE = "Bad request."
 # which is 22 characters of urlsafe text (token_urlsafe(16) with no padding).
 _TOKEN_BYTES = 32
 MIN_API_TOKEN_CHARS = 22
+MAX_API_TOKEN_CHARS = 512
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
+_NUMERIC_HOST_RE = re.compile(r"\d+")
 _BUSY_BODY = b'{"error": "Server is busy."}'
 _HOSTNAME_RE = re.compile(
     r"(?=.{1,253}$)"
@@ -170,13 +185,13 @@ def api_token_error(token) -> str | None:
     """
     if (
         isinstance(token, str)
-        and len(token) >= MIN_API_TOKEN_CHARS
+        and MIN_API_TOKEN_CHARS <= len(token) <= MAX_API_TOKEN_CHARS
         and _TOKEN_RE.fullmatch(token)
     ):
         return None
     return (
         "refusing to start without a valid API token "
-        "(at least 128 bits, 22 urlsafe characters)"
+        "(at least 128 bits, 22 to 512 urlsafe characters)"
     )
 
 
@@ -265,6 +280,12 @@ def parse_allow_host(value: str) -> tuple[str, int | None]:
             f"--allow-host value {value!r} must not include a zone id."
         )
     if ip is not None and ip.is_unspecified:
+        raise ValueError(
+            f"--allow-host value {value!r} must be a specific host, not an unspecified address."
+        )
+    # "0" and other all-digit names are not dotted IPv4. Some resolvers
+    # treat "0" as 0.0.0.0, which must not be an allowed Host.
+    if ip is None and _NUMERIC_HOST_RE.fullmatch(host):
         raise ValueError(
             f"--allow-host value {value!r} must be a specific host, not an unspecified address."
         )
@@ -444,6 +465,32 @@ def _extra_allowed_hosts(allowed: frozenset[str], bound_port: int) -> list[str]:
     return sorted(allowed - defaults)
 
 
+class _DeadlineRaw(io.RawIOBase):
+    """Socket reader whose blocking calls cannot outlive one header deadline.
+
+    Each ``recv`` is capped at the time still left, so a byte that arrives
+    just before the per-read timeout does not start a new full window.
+    """
+
+    def __init__(self, sock, deadline_fn, per_read: float):
+        self._sock = sock
+        self._deadline_fn = deadline_fn
+        self._per_read = per_read
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        remaining = self._deadline_fn() - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("header deadline exceeded")
+        self._sock.settimeout(min(self._per_read, remaining))
+        try:
+            return self._sock.recv_into(buffer)
+        except TimeoutError:
+            raise TimeoutError("header deadline exceeded") from None
+
+
 class LanternHandler(BaseHTTPRequestHandler):
     db_path = None
     debug = False
@@ -454,9 +501,26 @@ class LanternHandler(BaseHTTPRequestHandler):
     # Loopback embeds the token and checks it on POST only. LAN mode
     # (set by the CLI) checks it on every API route and does not embed it.
     lan_bound = False
-    # Per-request socket timeout. Slow clients cannot hold a thread forever.
+    # Per-read socket timeout, and a separate total deadline for the
+    # request line and headers. The deadline is what stops a slow drip.
     timeout = REQUEST_TIMEOUT_SECONDS
+    header_timeout = HEADER_DEADLINE_SECONDS
     protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        self.connection = self.request
+        if self.timeout is not None:
+            self.connection.settimeout(self.timeout)
+        self._header_deadline = time.monotonic() + float(self.header_timeout)
+        raw = _DeadlineRaw(self.connection, lambda: self._header_deadline, float(self.timeout))
+        self.rfile = io.BufferedReader(raw)
+        self.wfile = self.connection.makefile("wb", self.wbufsize)
+
+    def handle_one_request(self):
+        # A keep-alive request gets its own deadline. The reader consults
+        # this attribute on every recv.
+        self._header_deadline = time.monotonic() + float(self.header_timeout)
+        super().handle_one_request()
 
     def version_string(self):
         return "Lantern"
@@ -529,10 +593,15 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not isinstance(provided, str) or not isinstance(expected, str) or not expected:
             return False
         try:
-            return hmac.compare_digest(provided, expected)
+            matched = hmac.compare_digest(provided, expected)
         except (TypeError, ValueError):
             # Non-ASCII or mixed types. Reject without echoing the header.
-            return False
+            matched = False
+        if not matched:
+            # Fixed delay only when a token was presented and rejected.
+            # A missing header stays immediate so ordinary 403s stay cheap.
+            time.sleep(TOKEN_FAILURE_DELAY_SECONDS)
+        return matched
 
     def _origin_ok(self) -> bool:
         """True when Origin is absent or its host:port is on the allowlist.
@@ -575,6 +644,48 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not self.lan_bound:
             return True
         return self._token_ok()
+
+    def _reject_transfer_encoding(self, *, unread_body: bool) -> bool:
+        """True when Transfer-Encoding is present and a 400 was sent.
+
+        The connection is closed so leftover bytes are not a second request.
+        """
+        if not self.headers.get("Transfer-Encoding"):
+            return False
+        self.close_connection = True
+        if unread_body:
+            self.close_connection = True
+        self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
+        return True
+
+    def _unsupported_method(self) -> None:
+        """405 after the Host check and, on a LAN API route, the token check."""
+        if not self._host_allowed():
+            self._forbid(unread_body=True)
+            return
+        if not is_origin_form(self.path):
+            self._reject_bad_target(unread_body=True)
+            return
+        if self._reject_transfer_encoding(unread_body=True):
+            return
+        path = urlparse(self.path).path
+        if self.lan_bound and path.startswith("/api/") and not self._token_ok():
+            self._forbid(unread_body=True)
+            return
+        self.close_connection = True
+        self._send_json(405, {"error": "Method not allowed."})
+
+    def do_OPTIONS(self):
+        self._unsupported_method()
+
+    def do_PUT(self):
+        self._unsupported_method()
+
+    def do_DELETE(self):
+        self._unsupported_method()
+
+    def do_PATCH(self):
+        self._unsupported_method()
 
     def _db(self):
         return connect(self.db_path)
@@ -628,6 +739,8 @@ class LanternHandler(BaseHTTPRequestHandler):
             return
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=False)
+            return
+        if self._reject_transfer_encoding(unread_body=False):
             return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -707,12 +820,16 @@ class LanternHandler(BaseHTTPRequestHandler):
     # -- POST ----------------------------------------------------------
 
     def do_POST(self):
+        # Always close. Extra bytes after the body must not be a new request.
+        self.close_connection = True
         parsed = urlparse(self.path)
         if not self._host_allowed():
             self._forbid(unread_body=True)
             return
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
+            return
+        if self._reject_transfer_encoding(unread_body=True):
             return
         if not parsed.path.startswith("/api/"):
             self.close_connection = True  # body left unread
@@ -859,6 +976,7 @@ class _LanternServer(ThreadingHTTPServer):
 
     daemon_threads = True
     max_connections = MAX_CONNECTIONS
+    max_per_ip = MAX_CONNECTIONS_PER_IP
 
     def server_bind(self):
         if self.address_family == socket.AF_INET6:
@@ -870,19 +988,43 @@ class _LanternServer(ThreadingHTTPServer):
 
     def server_activate(self):
         self._slots = threading.BoundedSemaphore(self.max_connections)
+        self._ip_lock = threading.Lock()
+        self._ip_counts: dict[str, int] = {}
         super().server_activate()
+
+    def _acquire_client(self, ip: str) -> bool:
+        with self._ip_lock:
+            count = self._ip_counts.get(ip, 0)
+            if count >= self.max_per_ip:
+                return False
+            self._ip_counts[ip] = count + 1
+            return True
+
+    def _release_client(self, ip: str) -> None:
+        with self._ip_lock:
+            count = self._ip_counts.get(ip, 0) - 1
+            if count <= 0:
+                self._ip_counts.pop(ip, None)
+            else:
+                self._ip_counts[ip] = count
 
     def handle_error(self, request, client_address):
         if getattr(self.RequestHandlerClass, "debug", False):
             super().handle_error(request, client_address)
 
     def process_request(self, request, client_address):
+        ip = client_address[0] if client_address else ""
         if not self._slots.acquire(blocking=False):
+            _reject_busy(request)
+            return
+        if not self._acquire_client(ip):
+            self._slots.release()
             _reject_busy(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
+            self._release_client(ip)
             self._slots.release()
             raise
 
@@ -890,18 +1032,23 @@ class _LanternServer(ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            ip = client_address[0] if client_address else ""
+            self._release_client(ip)
             self._slots.release()
 
 
-def _server_class(family: int, connection_limit: int):
+def _server_class(family: int, connection_limit: int, per_ip_limit: int):
     if family not in (socket.AF_INET, socket.AF_INET6):
         raise ValueError("unsupported address family")
     if isinstance(connection_limit, bool) or not isinstance(connection_limit, int) or connection_limit < 1:
         raise ValueError("max_connections must be a positive number.")
+    if isinstance(per_ip_limit, bool) or not isinstance(per_ip_limit, int) or per_ip_limit < 1:
+        raise ValueError("max_connections_per_ip must be a positive number.")
 
     class BoundServer(_LanternServer):
         address_family = family
         max_connections = connection_limit
+        max_per_ip = per_ip_limit
 
     return BoundServer
 
@@ -924,7 +1071,9 @@ def make_server(
     lan_bound: bool = False,
     listen_host: str | None = None,
     max_connections: int = MAX_CONNECTIONS,
+    max_connections_per_ip: int = MAX_CONNECTIONS_PER_IP,
     request_timeout: float = REQUEST_TIMEOUT_SECONDS,
+    header_timeout: float = HEADER_DEADLINE_SECONDS,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -952,6 +1101,8 @@ def make_server(
         )
     if isinstance(request_timeout, bool) or not isinstance(request_timeout, (int, float)) or request_timeout <= 0:
         raise ValueError("request timeout must be a positive number of seconds.")
+    if isinstance(header_timeout, bool) or not isinstance(header_timeout, (int, float)) or header_timeout <= 0:
+        raise ValueError("header deadline must be a positive number of seconds.")
 
     socket_host = host if listen_host is None else listen_host
     # Reject a bad --allow-host before opening a socket.
@@ -980,10 +1131,11 @@ def make_server(
             "debug": bool(debug),
             "lan_bound": bool(lan_bound),
             "timeout": float(request_timeout),
+            "header_timeout": float(header_timeout),
         },
     )
     family = socket.AF_INET6 if _is_ipv6_literal(socket_host) else socket.AF_INET
-    server = _server_class(family, max_connections)((socket_host, port), handler)
+    server = _server_class(family, max_connections, max_connections_per_ip)((socket_host, port), handler)
     bound_port = int(server.server_address[1])
     handler.bound_port = bound_port
     if lan_bound:
