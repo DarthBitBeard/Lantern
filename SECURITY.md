@@ -15,18 +15,18 @@ These are targets, not guarantees:
 
 - Acknowledgement within 3 business days.
 - Triage and a severity assessment within 7 days.
-- Fix target: 30 days for Critical and High, 90 days for Medium and Low. If a fix will take longer, we will say why and agree a new date.
-- Coordinated disclosure: a GitHub Security Advisory is published when the fix lands. We credit you unless you ask us not to. A CVE may be requested where appropriate.
+- Fix target: 30 days for Critical and High, 90 days for Medium and Low. If a fix will take longer, we aim to explain why and give a new target date.
+- Coordinated disclosure: a GitHub Security Advisory is published when the fix lands, where practical. We aim to credit you unless you ask us not to. A CVE may be requested where appropriate.
 
 ## Safe harbor
 
-We will not pursue or support legal action against good-faith research that:
+As the maintainer, we will not pursue or support legal action against good-faith research that:
 
-- tests only on localhost, your own devices, or networks you own or are explicitly authorized to test;
-- avoids privacy violations, data destruction, and service disruption;
+- tests only on your own installation of Lantern, on localhost or devices and networks you own, using test data;
+- does not access, copy, or keep anyone else's data, and avoids data destruction and service disruption;
 - reports privately and gives us reasonable time to fix before disclosure.
 
-This does not authorize testing against anyone else's network or devices. This is not legal advice.
+This does not authorize testing against anyone else's network or devices. This is not legal advice. It covers only the maintainer of this project and cannot grant permission or waive rights on behalf of anyone else.
 
 ## Supported versions
 
