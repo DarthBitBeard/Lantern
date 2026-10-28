@@ -172,6 +172,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--allow-host", err)
         self.assertNotIn("Traceback", err)
+        for bad in ("0.0.0.0", "[::]", "[fe80::1%eth0]", "*", "10.0.0.0/24"):
+            code, _, err = self.run_cli("web", "--allow-host", bad)
+            self.assertEqual(code, 2, bad)
+            self.assertIn("--allow-host", err)
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(Path(self.db).exists(), bad)
 
     def test_web_bind_failure_is_a_clear_error(self):
         import socket
@@ -322,75 +328,144 @@ class WebBindTests(unittest.TestCase):
                      "", " 127.0.0.1", "127.0.0.1 ", "::ffff:192.168.1.1", "[::1]"):
             self.assertFalse(cli.is_loopback_host(host), host)
 
+    def _no_token_env(self):
+        env = os.environ.copy()
+        env.pop(cli.TOKEN_ENV, None)
+        env.pop(cli.TOKEN_FILE_ENV, None)
+        return env
+
     def test_loopback_needs_no_token(self):
         def fail_mint():
             raise AssertionError("minted")
 
         for allow in (False, True):
             decision = cli.resolve_web_bind(
-                "127.0.0.1", allow, token_param="api_token", token_factory=fail_mint,
+                "127.0.0.1", allow, token_factory=fail_mint, environ={}, tty=True,
             )
             self.assertIsNone(decision.error)
             self.assertIsNone(decision.warning)
             self.assertIsNone(decision.token)
+            self.assertFalse(decision.lan_bound)
+            self.assertFalse(decision.print_token)
 
     def test_non_loopback_without_flag_is_refused(self):
-        decision = cli.resolve_web_bind("0.0.0.0", False, token_param="api_token")
+        decision = cli.resolve_web_bind(
+            "0.0.0.0", False, environ={cli.TOKEN_ENV: "a" * 32}, tty=True,
+        )
         self.assertIn("refusing to bind 0.0.0.0", decision.error)
         self.assertIsNone(decision.token)
         self.assertIsNone(decision.warning)
 
-    def test_allow_lan_without_token_support_is_refused(self):
+    def test_allow_lan_without_a_token_is_refused(self):
         with mock.patch.object(cli.secrets, "token_urlsafe", side_effect=AssertionError("minted")):
-            decision = cli.resolve_web_bind("192.168.1.9", True, token_param=None)
-        self.assertIn("requires S1 token support", decision.error)
-        self.assertIsNone(decision.token)
-        self.assertNotIn("API token", decision.error)
+            decision = cli.resolve_web_bind(
+                "192.168.1.9", True, allow_hosts=["192.168.1.9"],
+                environ={}, tty=False,
+            )
+        self.assertEqual(decision.token, None)
+        self.assertIn("refusing to start without a valid API token", decision.error)
+        self.assertIn(cli.TOKEN_FILE_ENV, decision.error)
+        self.assertNotIn("API token (printed", decision.error)
+        self.assertFalse(decision.print_token)
 
-    def test_allow_lan_with_token_support_mints_one_token(self):
+    def test_short_token_is_rejected(self):
+        for raw in ("tiny", "a" * 21, "bad token value!!", "ñ" * 22):
+            decision = cli.resolve_web_bind(
+                "192.168.1.9", True, allow_hosts=["192.168.1.9"],
+                environ={cli.TOKEN_ENV: raw}, tty=False,
+            )
+            self.assertIsNone(decision.token, raw)
+            self.assertIn("128 bits", decision.error)
+            self.assertNotIn(raw, decision.error)
+
+    def test_allow_lan_tty_mints_one_token_and_keeps_it_out_of_the_warning(self):
+        token = "c" * 43
         decision = cli.resolve_web_bind(
-            "0.0.0.0", True, token_param="api_token", token_factory=lambda: "once-token",
+            "192.168.1.50", True, port=8068, environ={}, tty=True,
+            token_factory=lambda: token,
         )
         self.assertIsNone(decision.error)
-        self.assertEqual(decision.token, "once-token")
-        self.assertEqual(decision.token_param, "api_token")
-        self.assertEqual(decision.warning.count("once-token"), 1)
-        self.assertIn("WARNING", decision.warning)
-        self.assertIn("0.0.0.0", decision.warning)
+        self.assertEqual(decision.token, token)
+        self.assertTrue(decision.lan_bound)
+        self.assertTrue(decision.print_token)
+        self.assertEqual(decision.warning.count(token), 0)
+        self.assertIn("WARNING: listen address 192.168.1.50", decision.warning)
+        self.assertIn("WARNING: allowed Host values: 192.168.1.50:8068", decision.warning)
+        self.assertIn(
+            "anyone with the token has full control; GET data is also protected",
+            decision.warning,
+        )
+        self.assertNotIn("127.0.0.1", decision.warning)
+        self.assertNotIn("localhost", decision.warning)
+        self.assertNotIn("[::1]", decision.warning)
+
+    def test_unspecified_bind_needs_an_allow_host_address(self):
+        token = "d" * 32
+        missing = cli.resolve_web_bind(
+            "0.0.0.0", True, environ={cli.TOKEN_ENV: token}, tty=False, port=8068,
+        )
+        self.assertIn("pass --allow-host", missing.error)
+        self.assertIsNone(missing.token)
+        self.assertNotIn(token, missing.error)
+
+        named = cli.resolve_web_bind(
+            "0.0.0.0", True, allow_hosts=["dashboard.home"],
+            environ={cli.TOKEN_ENV: token}, tty=False,
+        )
+        self.assertIn("pass --allow-host", named.error)
+
+        decision = cli.resolve_web_bind(
+            "0.0.0.0", True, allow_hosts=["192.168.1.50"],
+            environ={cli.TOKEN_ENV: token}, tty=False, port=8068,
+        )
+        self.assertIsNone(decision.error)
+        self.assertEqual(decision.token, token)
+        self.assertFalse(decision.print_token)
+        self.assertIn("WARNING: listen address 0.0.0.0", decision.warning)
+        self.assertIn("WARNING: allowed Host values: 192.168.1.50:8068", decision.warning)
+        self.assertNotIn("0.0.0.0:8068", decision.warning)
+        self.assertNotIn(token, decision.warning)
+        self.assertIn(f"loaded from {cli.TOKEN_ENV}", decision.warning)
+
+    def test_token_file_beats_env_and_is_not_printed(self):
+        file_token = "f" * 32
+        env_token = "e" * 32
+        path = Path(self.tmp.name) / "token"
+        path.write_text(file_token + "\n", encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(path, 0o400)
+        decision = cli.resolve_web_bind(
+            "192.168.1.50", True, port=8068,
+            environ={
+                cli.TOKEN_FILE_ENV: str(path),
+                cli.TOKEN_ENV: env_token,
+            },
+            tty=True,
+            token_factory=lambda: "generated-token-should-not-be-used",
+        )
+        self.assertIsNone(decision.error)
+        self.assertEqual(decision.token, file_token)
+        self.assertNotEqual(decision.token, env_token)
+        self.assertFalse(decision.print_token)
+        self.assertNotIn(file_token, decision.warning)
+        self.assertNotIn(env_token, decision.warning)
+        self.assertIn(cli.TOKEN_FILE_ENV, decision.warning)
 
     def test_new_api_token_is_urlsafe(self):
         token = cli.new_api_token()
         self.assertGreaterEqual(len(token), 32)
+        self.assertGreaterEqual(len(token), 22)
         self.assertRegex(token, r"^[A-Za-z0-9_-]+$")
 
-    def test_token_param_detector(self):
-        def plain(db_path, host="127.0.0.1", port=8068, debug=False):
-            pass
+    def test_serve_takes_the_cli_token_directly(self):
+        import inspect
 
-        def with_api_token(db_path, host="127.0.0.1", api_token=None):
-            pass
-
-        def with_both(db_path, token=None, api_token=None):
-            pass
-
-        def kwargs_only(db_path, **kwargs):
-            pass
-
-        def positional_only(db_path, token, /):
-            pass
-
-        self.assertIsNone(cli.webapp_token_param(plain))
-        self.assertEqual(cli.webapp_token_param(with_api_token), "api_token")
-        self.assertEqual(cli.webapp_token_param(with_both), "api_token")
-        self.assertIsNone(cli.webapp_token_param(kwargs_only))
-        self.assertIsNone(cli.webapp_token_param(positional_only))
-        self.assertIsNone(cli.webapp_token_param(object()))
-
-    def test_shipped_dashboard_has_no_token_parameter(self):
-        # S1 owns webapp.py. Until serve() accepts a token keyword, the CLI
-        # must refuse --allow-lan rather than listen on the LAN.
         from lantern.webapp import serve
-        self.assertIsNone(cli.webapp_token_param(serve))
+
+        params = inspect.signature(serve).parameters
+        self.assertIn("api_token", params)
+        self.assertIn("lan_bound", params)
+        self.assertFalse(hasattr(cli, "webapp_token_param"))
 
     def test_cli_refuses_lan_bind_without_opening_db(self):
         for host in ("0.0.0.0", "::", "192.168.1.10", "10.0.0.1"):
@@ -402,12 +477,16 @@ class WebBindTests(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertFalse(Path(self.db).exists(), host)
 
-    def test_cli_allow_lan_refused_until_s1(self):
-        with mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve called")):
+    def test_cli_allow_lan_without_token_exits_before_the_socket(self):
+        env = self._no_token_env()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve called")), \
+                mock.patch.object(cli.secrets, "token_urlsafe", side_effect=AssertionError("minted")):
             code, out, err = self.run_cli("web", "--host", "0.0.0.0", "--allow-lan")
         self.assertEqual(code, 2)
-        self.assertIn("requires S1 token support", err)
-        self.assertNotIn("API token", err)
+        self.assertIn("refusing to start without a valid API token", err)
+        self.assertNotIn("API token (printed", err)
+        self.assertNotIn("Lantern dashboard", out)
         self.assertEqual(out, "")
         self.assertFalse(Path(self.db).exists())
 
@@ -422,51 +501,93 @@ class WebBindTests(unittest.TestCase):
             self.assertNotIn("token", serve.call_args.kwargs)
 
     def test_cli_allow_lan_on_loopback_does_not_mint(self):
-        with mock.patch.object(cli, "webapp_token_param", return_value="api_token"), \
-                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+        with mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
                 mock.patch("lantern.webapp.serve") as serve:
             code, _, err = self.run_cli("web", "--allow-lan", "--port", "9")
         self.assertEqual(code, 0)
         self.assertNotIn("WARNING", err)
         self.assertEqual(serve.call_args.kwargs["host"], "127.0.0.1")
         self.assertNotIn("api_token", serve.call_args.kwargs)
+        self.assertFalse(serve.call_args.kwargs["lan_bound"])
 
-    def test_cli_passes_token_when_s1_present(self):
-        with mock.patch.object(cli, "webapp_token_param", return_value="api_token"), \
-                mock.patch.object(cli, "new_api_token", return_value="once-token"), \
+    def test_cli_non_tty_passes_env_token_without_printing_it(self):
+        token = "n" * 32
+        env = self._no_token_env()
+        env[cli.TOKEN_ENV] = token
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
                 mock.patch("lantern.webapp.serve") as serve:
-            code, out, err = self.run_cli("web", "--host", "0.0.0.0", "--allow-lan", "--port", "9")
-        self.assertEqual(code, 0)
-        self.assertNotIn("once-token", out)
-        self.assertEqual(err.count("once-token"), 1)
-        self.assertGreaterEqual(err.count("WARNING"), 4)
-        self.assertEqual(serve.call_args.kwargs["host"], "0.0.0.0")
-        self.assertEqual(serve.call_args.kwargs["api_token"], "once-token")
+            code, out, err = self.run_cli(
+                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertNotIn(token, err)
+        self.assertNotIn("API token (printed", err)
+        self.assertIn("anyone with the token has full control; GET data is also protected", err)
+        self.assertIn("192.168.1.50:9", err)
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertTrue(serve.call_args.kwargs["lan_bound"])
+        self.assertEqual(serve.call_args.kwargs["host"], "192.168.1.50")
+
+    def test_cli_tty_prints_generated_token_once(self):
+        token = "t" * 43
+        env = self._no_token_env()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", return_value=token), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli(
+                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9", "--debug",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertEqual(err.count(token), 1)
+        self.assertIn("API token (printed once, not logged):", err)
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertTrue(serve.call_args.kwargs["debug"])
 
     def test_process_refuses_lan_bind_without_listening(self):
         import subprocess
         import sys
 
+        env = os.environ.copy()
+        env.pop(cli.TOKEN_ENV, None)
+        env.pop(cli.TOKEN_FILE_ENV, None)
         proc = subprocess.run(
             [sys.executable, "-m", "lantern", "--db", self.db, "web",
              "--host", "0.0.0.0", "--port", "8068"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True, text=True, timeout=5, check=False, env=env,
         )
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("refusing to bind", proc.stderr)
         self.assertNotIn("Lantern dashboard", proc.stdout)
-        self.assertNotIn("API token", proc.stderr)
+        self.assertNotIn("API token (printed", proc.stderr)
         self.assertFalse(Path(self.db).exists())
 
         proc = subprocess.run(
             [sys.executable, "-m", "lantern", "--db", self.db, "web",
              "--host", "0.0.0.0", "--allow-lan", "--port", "8068"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True, text=True, timeout=5, check=False, env=env,
         )
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("requires S1 token support", proc.stderr)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("refusing to start without a valid API token", proc.stderr)
         self.assertNotIn("Lantern dashboard", proc.stdout)
-        self.assertNotIn("API token", proc.stderr)
+        self.assertNotIn("API token (printed", proc.stderr)
+        self.assertFalse(Path(self.db).exists())
+
+        short = env.copy()
+        short[cli.TOKEN_ENV] = "too-short"
+        proc = subprocess.run(
+            [sys.executable, "-m", "lantern", "--db", self.db, "web",
+             "--host", "192.168.1.50", "--allow-lan", "--port", "8068"],
+            capture_output=True, text=True, timeout=5, check=False, env=short,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("128 bits", proc.stderr)
+        self.assertNotIn("too-short", proc.stderr)
+        self.assertNotIn("Lantern dashboard", proc.stdout)
         self.assertFalse(Path(self.db).exists())
 
     def test_web_help_mentions_allow_lan(self):

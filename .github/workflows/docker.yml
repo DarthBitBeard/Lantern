@@ -10,8 +10,10 @@ permissions:
 # Build the image and smoke-test it with container networking disabled.
 # --network none leaves only loopback, so the job cannot reach a LAN or
 # the internet. The default command binds 127.0.0.1. A non-loopback bind
-# without --allow-lan must be refused before it listens. This job does
-# not log in, push, tag, or publish an image, and it does not scan.
+# without --allow-lan must be refused before it listens. --allow-lan
+# without a token must be refused. A start that uses a token file must
+# not write that token to docker logs. This job does not log in, push,
+# tag, or publish an image, and it does not scan.
 
 jobs:
   image:
@@ -109,7 +111,9 @@ jobs:
             *"Lantern dashboard:"*) echo "dashboard started on a LAN bind" >&2; exit 1 ;;
           esac
 
-          # --allow-lan must not start an unauthenticated listener either.
+          # --allow-lan without a token must refuse before it listens.
+          # stderr is not a TTY in this job, so a generated token must not
+          # be printed into the container output.
           set +e
           allow_out=$(docker run --rm "${runtime[@]}" lantern:ci \
             lantern web --host 0.0.0.0 --allow-lan --port 8068 --db /tmp/lantern-lan.db 2>&1)
@@ -117,23 +121,109 @@ jobs:
           set -e
           echo "$allow_out"
           if [[ "$allow_code" -eq 0 ]]; then
-            echo "--allow-lan started without a token gate" >&2
+            echo "--allow-lan started without a token" >&2
             exit 1
           fi
           case "$allow_out" in
-            *"requires S1 token support"*) ;;
-            *) echo "expected S1 token gate, got: $allow_out" >&2; exit 1 ;;
+            *"refusing to start without a valid API token"*) ;;
+            *) echo "expected a missing-token refusal" >&2; exit 1 ;;
           esac
           case "$allow_out" in
             *"Lantern dashboard:"*) echo "dashboard started via --allow-lan" >&2; exit 1 ;;
           esac
           case "$allow_out" in
-            *"API token"*) echo "--allow-lan printed a token it cannot enforce" >&2; exit 1 ;;
+            *"API token (printed"*) echo "--allow-lan printed a token" >&2; exit 1 ;;
           esac
 
+          # A token file (mode 0400, uid 10001) lets the same flag start
+          # under --network none. 0.0.0.0 is the listen socket; the only
+          # address in this network is named with --allow-host. The token
+          # must not appear in docker logs. The value is not echoed here.
+          token_file=$(mktemp)
+          python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_urlsafe(32))' > "$token_file"
+          token=$(cat "$token_file")
+          sudo chown 10001:10001 "$token_file"
+          sudo chmod 400 "$token_file"
+          lan_cid=$(docker run -d "${runtime[@]}" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            -e LANTERN_API_TOKEN_FILE=/run/secrets/lantern_token \
+            -v "$token_file:/run/secrets/lantern_token:ro" \
+            lantern:ci \
+            lantern web --host 0.0.0.0 --allow-lan --allow-host 127.0.0.1 \
+            --port 8068 --db /tmp/lantern-lan.db)
+          cleanup_lan() {
+            docker rm -f "$lan_cid" >/dev/null 2>&1 || true
+            rm -f "$token_file"
+          }
+          trap cleanup_lan EXIT
+
+          lan_logs=""
+          lan_ready=""
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            lan_logs=$(docker logs "$lan_cid" 2>&1 || true)
+            if [[ "$lan_logs" == *"$token"* ]]; then
+              echo "token appeared in docker logs" >&2
+              exit 1
+            fi
+            if [[ "$lan_logs" == *"Lantern dashboard:"* ]]; then
+              lan_ready=$lan_logs
+              break
+            fi
+            sleep 1
+          done
+          if [[ -z "$lan_ready" ]]; then
+            echo "$lan_logs"
+            echo "--allow-lan did not start with a token file" >&2
+            exit 1
+          fi
+          echo "$lan_ready"
+          case "$lan_ready" in
+            *"API token (printed"*) echo "token banner was printed into docker logs" >&2; exit 1 ;;
+          esac
+          case "$lan_ready" in
+            *"127.0.0.1:8068"*) ;;
+            *) echo "LAN allowlist did not name 127.0.0.1:8068" >&2; exit 1 ;;
+          esac
+
+          docker exec "$lan_cid" python -c '
+          import urllib.error, urllib.request
+          token = open("/run/secrets/lantern_token", encoding="utf-8").read().strip()
+          base = "http://127.0.0.1:8068"
+          page = urllib.request.urlopen(base + "/", timeout=5)
+          body = page.read().decode()
+          if token in body:
+              raise SystemExit("index.html contains the API token")
+          scans = base + "/api/scans"
+          try:
+              urllib.request.urlopen(scans, timeout=5)
+              raise SystemExit("GET /api/scans without a token was allowed")
+          except urllib.error.HTTPError as exc:
+              if exc.code not in (401, 403):
+                  raise SystemExit("expected 403 without a token, got %s" % exc.code)
+          evil = urllib.request.Request(
+              scans,
+              headers={"Host": "evil.example:8068", "X-Lantern-Token": token},
+          )
+          try:
+              urllib.request.urlopen(evil, timeout=5)
+              raise SystemExit("evil Host was allowed")
+          except urllib.error.HTTPError as exc:
+              if exc.code not in (401, 403):
+                  raise SystemExit("expected 403 for an evil Host, got %s" % exc.code)
+          good = urllib.request.Request(scans, headers={"X-Lantern-Token": token})
+          with urllib.request.urlopen(good, timeout=5) as resp:
+              if resp.status != 200:
+                  raise SystemExit("GET with the token failed")
+          '
+
+          docker rm -f "$lan_cid" >/dev/null 2>&1 || true
+          rm -f "$token_file"
+          trap - EXIT
+          unset token
+
           # Default command: prove the listening socket is 127.0.0.1:8068
-          # (0x1F84). The startup line rewrites 0.0.0.0 to 127.0.0.1 in the
-          # URL text, so the log line alone is not the check.
+          # (0x1F84). The startup line is checked as well. /proc/net/tcp is
+          # what proves the address, because a banner can be rewritten.
           # /data is a host directory owned by uid 10001, same as the README.
           # A tmpfs on the image VOLUME path is not writable by that user.
           data_dir=$(mktemp -d)

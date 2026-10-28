@@ -2,9 +2,37 @@
 
 const $ = (id) => document.getElementById(id);
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-function lanternToken() {
+const TOKEN_STORAGE = "lantern-token";
+
+function pageToken() {
   const meta = document.querySelector('meta[name="lantern-token"]');
-  return meta ? meta.getAttribute("content") || "" : "";
+  const value = meta ? meta.getAttribute("content") || "" : "";
+  if (!value || value === "__LANTERN_TOKEN__") return "";
+  return value;
+}
+
+function storedToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE) || "";
+  } catch (err) {
+    return "";
+  }
+}
+
+function lanternToken() {
+  return storedToken() || pageToken();
+}
+
+function lanMode() {
+  const meta = document.querySelector('meta[name="lantern-auth"]');
+  return !!(meta && meta.getAttribute("content") === "token");
+}
+
+function showTokenPrompt() {
+  const box = $("token-entry");
+  if (!box) return;
+  box.hidden = false;
+  $("status").textContent = "Token required";
 }
 
 // View state. `viewingId` is null when showing the latest scan.
@@ -45,8 +73,17 @@ function setBusy(busy) {
 }
 
 async function api(path, options) {
-  const res = await fetch(path, options);
+  const opts = { ...(options || {}) };
+  const headers = { ...(opts.headers || {}) };
+  const token = lanternToken();
+  if (token) headers["X-Lantern-Token"] = token;
+  opts.headers = headers;
+  const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
+  if (res.status === 403 && lanMode()) {
+    try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (err) { /* private mode */ }
+    showTokenPrompt();
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -293,6 +330,26 @@ $("refresh-btn").addEventListener("click", async () => {
   }
 });
 
+$("report-link").addEventListener("click", async (event) => {
+  event.preventDefault();
+  try {
+    const headers = {};
+    const token = lanternToken();
+    if (token) headers["X-Lantern-Token"] = token;
+    const res = await fetch($("report-link").getAttribute("href"), { headers });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Request failed (${res.status})`);
+    }
+    const html = await res.text();
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener");
+  } catch (err) {
+    setMessage(err.message, true);
+  }
+});
+
 $("search").addEventListener("input", renderDevices);
 $("filter").addEventListener("change", renderDevices);
 $("history").addEventListener("change", async (event) => {
@@ -304,7 +361,7 @@ $("history").addEventListener("change", async (event) => {
   }
 });
 
-(async () => {
+async function startDashboard() {
   try {
     await loadStatus();
     await loadLatest();
@@ -313,4 +370,37 @@ $("history").addEventListener("change", async (event) => {
     $("status").textContent = "Could not reach the Lantern server.";
     setMessage(err.message, true);
   }
-})();
+}
+
+const tokenForm = $("token-form");
+if (tokenForm) {
+  tokenForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = $("api-token").value.trim();
+    if (value.length < 22) {
+      setMessage("That token is too short.", true);
+      return;
+    }
+    try {
+      sessionStorage.setItem(TOKEN_STORAGE, value);
+    } catch (err) {
+      setMessage("This browser blocked session storage.", true);
+      return;
+    }
+    $("api-token").value = "";
+    $("token-entry").hidden = true;
+    setMessage("");
+    startDashboard();
+  });
+}
+
+if (lanMode()) {
+  const note = $("exposure-note");
+  if (note) {
+    note.textContent = "LAN mode. Every API call needs the startup token. Data stays in one SQLite file on this machine. Never expose this port to the internet.";
+  }
+  if (!storedToken()) showTokenPrompt();
+  else startDashboard();
+} else {
+  startDashboard();
+}

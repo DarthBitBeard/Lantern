@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="lantern-token" content="__LANTERN_TOKEN__">
+<meta name="lantern-auth" content="__LANTERN_AUTH__">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Lantern</title>
@@ -15,6 +16,15 @@
 </header>
 
 <main>
+  <section id="token-entry" class="controls" hidden>
+    <form id="token-form">
+      <label for="api-token">API token</label>
+      <input id="api-token" name="api-token" type="password" autocomplete="off" spellcheck="false">
+      <button type="submit" id="token-btn">Unlock</button>
+    </form>
+    <p class="hint">This dashboard is bound beyond loopback. Paste the startup token once for this tab. It is sent as X-Lantern-Token and is not written into the page.</p>
+  </section>
+
   <noscript><p class="message error">Lantern's dashboard needs JavaScript. The CLI works without it: <code>python3 -m lantern demo</code>.</p></noscript>
 
   <section class="controls" aria-label="Scan controls">
@@ -50,7 +60,7 @@
   <section id="devices" class="devices" aria-label="Devices"></section>
 
   <footer>
-    <p>Local only. No cloud, no accounts, no tracking. Data stays in one SQLite file on this machine. Keep this page on localhost or behind Tailscale. Never expose it to the internet.</p>
+    <p id="exposure-note">Local only. No cloud, no accounts, no tracking. Data stays in one SQLite file on this machine. Keep this page on localhost or behind Tailscale. Never expose it to the internet.</p>
     <p id="version" class="version"></p>
   </footer>
 </main>

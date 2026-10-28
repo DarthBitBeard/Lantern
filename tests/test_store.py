@@ -468,8 +468,12 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(_mode(parent), 0o755)
         self.assertEqual(_mode(db_path), 0o640)
         self.assertEqual(_mode(parent / "export.json"), 0o600)
-        self.assertIn("0640", buf.getvalue())
-        self.assertIn(db_path.name, buf.getvalue())
+        warning = buf.getvalue()
+        self.assertIn("0640", warning)
+        self.assertIn(db_path.name, warning)
+        self.assertIn("0755", warning)
+        self.assertIn("will not change an existing directory", warning)
+        self.assertIn(parent.name, warning)
 
     def test_private_file_does_not_warn_and_loose_modes_do(self):
         if os.name == "nt":

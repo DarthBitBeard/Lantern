@@ -1,9 +1,11 @@
 FROM python:3.12-slim
 
 # The dashboard listens on loopback. CMD below passes --host 127.0.0.1.
-# A non-loopback address needs `lantern web --allow-lan`, and that flag
-# refuses to start until the dashboard can require a startup API token
-# ("requires S1 token support"). Do not publish port 8068.
+# A non-loopback address needs `lantern web --allow-lan` and a startup
+# token from LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN (at least 128
+# bits). This image does not contain a token. When stderr is not a
+# terminal, Lantern does not print a generated token, because that
+# stream is what `docker logs` stores. Do not publish port 8068.
 #
 # The process is the non-root user lantern (uid/gid 10001). /data is the
 # SQLite volume and is created owned by that user. A host directory mounted
