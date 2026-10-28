@@ -23,9 +23,48 @@ function lanternToken() {
   return storedToken() || pageToken();
 }
 
-function lanMode() {
+function authMode() {
   const meta = document.querySelector('meta[name="lantern-auth"]');
-  return !!(meta && meta.getAttribute("content") === "token");
+  return meta ? meta.getAttribute("content") || "" : "";
+}
+
+function lanMode() {
+  return authMode() === "token";
+}
+
+function needsStoredToken() {
+  const mode = authMode();
+  return mode === "token" || mode === "strict";
+}
+
+function takeFragmentToken() {
+  // The fragment is never sent to the server. Move it into this tab and
+  // strip it from the address bar so a copied URL does not keep the token.
+  let hash = "";
+  try {
+    hash = window.location.hash || "";
+  } catch (err) {
+    return "";
+  }
+  const mark = "#token=";
+  if (hash.indexOf(mark) !== 0) return "";
+  let value = hash.slice(mark.length);
+  try {
+    value = decodeURIComponent(value);
+  } catch (err) {
+    value = hash.slice(mark.length);
+  }
+  value = value.trim();
+  if (value) {
+    try {
+      sessionStorage.setItem(TOKEN_STORAGE, value);
+    } catch (err) { /* private mode */ }
+  }
+  try {
+    const path = (window.location.pathname || "/") + (window.location.search || "");
+    history.replaceState(null, "", path);
+  } catch (err) { /* cannot rewrite this URL */ }
+  return value;
 }
 
 function showTokenPrompt() {
@@ -394,10 +433,14 @@ if (tokenForm) {
   });
 }
 
-if (lanMode()) {
+takeFragmentToken();
+
+if (needsStoredToken()) {
   const note = $("exposure-note");
-  if (note) {
+  if (note && lanMode()) {
     note.textContent = "LAN mode. Every API call needs the startup token. Data stays in one SQLite file on this machine. Never expose this port to the internet.";
+  } else if (note) {
+    note.textContent = "Strict auth. Every API call needs the startup token. It is not in this page.";
   }
   if (!storedToken()) showTokenPrompt();
   else startDashboard();

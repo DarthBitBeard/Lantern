@@ -17,6 +17,8 @@ Local-tool hygiene, enforced here:
 - Loopback: POST /api/* requires X-Lantern-Token. The process generates
   it, embeds it in the dashboard page, and compares it with
   hmac.compare_digest. GET does not need it. The token is not logged.
+  --strict-auth is the opt-in exception: the page does not contain the
+  token, and every /api route requires it.
 - LAN-bound: the same token, supplied by the CLI, is required on every
   API route including GET inventory and reports. It is not embedded in
   the page. Static files other than that rule stay unauthenticated.
@@ -418,6 +420,7 @@ def startup_lines(
     *,
     lan_bound: bool,
     allowed_hosts: frozenset[str],
+    strict_auth: bool = False,
 ) -> list[str]:
     """Banner lines for one mode. Never includes the API token."""
     shown = _format_url_host(bound_host)
@@ -427,6 +430,11 @@ def startup_lines(
             f"Lantern dashboard: LAN bind on {shown}:{bound_port}/  "
             "(every API call requires the startup token)",
             f"Allowed Host values: {allowed}",
+        ]
+    if strict_auth:
+        return [
+            f"Lantern dashboard: http://{shown}:{bound_port}/  "
+            "(strict auth; the page does not hold the API token)",
         ]
     return [
         f"Lantern dashboard: http://{shown}:{bound_port}/  "
@@ -539,7 +547,9 @@ class LanternHandler(BaseHTTPRequestHandler):
     bound_port = 0
     # Loopback embeds the token and checks it on POST only. LAN mode
     # (set by the CLI) checks it on every API route and does not embed it.
+    # strict_auth is the opt-in loopback mode that does the same.
     lan_bound = False
+    strict_auth = False
     # Per-read idle timeout, and one deadline for reading the request
     # line, headers, and body. The deadline is what stops a slow drip.
     # Response writes use a fresh idle timeout per chunk, plus an overall cap.
@@ -755,10 +765,10 @@ class LanternHandler(BaseHTTPRequestHandler):
         self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
 
     def _api_get_allowed(self) -> bool:
-        """Loopback GET is open to an allowed Host. LAN GET needs the token."""
-        if not self.lan_bound:
-            return True
-        return self._token_ok()
+        """Loopback GET is open to an allowed Host. LAN and strict auth need the token."""
+        if self.lan_bound or self.strict_auth:
+            return self._token_ok()
+        return True
 
     def _content_length_values(self) -> list[str] | None:
         values = self.headers.get_all("Content-Length")
@@ -813,7 +823,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if self._reject_transfer_encoding():
             return
         path = urlparse(self.path).path
-        if self.lan_bound and path.startswith("/api/") and not self._token_ok():
+        if (self.lan_bound or self.strict_auth) and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
             return
         self.close_connection = True
@@ -861,15 +871,16 @@ class LanternHandler(BaseHTTPRequestHandler):
         text = path.read_text(encoding="utf-8")
         if text.count(TOKEN_PLACEHOLDER) != 1 or text.count(AUTH_PLACEHOLDER) != 1:
             raise RuntimeError("Dashboard index is missing its token placeholder.")
-        if self.lan_bound:
-            # The page must not contain the token. A Host-forging LAN client
-            # can still GET /, and that response is how the old gate leaked.
+        if self.lan_bound or self.strict_auth:
+            # The page must not contain the token. A client that can GET /
+            # must not learn it from the HTML or from a response header.
+            marker = "token" if self.lan_bound else "strict"
             page = (
                 text.replace(TOKEN_PLACEHOLDER, "", 1)
-                .replace(AUTH_PLACEHOLDER, "token", 1)
+                .replace(AUTH_PLACEHOLDER, marker, 1)
             )
             if self.api_token and self.api_token in page:
-                raise RuntimeError("Refusing to embed the API token in a LAN-bound page.")
+                raise RuntimeError("Refusing to embed the API token in the page.")
             return page.encode("utf-8")
         # token_urlsafe is already [A-Za-z0-9_-]. Escape anyway so a future
         # generator cannot break out of the attribute. Do not log the token.
@@ -1221,6 +1232,7 @@ def make_server(
     allow_hosts: list[str] | None = None,
     api_token: str | None = None,
     lan_bound: bool = False,
+    strict_auth: bool = False,
     listen_host: str | None = None,
     max_connections: int = MAX_CONNECTIONS,
     max_connections_per_ip: int = MAX_CONNECTIONS_PER_IP,
@@ -1233,7 +1245,8 @@ def make_server(
 
     ``api_token``, when passed, is the only token for this process. Loopback
     generates one when it is omitted and embeds it in the page. LAN mode
-    requires the CLI token and does not embed it.
+    requires the CLI token and does not embed it. ``strict_auth`` also
+    requires that token, does not embed it, and checks it on every API route.
 
     ``listen_host`` is the socket address. Tests simulate a LAN allowlist
     while binding ``127.0.0.1`` by setting ``host`` to the LAN address and
@@ -1265,7 +1278,9 @@ def make_server(
     socket_host = host if listen_host is None else listen_host
     # Reject a bad --allow-host before opening a socket.
     parsed_hosts = [parse_allow_host(item) for item in (allow_hosts or [])]
-    if lan_bound or api_token is not None:
+    if strict_auth and api_token is None:
+        raise ValueError("strict auth requires an API token.")
+    if lan_bound or strict_auth or api_token is not None:
         token_problem = api_token_error(api_token)
         if token_problem:
             raise ValueError(token_problem)
@@ -1288,6 +1303,7 @@ def make_server(
             "db_path": str(db_path),
             "debug": bool(debug),
             "lan_bound": bool(lan_bound),
+            "strict_auth": bool(strict_auth),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
             "write_timeout": float(write_timeout),
@@ -1314,6 +1330,7 @@ def serve(
     allow_hosts: list[str] | None = None,
     api_token: str | None = None,
     lan_bound: bool = False,
+    strict_auth: bool = False,
 ) -> None:
     server = make_server(
         db_path,
@@ -1323,6 +1340,7 @@ def serve(
         allow_hosts=allow_hosts,
         api_token=api_token,
         lan_bound=lan_bound,
+        strict_auth=strict_auth,
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass
@@ -1331,6 +1349,7 @@ def serve(
         int(bound_port),
         lan_bound=bool(handler.lan_bound),
         allowed_hosts=handler.allowed_hosts,
+        strict_auth=bool(handler.strict_auth),
     ):
         print(line, flush=True)
     print(f"Database: {db_path}", flush=True)
