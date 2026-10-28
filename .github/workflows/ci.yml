@@ -4,18 +4,68 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+# Linux, macOS, and Windows, on every supported Python.
+# The package job builds a wheel and installs it outside the source tree.
+# Nothing here scans a network: tests and the demo use local data only.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run tests
-        run: python3 tests/run_tests.py
+        run: python tests/run_tests.py
       - name: Check demo report builds
-        run: python3 -m lantern demo --db /tmp/lantern-ci.db
+        run: python -m lantern demo --db "$RUNNER_TEMP/lantern-ci.db"
+
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build
+          ls -1 dist/*.whl dist/*.tar.gz
+      - name: Install the wheel and smoke-test outside the source tree
+        run: |
+          set -euo pipefail
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          # Confirm the installed package, not the checkout, is what runs.
+          python -c "from pathlib import Path; import lantern.webapp as w; assert (w.WEB_DIR / 'index.html').is_file()"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cmd=(lantern.exe)
+          else
+            cmd=(lantern)
+          fi
+          "${cmd[@]}" --version
+          "${cmd[@]}" demo --db "$RUNNER_TEMP/lantern-pkg.db"
+          test -f "$RUNNER_TEMP/demo-report.html"
