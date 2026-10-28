@@ -502,6 +502,35 @@ class PrivateFileTests(unittest.TestCase):
             self.assertIn(f"{mode:04o}", text)
             self.assertEqual(_mode(path), mode)
 
+    def test_symlink_database_is_refused(self):
+        """A dangling symlink used to be created at the target as mode 0644."""
+        if os.name == "nt":
+            self.skipTest("POSIX symlink refusal is not checked on Windows")
+        self._umask(0o022)
+        dangling_target = Path(self.tmp.name) / "outside.db"
+        dangling = Path(self.tmp.name) / "lantern.db"
+        dangling.symlink_to(dangling_target)
+        with self.assertRaises(ValueError) as ctx:
+            connect(dangling)
+        message = str(ctx.exception)
+        self.assertIn("symlink", message)
+        self.assertIn("will not follow", message)
+        self.assertNotIn(dangling_target.name, message)
+        self.assertFalse(dangling_target.exists())
+        self.assertTrue(dangling.is_symlink())
+
+        real = Path(self.tmp.name) / "real.db"
+        real.write_bytes(b"leave-me")
+        os.chmod(real, 0o644)
+        linked = Path(self.tmp.name) / "linked.db"
+        linked.symlink_to(real)
+        with self.assertRaises(ValueError) as ctx:
+            connect(linked)
+        self.assertIn("symlink", str(ctx.exception))
+        self.assertNotIn(real.name, str(ctx.exception))
+        self.assertEqual(real.read_bytes(), b"leave-me")
+        self.assertEqual(_mode(real), 0o644)
+
     def test_warn_loose_permissions_does_not_raise(self):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):

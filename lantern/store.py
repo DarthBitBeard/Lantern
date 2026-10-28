@@ -298,15 +298,30 @@ def _warn_existing_backups(db_path: Path) -> None:
             warn_loose_permissions(candidate)
 
 
+def _refuse_database_symlink(path: Path) -> None:
+    """Refuse a symlink, including a dangling one.
+
+    Opening it would follow the link. SQLite then creates the target at
+    mode 0644, and a dangling link does not stat, so there is no warning.
+    The error does not include the link target.
+    """
+    if path.is_symlink():
+        raise ValueError(
+            f"Database path {path} is a symlink. Lantern will not follow it."
+        )
+
+
 def _prepare_database_file(db_path: str | Path) -> None:
     """Create a new database path as a private file, or warn if it is loose.
 
-    An in-memory database is skipped. A missing parent directory is created
-    at mode 0700. A parent that already exists is not chmod'd.
+    An in-memory database is skipped. A symlink is refused. A missing parent
+    directory is created at mode 0700. A parent that already exists is not
+    chmod'd.
     """
     persistent = _persistent_path(db_path)
     if persistent is None:
         return
+    _refuse_database_symlink(persistent)
     parent = persistent.parent
     if parent != Path("") and not parent.exists():
         _create_private_directory(parent)
@@ -316,6 +331,8 @@ def _prepare_database_file(db_path: str | Path) -> None:
         try:
             _create_private_file(persistent)
         except FileExistsError:
+            # O_NOFOLLOW|O_EXCL reports a dangling symlink as "file exists".
+            _refuse_database_symlink(persistent)
             warn_loose_permissions(persistent)
     _warn_existing_backups(persistent)
 
@@ -466,10 +483,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open (and create if needed) the Lantern database.
 
     A new file is created with mode 0600 before SQLite opens it, and a
-    missing parent directory is created with mode 0700. An existing
-    database or migration backup that is group- or world-readable produces
-    a warning on stderr and is left unchanged. On Windows, POSIX modes are
-    not applied; the user profile ACL is what keeps the file private.
+    missing parent directory is created with mode 0700. A symlink is
+    refused, including a dangling one. An existing database or migration
+    backup that is group- or world-readable produces a warning on stderr
+    and is left unchanged. On Windows, POSIX modes are not applied; the
+    user profile ACL is what keeps the file private.
 
     A database from Lantern 0.3.0 is upgraded in place after a backup copy
     is written beside the file. A database newer than this process is
