@@ -281,6 +281,12 @@ class ApiTests(unittest.TestCase):
         status, body, headers = self._request("/api/v1/status", method="OPTIONS")
         self.assertEqual(status, 403, body)
         self.assertFalse(any(name.lower().startswith("access-control-") for name in headers))
+        for method in ("TRACE", "CONNECT"):
+            status, body, _ = self._request("/api/v1/status", method=method, token=self.token)
+            self.assertEqual(status, 405, body)
+            self.assertNotIn("<html", body.lower())
+            self.assertEqual(json.loads(body)["error"]["code"], "method_not_allowed")
+            self.assertEqual(json.loads(body)["error"]["message"], v1.MESSAGES["method_not_allowed"])
 
     def test_documents_sort_redact_and_round_trip(self):
         _first, second = self._seed()

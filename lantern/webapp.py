@@ -865,6 +865,20 @@ class LanternHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._unsupported_method()
 
+    def do_TRACE(self):
+        self._v1_method_or_stdlib("TRACE")
+
+    def do_CONNECT(self):
+        self._v1_method_or_stdlib("CONNECT")
+
+    def _v1_method_or_stdlib(self, name: str) -> None:
+        """v1 answers TRACE and CONNECT with JSON. Other paths keep the 501 reply."""
+        path = urlparse(self.path).path
+        if self._is_v1(path):
+            self._unsupported_method()
+            return
+        self.send_error(501, "Unsupported method (%r)" % name)
+
     def _db(self):
         return connect(self.db_path)
 
