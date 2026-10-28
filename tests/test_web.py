@@ -672,8 +672,12 @@ class LanModeTests(unittest.TestCase):
         hdrs.update(headers or {})
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
+        # POST /api/demo writes two scans. A 5s urlopen timeout expired on a
+        # slow Windows runner while that response status line was still
+        # unread. Other calls in this helper stay at 5s.
+        timeout = 20 if method == "POST" and path.startswith("/api/demo") else 5
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
@@ -1549,8 +1553,11 @@ class StrictAuthTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         run_scan.assert_called_once()
 
-    def test_legacy_loopback_still_embeds_the_token_and_allows_get(self):
-        server = make_server(Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0)
+    def test_opt_out_loopback_embeds_the_token_and_allows_get(self):
+        """``strict_auth=False`` is the ``--no-strict-auth`` server."""
+        server = make_server(
+            Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0, strict_auth=False,
+        )
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
         self.assertFalse(server.RequestHandlerClass.strict_auth)

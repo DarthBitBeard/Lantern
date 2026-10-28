@@ -134,19 +134,30 @@ def build_parser() -> argparse.ArgumentParser:
             ":: also needs --allow-host with the LAN address clients will use."
         ),
     )
-    web_p.add_argument(
+    strict = web_p.add_mutually_exclusive_group()
+    strict.add_argument(
         "--strict-auth",
         action="store_true",
         help=(
-            "Do not embed the API token in the page, and require it on every "
-            "/api route, including GET. LANTERN_STRICT_AUTH accepts 1, true, "
-            "yes, or on to enable, and 0, false, no, off, or empty to leave "
-            "it off. 0 does not override this flag. "
-            "On a terminal, a generated token is printed once as a link. "
-            "The token is valid until Lantern restarts. The #token fragment "
-            "is not sent to the server. Without a terminal, set "
-            "LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN. "
-            "The default dashboard does not use this flag."
+            "Require the API token on every /api route, including GET, and "
+            "do not embed it in the page. This is the default. "
+            "LANTERN_STRICT_AUTH accepts 1, true, yes, or on to enable, and "
+            "0, false, no, or off to opt out. An empty value is treated as "
+            "unset. Any other non-empty value refuses to start. 0 does not "
+            "override this flag. On a terminal, a generated token is printed once as "
+            "a link. The token is valid until Lantern restarts. The #token "
+            "fragment is not sent to the server. Without a terminal, set "
+            "LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN."
+        ),
+    )
+    strict.add_argument(
+        "--no-strict-auth",
+        action="store_true",
+        help=(
+            "Opt out of strict auth. On loopback the page embeds the token "
+            "and GET /api does not require it. That re-opens the local-user "
+            "token gap: any local user who can connect can read the token "
+            "and the inventory. LANTERN_STRICT_AUTH=0 is the same opt-out."
         ),
     )
     return parser
@@ -161,7 +172,7 @@ TOKEN_FILE_ENV = "LANTERN_API_TOKEN_FILE"
 TOKEN_ENV = "LANTERN_API_TOKEN"
 STRICT_AUTH_ENV = "LANTERN_STRICT_AUTH"
 _STRICT_TRUE = frozenset({"1", "true", "yes", "on"})
-_STRICT_FALSE = frozenset({"0", "false", "no", "off", ""})
+_STRICT_FALSE = frozenset({"0", "false", "no", "off"})
 
 
 class WebBind(NamedTuple):
@@ -202,27 +213,50 @@ def is_loopback_host(host: str) -> bool:
     return bool(mapped is not None and mapped.is_loopback)
 
 
-def strict_auth_requested(flag: bool, environ: dict) -> tuple[bool, str | None]:
-    """True when ``--strict-auth`` is set or ``LANTERN_STRICT_AUTH`` is true.
+def _strict_env_value(environ: dict) -> tuple[str | None, str | None]:
+    """Return (value, error). Empty and missing are unset (value None).
 
-    The environment variable is the non-flag setting, the same way the API
-    token is configured. An unknown value is an error. A false value does
-    not turn the CLI flag off.
+    ``value`` is ``on``, ``off``, or None. An unknown non-empty value is an
+    error and is checked before either CLI flag is applied.
     """
     if STRICT_AUTH_ENV not in environ:
-        return bool(flag), None
+        return None, None
     raw = environ.get(STRICT_AUTH_ENV)
     if not isinstance(raw, str):
-        return False, f"{STRICT_AUTH_ENV} must be 1 or 0. Refusing to start."
+        return None, f"{STRICT_AUTH_ENV} must be 1 or 0. Refusing to start."
     value = raw.strip().lower()
+    if value == "":
+        return None, None
     if value in _STRICT_TRUE:
-        return True, None
+        return "on", None
     if value in _STRICT_FALSE:
-        return bool(flag), None
-    return False, (
+        return "off", None
+    return None, (
         f"{STRICT_AUTH_ENV} must be 1, true, yes, on, 0, false, no, or off. "
-        "Refusing to start."
+        "An empty value is treated as unset. Refusing to start."
     )
+
+
+def strict_auth_requested(
+    flag: bool, environ: dict, *, opt_out: bool = False,
+) -> tuple[bool, str | None]:
+    """Whether this process uses strict auth. The default is yes.
+
+    The environment value is validated first. ``--no-strict-auth`` then opts
+    out. ``--strict-auth`` forces strict auth on, so ``0`` does not override
+    that flag. ``0``, ``false``, ``no``, and ``off`` opt out. An empty value
+    is treated as unset, and strict auth stays on.
+    """
+    value, error = _strict_env_value(environ)
+    if error:
+        return False, error
+    if opt_out:
+        return False, None
+    if flag:
+        return True, None
+    if value == "off":
+        return False, None
+    return True, None
 
 
 def one_time_open_link(host: str, port: int, token: str) -> str:
@@ -427,6 +461,62 @@ def _lan_warning(host: str, allowed: frozenset[str], source: str | None) -> str:
     return "\n".join(lines)
 
 
+def _strict_off_raw(environ: dict) -> str | None:
+    """The off value as written, lowercased, or None when the env is not an opt-out."""
+    raw = environ.get(STRICT_AUTH_ENV) if environ else None
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if value in _STRICT_FALSE:
+        return value
+    return None
+
+
+def strict_off_source(flag: bool, opt_out: bool, environ: dict) -> str | None:
+    """Why strict auth is off, after the env value has been validated.
+
+    ``flag`` is ``--no-strict-auth``. ``env:<value>`` is an off setting, and
+    the value is ``0``, ``false``, ``no``, or ``off`` so the warning can name
+    what was set. ``both:<value>`` is the flag and an off setting together.
+    """
+    value, _error = _strict_env_value(environ)
+    shown = _strict_off_raw(environ) if value == "off" else None
+    if opt_out and shown is not None:
+        return f"both:{shown}"
+    if opt_out:
+        return "flag"
+    if shown is not None:
+        return f"env:{shown}"
+    return None
+
+
+def _off_value_phrase(raw: str | None) -> str:
+    if raw:
+        return f"LANTERN_STRICT_AUTH={raw}"
+    return "LANTERN_STRICT_AUTH set to an off value"
+
+
+def _opt_out_how(source: str | None) -> str:
+    kind, _, raw = (source or "").partition(":")
+    if kind == "flag":
+        return "--no-strict-auth"
+    if kind == "env":
+        return _off_value_phrase(raw or None)
+    if kind == "both":
+        return f"--no-strict-auth or {_off_value_phrase(raw or None)}"
+    return "--no-strict-auth or LANTERN_STRICT_AUTH set to an off value"
+
+
+def _opt_out_note(source: str | None = None) -> str:
+    return (
+        f"WARNING: strict auth is off ({_opt_out_how(source)}). "
+        "This re-opens the local-user token gap. "
+        "On loopback the page embeds the API token and GET /api does not "
+        "require it. Any local user who can connect can read the token and "
+        "the inventory."
+    )
+
+
 def _strict_note(source: str | None) -> str:
     lines = [
         "Strict auth is on. The page does not contain the API token.",
@@ -450,6 +540,7 @@ def resolve_web_bind(
     debug: bool = False,
     token_factory=None,
     strict_auth: bool = False,
+    strict_off_because: str | None = None,
 ) -> WebBind:
     """Decide whether `lantern web` may bind `host`.
 
@@ -461,7 +552,7 @@ def resolve_web_bind(
     the token in ``warning``.
     """
     if is_loopback_host(host) and not strict_auth:
-        return WebBind()
+        return WebBind(warning=_opt_out_note(strict_off_because), strict_auth=False)
     if not is_loopback_host(host) and not allow_lan:
         return WebBind(error=(
             f"refusing to bind {host}. The dashboard listens on loopback "
@@ -488,8 +579,15 @@ def resolve_web_bind(
     except ValueError as exc:
         # Drop the token. A refused bind must not print it.
         return WebBind(error=str(exc))
+    warning = _lan_warning(host, allowed, source)
+    if not strict_auth:
+        warning += (
+            "\nNOTE: strict auth is off "
+            f"({_opt_out_how(strict_off_because)}). "
+            "A LAN bind still requires the token on every API route."
+        )
     return WebBind(
-        warning=_lan_warning(host, allowed, source),
+        warning=warning,
         token=token,
         lan_bound=True,
         print_token=print_token,
@@ -589,6 +687,7 @@ def main(argv=None) -> int:
             return _err(str(exc))
         strict_auth, strict_error = strict_auth_requested(
             bool(args.strict_auth), os.environ,
+            opt_out=bool(args.no_strict_auth),
         )
         if strict_error:
             return _err(strict_error)
@@ -601,6 +700,9 @@ def main(argv=None) -> int:
             tty=_stderr_is_tty(),
             debug=bool(args.debug),
             strict_auth=strict_auth,
+            strict_off_because=strict_off_source(
+                bool(args.strict_auth), bool(args.no_strict_auth), os.environ,
+            ),
         )
         if web_bind.error:
             return _err(web_bind.error)
@@ -626,6 +728,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         if web_bind is None:
             strict_auth, strict_error = strict_auth_requested(
                 bool(getattr(args, "strict_auth", False)), os.environ,
+                opt_out=bool(getattr(args, "no_strict_auth", False)),
             )
             if strict_error:
                 return _err(strict_error)
@@ -638,6 +741,11 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 tty=_stderr_is_tty(),
                 debug=bool(getattr(args, "debug", False)),
                 strict_auth=strict_auth,
+                strict_off_because=strict_off_source(
+                    bool(getattr(args, "strict_auth", False)),
+                    bool(getattr(args, "no_strict_auth", False)),
+                    os.environ,
+                ),
             )
             if web_bind.error:
                 return _err(web_bind.error)

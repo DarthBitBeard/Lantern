@@ -15,8 +15,10 @@ Thanks for considering a contribution. Lantern is deliberately small, so please 
 ```bash
 python3 -m pip install -e .
 python3 -m lantern demo
-python3 -m lantern web --debug
-# open http://127.0.0.1:8068/
+python3 -m lantern web
+# Open the printed http://127.0.0.1:8068/#token=... link.
+# With no terminal, set LANTERN_API_TOKEN_FILE or the process exits 2.
+# python3 -m lantern web --debug does not print a token; set that file first.
 ```
 
 See the README "Run and debug" section for DB path, ports, and debugger tips.
@@ -31,7 +33,7 @@ Tests use `unittest` and are discovered automatically from `tests/test_*.py`; yo
 
 CI (`.github/workflows/ci.yml`) runs the suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13, then builds a wheel and installs it on each of those operating systems for an offline demo smoke test. Use `python` in workflow steps so Windows runners, which do not provide `python3`, can run the same commands.
 
-A separate workflow (`.github/workflows/docker.yml`) builds the Docker image and runs every container with `--network none`. It checks the image is not root, the default command listens on `127.0.0.1` only, a non-loopback bind without `--allow-lan` is refused, `--allow-lan` without a token is refused, and a token file start does not put the token in `docker logs`. It also runs an offline demo and checks that loopback and public subnets are refused. It does not scan a network, and it does not push or publish the image.
+A separate workflow (`.github/workflows/docker.yml`) builds the Docker image and runs every container with `--network none`. It checks the image is not root, the default command without a token exits non-zero and does not listen, and the same command with a mode-0400 token file listens on `127.0.0.1:8068`. Inside that container, `GET /api/*` is 403 without the token and 200 with it. The token is read from the file and is not printed to the job log. A non-loopback bind without `--allow-lan` is refused, and `--allow-lan` without a token is refused. It also runs an offline demo and checks that loopback and public subnets are refused. It does not scan a network, and it does not push or publish the image.
 
 ## Pull requests
 

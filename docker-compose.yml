@@ -1,3 +1,4 @@
+# Strict auth is the default: the container needs a token file (uncomment environment/secrets below) or it exits 2 (restart: on-failure:3 stops after 3 tries).
 services:
   lantern:
     build: .
@@ -9,7 +10,7 @@ services:
     # and the dashboard must not be reachable from the LAN by default.
     #
     # Opting in to a LAN bind is not recommended. Prefer an SSH tunnel or
-    # Tailscale to 127.0.0.1. If you do opt in, mount a regular token file
+    # Tailscale to 127.0.0.1. Strict auth is the default, so the container needs a token: mount a regular token file
     # mode 0400 owned by uid 10001. Do not use a symlink. Mode 0444 is
     # refused: this file's mode is mounted as-is. Do not write the token
     # into this file.
@@ -57,7 +58,7 @@ services:
       # the container user (chown needs root):
       #   mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
       - ./data:/data
-    restart: unless-stopped
+    restart: "on-failure:3"
 
 # Top-level secret definition. Uncomment this with the service `secrets:`
 # list above. It stays at column 0 so the uncommented key is not nested.

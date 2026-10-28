@@ -14,11 +14,10 @@ Local-tool hygiene, enforced here:
   named with --allow-host. When LAN-bound, the allowlist is only the
   explicit bind address and --allow-host values. A public name that
   rebinds to 127.0.0.1 is still refused.
-- Loopback: POST /api/* requires X-Lantern-Token. The process generates
-  it, embeds it in the dashboard page, and compares it with
-  hmac.compare_digest. GET does not need it. The token is not logged.
-  --strict-auth is the opt-in exception: the page does not contain the
-  token, and every /api route requires it.
+- Loopback, by default: the token is not embedded, and every /api route
+  requires X-Lantern-Token, compared with hmac.compare_digest. The token
+  is not logged. --no-strict-auth embeds it in the page and checks it on
+  POST only.
 - LAN-bound: the same token, supplied by the CLI, is required on every
   API route including GET inventory and reports. It is not embedded in
   the page. Static files other than that rule stay unauthenticated.
@@ -545,9 +544,10 @@ class LanternHandler(BaseHTTPRequestHandler):
     api_token = ""
     allowed_hosts = frozenset()
     bound_port = 0
-    # Loopback embeds the token and checks it on POST only. LAN mode
-    # (set by the CLI) checks it on every API route and does not embed it.
-    # strict_auth is the opt-in loopback mode that does the same.
+    # The CLI default sets strict_auth: the page does not contain the token
+    # and every API route requires it. strict_auth False is --no-strict-auth:
+    # loopback embeds the token and checks it on POST only. LAN mode checks
+    # it on every API route and does not embed it.
     lan_bound = False
     strict_auth = False
     # Per-read idle timeout, and one deadline for reading the request

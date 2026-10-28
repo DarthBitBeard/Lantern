@@ -3,11 +3,13 @@
 FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
 # The dashboard listens on loopback. CMD below passes --host 127.0.0.1.
-# A non-loopback address needs `lantern web --allow-lan` and a startup
-# token from LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN (at least 128
-# bits). This image does not contain a token. When stderr is not a
-# terminal, Lantern does not print a generated token, because that
-# stream is what `docker logs` stores. Do not publish port 8068.
+# Strict auth is the default, so this image needs a token even on loopback,
+# not only for a non-loopback bind. A non-loopback address also needs
+# `lantern web --allow-lan`. The token comes from LANTERN_API_TOKEN_FILE
+# or LANTERN_API_TOKEN (at least 128 bits). This image does not contain a
+# token. When stderr is not a terminal, Lantern does not print a generated
+# token, because that stream is what `docker logs` stores. Without a token
+# the process exits 2 and does not listen. Do not publish port 8068.
 #
 # The process is the non-root user lantern (uid/gid 10001). /data is the
 # SQLite volume and is created owned by that user. A host directory mounted

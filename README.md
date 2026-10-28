@@ -28,7 +28,10 @@ python3 -m pip install -e .
 
 python3 -m lantern demo
 python3 -m lantern web
-# open http://127.0.0.1:8068/
+# A terminal prints http://127.0.0.1:8068/#token=... once.
+# Open that link. The token is valid until this process restarts.
+# The fragment is not sent to the server.
+# With no terminal, set LANTERN_API_TOKEN_FILE or the process exits 2.
 ```
 
 You can also run without installing: `python3 -m lantern …` from the repo root works the same way, because the `lantern` package lives next to the command.
@@ -40,8 +43,8 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Goal | Command |
 | --- | --- |
 | Demo scan + diff (offline) | `python3 -m lantern demo` |
-| Web dashboard | `python3 -m lantern web` then open http://127.0.0.1:8068/ |
-| Dashboard with request logs | `python3 -m lantern web --debug` |
+| Web dashboard | `python3 -m lantern web`, then open the printed `http://127.0.0.1:8068/#token=...` link. With no terminal, set `LANTERN_API_TOKEN_FILE` or the process exits 2. |
+| Dashboard with request logs | `python3 -m lantern web --debug` does not print a token. Set `LANTERN_API_TOKEN_FILE` first, or startup exits 2. With a terminal and no `--debug`, open the printed `#token=` link. |
 | Custom DB path | `python3 -m lantern web --db /tmp/lantern.db` |
 | Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` (loopback only) |
 | Extra dashboard Host | `python3 -m lantern web --allow-host dashboard.home` (repeat the flag for another host) |
@@ -65,16 +68,18 @@ On Windows, Lantern does not set or check these Unix permission bits. Who can re
 
 **Debug tips**
 
-- Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --debug --db data/lantern.db`.
-- `--debug` prints each HTTP request to stderr; leave it off for normal use.
-- Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`.
-- API smoke check: `curl -s http://127.0.0.1:8068/api/status`. A POST also needs the per-process token from the page (it is not printed):
+- Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --db data/lantern.db`. Open the printed `http://127.0.0.1:8068/#token=...` link. With no terminal, set `LANTERN_API_TOKEN_FILE` or the process exits 2.
+- `--debug` prints each HTTP request to stderr; leave it off for normal use. `python3 -m lantern web --debug` does not print a generated token. Set `LANTERN_API_TOKEN_FILE` or startup exits 2.
+- Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`. `--debug` does not print a token, including under pdb, so set `LANTERN_API_TOKEN_FILE` or the process exits 2. Without `--debug`, open the printed `#token=` link. With no terminal, set that file.
+- API smoke check: start `python3 -m lantern web` in a terminal and copy the token from the printed `http://127.0.0.1:8068/#token=...` link. The fragment is not sent by the browser, and the HTML page does not contain the token, so do not scrape it. `GET /api/status` without the header is 403. Send the token as `X-Lantern-Token`:
 
   ```bash
-  token=$(curl -s http://127.0.0.1:8068/ | sed -n 's/.*name="lantern-token" content="\([^"]*\)".*/\1/p')
+  # TOKEN is the value after #token= in the printed link.
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8068/api/status
+  curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/status
   curl -s -X POST http://127.0.0.1:8068/api/demo \
     -H 'Content-Type: application/json' \
-    -H "X-Lantern-Token: $token" \
+    -H "X-Lantern-Token: $TOKEN" \
     -d '{}'
   ```
 - If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
@@ -127,13 +132,13 @@ What it resists:
 
 What it does not resist:
 
-- On loopback, anyone who can open an allowed Host can read the page, and that page contains the token used for `POST`. That person can call the API. `--allow-host` does not add a login.
+- On loopback with `--no-strict-auth`, anyone who can open an allowed Host can read the page, and that page contains the token used for `POST`. That person can call the API. The default does not embed the token. `--allow-host` does not add a login.
 - On a LAN bind, anyone who has the startup token can read the inventory and start scans. Treat that token like a password. It is not an account system.
 - A person at the keyboard, or another local user who can read the SQLite file.
 
 Every request must send an allowed `Host`. On loopback that is `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, plus any host you named with `--allow-host`. With `--allow-lan`, the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added, and a wildcard is not accepted. A name you did not list is refused even when it resolves to loopback.
 
-Loopback `POST /api/*` requires `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe` (256 bits), embeds it in the dashboard page, and compares it with `hmac.compare_digest`. It is not written to the log. `GET` on loopback needs the Host check and does not need the token. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` is accepted only when the token is valid.
+By default every `/api` route, including `GET`, requires `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe` (256 bits), does not embed it in the page, and compares it with `hmac.compare_digest`. It is not written to the log. On a terminal it is printed once in the `#token=` link. `--no-strict-auth` embeds it on loopback and does not require it on `GET`. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` is accepted only when the token is valid.
 
 A LAN bind uses that same header for `POST` and for `GET` of inventory, status, and reports. The token is the one the CLI loaded or generated. It is not embedded in the page and it is not written to the log.
 
@@ -145,7 +150,8 @@ No pip install needed. The dashboard is stdlib only, plain HTML, CSS, and JavaSc
 
 ```bash
 python3 -m lantern web
-# open http://127.0.0.1:8068/
+# Open the printed http://127.0.0.1:8068/#token=... link.
+# With no terminal, set LANTERN_API_TOKEN_FILE or the process exits 2.
 ```
 
 API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` is on the allowlist. On loopback that is this port's loopback names, or a host passed with `--allow-host`. With `--allow-lan` it is only the bind address and `--allow-host`.
@@ -161,9 +167,9 @@ API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` i
 | `POST /api/demo` `{}` | saves the two demo scans |
 | `POST /api/trust` `{"mac": "...", "label": "...", "trusted": true}` | labels a device by MAC |
 
-On loopback, `GET` needs an allowed `Host` and, by default, does not need the token. `POST /api/*` also needs the header `X-Lantern-Token`. The dashboard reads that value from `<meta name="lantern-token">` in the page and sends it on POST. A new token is generated each time the process starts. It is not printed and it is not written to the request log. Any local user or process that can connect to that loopback port can read the page, and therefore the token, and can read `GET /api/*` without it. With Docker host networking, that `127.0.0.1` is the host's loopback, so the same is true of every user on the Docker host.
+On loopback, `GET` needs an allowed `Host`. By default it also needs `X-Lantern-Token`, and the page does not contain the token. `POST /api/*` needs that header too. A new token is generated each time the process starts. On a terminal it is printed once in the `#token=` link and is not written to the request log. `--no-strict-auth` embeds the token in the page and does not require it on `GET`. Any local user or process that can connect can then read the page, and therefore the token, and can read `GET /api/*` without it. With Docker host networking, that `127.0.0.1` is the host's loopback, so the same is true of every user on the Docker host when you opt out.
 
-`--strict-auth` (or `LANTERN_STRICT_AUTH=1`) is off by default. It never puts the token in the page, and every `/api` route, including `GET`, requires `X-Lantern-Token` in both loopback and LAN mode. The comparison and the short delay on a presented mismatch are the same as the other modes. On an interactive terminal, a generated token is printed once as `http://127.0.0.1:PORT/#token=...`. Open that link in the browser. The token is valid until Lantern restarts. The `#token` fragment is not sent to the server. The page script stores it in `sessionStorage` only in this mode and in LAN mode, removes it from the address bar with `history.replaceState`, and sends it as `X-Lantern-Token`. A 403 clears that stored token and asks again, including after a restart leaves a stale value. Without a terminal, which is how `docker logs` works, Lantern does not generate or print a token. Prefer `LANTERN_API_TOKEN_FILE` over `LANTERN_API_TOKEN`: on Linux the process environment is `/proc/<pid>/environ` (mode 0400), so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment. `LANTERN_STRICT_AUTH` accepts `1`, `true`, `yes`, or `on` to enable, and `0`, `false`, `no`, `off`, or empty to leave it off. `0` does not override `--strict-auth`. `--debug` does not print a generated token either. There is no separate config file for this flag. The environment variable is the non-flag setting, the same way the token is configured.
+Strict auth is the default. It never puts the token in the page, and every `/api` route, including `GET`, requires `X-Lantern-Token` in both loopback and LAN mode. The comparison and the short delay on a presented mismatch are the same as the other modes. On an interactive terminal, a generated token is printed once as `http://127.0.0.1:PORT/#token=...`. Open that link in the browser. The token is valid until Lantern restarts. The `#token` fragment is not sent to the server. The page script stores it in `sessionStorage` only in this mode and in LAN mode, removes it from the address bar with `history.replaceState`, and sends it as `X-Lantern-Token`. A 403 clears that stored token and asks again, including after a restart leaves a stale value. Without a terminal, which is how `docker logs` works, Lantern does not generate or print a token. Prefer `LANTERN_API_TOKEN_FILE` over `LANTERN_API_TOKEN`: on Linux the process environment is `/proc/<pid>/environ` (mode 0400), so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment. `LANTERN_STRICT_AUTH` accepts `1`, `true`, `yes`, or `on` to enable, and `0`, `false`, `no`, or `off` to opt out (re-opens the local-user token gap). Any other non-empty value refuses to start; an empty value is treated as unset. `0` does not override `--strict-auth`. `--no-strict-auth` turns strict auth off even when `LANTERN_STRICT_AUTH` is `1`, `true`, `yes`, or `on`, and startup prints a warning that names that flag. `--debug` does not print a generated token either. There is no separate config file for this flag. The environment variable is the non-flag setting, the same way the token is configured.
 
 With `--allow-lan`, `GET /api/*` (inventory, status, and HTML or JSON reports) needs the same header as `POST`. The page does not contain the token. Paste it once into the dashboard; the browser keeps it in `sessionStorage` for that tab and sends it as `X-Lantern-Token`. Static files such as `app.js` stay available without the token. The comparison is `hmac.compare_digest`. A token that is presented and does not match waits a short fixed time. The token is not written to the log. `--debug` does not print a generated token; set the file or `LANTERN_API_TOKEN` instead.
 
@@ -177,24 +183,16 @@ Docker, for a homelab host:
 
 ```bash
 mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
-docker compose up -d
-# on the host: http://127.0.0.1:8068/
-```
-
-Strict auth in Docker has no terminal, so Lantern will not print a token. Set `LANTERN_STRICT_AUTH=1` and mount a mode-0400 token file. Do not put the token in `LANTERN_API_TOKEN`: on Linux `/proc/<pid>/environ` is mode 0400, so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment.
-
-```bash
 umask 077
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > lantern_token
 chmod 400 lantern_token
 sudo chown 10001:10001 lantern_token
 ```
 
-Point the container at that file and turn strict auth on. The image command stays `--host 127.0.0.1`. In `docker-compose.yml`, uncomment the service `secrets:` list under `lantern` and the top-level `secrets:` block at the end of the file. That top-level block is commented at column 0, so uncommenting it is valid YAML. Add the two environment entries under the service, and do not write the token into the compose file:
+Then uncomment the service `secrets:` list and the top-level `secrets:` block in `docker-compose.yml`, and set `LANTERN_API_TOKEN_FILE=/run/secrets/lantern_token` on the service. Do not write the token into the compose file. `docker compose up -d` then listens on the host at http://127.0.0.1:8068/. The page does not contain the token; use the value in `lantern_token`. Without that file the container exits 2. Docker has no terminal, so it will not print a token. Do not put the token in `LANTERN_API_TOKEN`: on Linux `/proc/<pid>/environ` is mode 0400, so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment. `LANTERN_STRICT_AUTH=0` opts out and re-opens the local-user token gap.
 
 ```yaml
 environment:
-  LANTERN_STRICT_AUTH: "1"
   LANTERN_API_TOKEN_FILE: /run/secrets/lantern_token
 ```
 
@@ -202,9 +200,9 @@ The compose file uses host networking so a scan can see the host LAN (the ARP ca
 
 The container runs as uid 10001, not root. Compose drops every capability (`--cap-drop ALL`), makes the root filesystem read-only, mounts a tmpfs on `/tmp`, keeps the SQLite file on the `/data` volume, and sets `no-new-privileges`. ICMP ping needs `CAP_NET_RAW` and a ping binary. This image adds neither. TCP connect scans and the host ARP cache work with all capabilities dropped. A setuid or file-capability ping would not help: `no-new-privileges` ignores both. The comments in `Dockerfile` and `docker-compose.yml` record the same flags.
 
-To opt in to a LAN bind, put the token in a regular file and point `LANTERN_API_TOKEN_FILE` at it (the compose file has a commented `secrets:` snippet). The file must not be a symlink or a FIFO, and it must be at most 4 KiB. On macOS and Linux it must be mode 0400 or 0600: any group or other bit is refused. That includes Docker Swarm secrets (mode 0444) and Kubernetes secrets (mode 0644 by default) until you set the file to 0400. Compose `secrets:` bind-mounts the host file as-is and does not change its mode; that path has not been run as a test. `chmod 400` and `chown` the file to uid 10001 yourself. Lantern does not follow a symlink to a looser file. Override the command with `--host 0.0.0.0`, `--allow-lan`, and `--allow-host` set to the LAN address. Do not put the token in `docker-compose.yml`. The container has no terminal, so Lantern will not print a token into `docker logs`. Without the file or `LANTERN_API_TOKEN`, the command exits 2 and does not listen. Prefer Tailscale or an SSH tunnel instead.
+A token file is required by default (and for a LAN bind). Put the token in a regular file and point `LANTERN_API_TOKEN_FILE` at it (the compose file has a commented `secrets:` snippet). The file must not be a symlink or a FIFO, and it must be at most 4 KiB. On macOS and Linux it must be mode 0400 or 0600: any group or other bit is refused. That includes Docker Swarm secrets (mode 0444) and Kubernetes secrets (mode 0644 by default) until you set the file to 0400. Compose `secrets:` bind-mounts the host file as-is and does not change its mode; that path has not been run as a test. `chmod 400` and `chown` the file to uid 10001 yourself. Lantern does not follow a symlink to a looser file. Override the command with `--host 0.0.0.0`, `--allow-lan`, and `--allow-host` set to the LAN address. Do not put the token in `docker-compose.yml`. The container has no terminal, so Lantern will not print a token into `docker logs`. Without the file or `LANTERN_API_TOKEN`, the command exits 2 and does not listen. Prefer Tailscale or an SSH tunnel instead.
 
-CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command's listening socket is `127.0.0.1:8068`, a non-loopback bind without `--allow-lan` is refused, `--allow-lan` without a token is refused, and a start that uses a token file does not put that token in `docker logs`. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
+CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command without a token exits non-zero and does not listen, the same command with a mode-0400 token file listens on `127.0.0.1:8068`, `GET /api/*` is 403 without that token and 200 with it, and the token is not in the page or in `docker logs`, a non-loopback bind without `--allow-lan` is refused, and `--allow-lan` without a token is refused. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
 
 ## What it scans
 
