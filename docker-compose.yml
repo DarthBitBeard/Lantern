@@ -1,10 +1,46 @@
 services:
   lantern:
     build: .
-    # Host networking: the dashboard needs the host LAN to scan it.
-    # Without this, a scan only sees the container network.
-    # Keep the dashboard itself on localhost or behind Tailscale.
+    # Host networking lets a scan read the host ARP cache and reach hosts
+    # on the LAN. It does not publish the dashboard. The image command
+    # binds 127.0.0.1:8068, which on the host network is the host's own
+    # loopback. Open http://127.0.0.1:8068/ on the host. Do not add a
+    # ports: mapping; with host networking it would not do what you expect,
+    # and the dashboard must not be reachable from the LAN by default.
+    #
+    # Opting in to a LAN bind is not recommended. Prefer an SSH tunnel or
+    # Tailscale to 127.0.0.1. If you do opt in, replace the command with:
+    #   command:
+    #     - lantern
+    #     - web
+    #     - --host
+    #     - 0.0.0.0
+    #     - --port
+    #     - "8068"
+    #     - --db
+    #     - /data/lantern.db
+    #     - --allow-lan
+    # Until the dashboard can require a startup API token, that command
+    # exits with "requires S1 token support" and does not listen. When it
+    # does start, the token is printed once in the logs. Never expose 8068
+    # to the internet.
     network_mode: "host"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    # ICMP ping is not installed in this image. TCP connect scans and the
+    # host ARP cache work with every capability dropped. If a derived image
+    # adds a ping binary, this is the only capability to add back:
+    # cap_add:
+    #   - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     volumes:
+      # Create this directory before `docker compose up` and give it to
+      # the container user (chown needs root):
+      #   mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
       - ./data:/data
     restart: unless-stopped

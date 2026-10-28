@@ -24,7 +24,9 @@ Please include the Lantern version, how you ran it, and what you observed, witho
 
 ## Dashboard exposure
 
-The web dashboard has no login, by design for local use. Bind it to localhost (the default), or reach it only over a private VPN such as Tailscale. Never expose port 8068 to the internet or to an untrusted network.
+The web dashboard has no login, by design for local use. It binds to loopback (`127.0.0.1`) by default, including the Docker image command. `lantern web` refuses any other address unless you pass `--allow-lan`. That flag does not start the server until the dashboard can require a startup API token on every API call: it exits with `requires S1 token support` and does not listen. When the server accepts that token, the CLI generates one with `secrets.token_urlsafe`, prints it once, and warns that the address is reachable from other machines. Reach the dashboard through localhost, or through a private VPN such as Tailscale. Never expose port 8068 to the internet or to an untrusted network.
+
+The container runs as uid 10001, not root, and owns `/data`. Run it with all capabilities dropped, a read-only root filesystem, a tmpfs on `/tmp`, the `/data` volume, and `no-new-privileges`. `docker-compose.yml` sets those. Host networking is only so a scan can see the host LAN. ICMP ping would need `CAP_NET_RAW` and a ping binary; the image ships neither, and `no-new-privileges` would ignore a setuid ping. TCP connect scans do not need extra capabilities.
 
 The dashboard answers a request only when the `Host` header is `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, or a host you added with `--allow-host` (repeatable; nothing else is allowed by default). That is what stops a public site from rebinding its name onto `127.0.0.1` and calling the API as if it were the dashboard. `POST /api/*` also requires the header `X-Lantern-Token`. Each process generates that token at startup, puts it in the HTML page, and compares it in constant time. The token is not written to the log. Anyone who can load the page from an allowed Host can read the token from it. It blocks other websites. It is not a password.
 

@@ -31,7 +31,7 @@ Tests use `unittest` and are discovered automatically from `tests/test_*.py`; yo
 
 CI (`.github/workflows/ci.yml`) runs the suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13, then builds a wheel and installs it on each of those operating systems for an offline demo smoke test. Use `python` in workflow steps so Windows runners, which do not provide `python3`, can run the same commands.
 
-A separate workflow (`.github/workflows/docker.yml`) builds the Docker image and runs an offline demo inside it with networking disabled, plus a check that loopback and public subnets are refused. It does not start the dashboard and does not scan a network. The Dockerfile bind address and `docker-compose.yml` are left as they are.
+A separate workflow (`.github/workflows/docker.yml`) builds the Docker image and runs every container with `--network none`. It checks the image is not root, the default command listens on `127.0.0.1` only, and a non-loopback bind without `--allow-lan` is refused. It also runs an offline demo and checks that loopback and public subnets are refused. It does not scan a network, and it does not push or publish the image.
 
 ## Pull requests
 
