@@ -115,6 +115,16 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
     return scopes
 
 
+def validate_scope_name(name: str) -> str:
+    """Reject a scope name that is not a short token. Does not scan."""
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Scope name {name!r} is not allowed. "
+            "Use 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit."
+        )
+    return name
+
+
 def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
     """Pick one scope. A file with exactly one scope may omit the name."""
     if not scopes:

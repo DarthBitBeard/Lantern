@@ -34,9 +34,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
-# plus this version table. The package version stays put until a release;
-# the schema version moves only when the tables change.
-SCHEMA_VERSION = 1
+# plus this version table. Schema 2 adds scans.scope_name. The package
+# version stays put until a release; the schema version moves only when
+# the tables change.
+SCHEMA_VERSION = 2
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -481,8 +482,20 @@ def _migration_1_v030_baseline(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_2_scope_name(conn: sqlite3.Connection) -> None:
+    """Schema 2: tag a scan with the scope name that produced it.
+
+    Older rows stay NULL. This migration only adds the column. It does
+    not rewrite scan ids or device rows.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+    if "scope_name" not in columns:
+        conn.execute("ALTER TABLE scans ADD COLUMN scope_name TEXT")
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
+    2: _migration_2_scope_name,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -553,12 +566,22 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def save_scan(conn: sqlite3.Connection, subnet: str, devices: list[dict], demo: bool = False) -> int:
-    """Store one scan snapshot and return its id. All-or-nothing."""
+def save_scan(
+    conn: sqlite3.Connection,
+    subnet: str,
+    devices: list[dict],
+    demo: bool = False,
+    scope_name: str | None = None,
+) -> int:
+    """Store one scan snapshot and return its id. All-or-nothing.
+
+    ``scope_name`` is the named scope that produced the scan, or None for
+    ``--subnet``, auto-detect, and demo scans.
+    """
     with conn:
         cur = conn.execute(
-            "INSERT INTO scans (started_at, subnet, demo) VALUES (?, ?, ?)",
-            (_now(), subnet, 1 if demo else 0),
+            "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
+            (_now(), subnet, 1 if demo else 0, scope_name),
         )
         scan_id = cur.lastrowid
         conn.executemany(
@@ -591,7 +614,7 @@ def ip_sort_key(ip: str):
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
     """Load one scan with its devices, or None if the id is unknown."""
     row = conn.execute(
-        "SELECT started_at, subnet, demo FROM scans WHERE id = ?", (scan_id,)
+        "SELECT started_at, subnet, demo, scope_name FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()
     if not row:
         return None
@@ -611,37 +634,80 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
             }
         )
     devices.sort(key=lambda d: ip_sort_key(d["ip"]))
-    return {"id": scan_id, "started_at": row[0], "subnet": row[1],
-            "demo": bool(row[2]), "devices": devices}
+    return {
+        "id": scan_id,
+        "started_at": row[0],
+        "subnet": row[1],
+        "demo": bool(row[2]),
+        "scope_name": row[3],
+        "devices": devices,
+    }
 
 
-def latest_scan_id(conn: sqlite3.Connection) -> int | None:
-    row = conn.execute("SELECT MAX(id) FROM scans").fetchone()
+def latest_scan_id(conn: sqlite3.Connection, scope_name: str | None = None) -> int | None:
+    if scope_name is None:
+        row = conn.execute("SELECT MAX(id) FROM scans").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(id) FROM scans WHERE scope_name = ?", (scope_name,)
+        ).fetchone()
     return row[0] if row and row[0] is not None else None
 
 
-def previous_scan_id(conn: sqlite3.Connection, scan_id: int) -> int | None:
-    """The scan saved just before `scan_id`, or None if it is the first."""
-    row = conn.execute("SELECT MAX(id) FROM scans WHERE id < ?", (scan_id,)).fetchone()
+def previous_scan_id(
+    conn: sqlite3.Connection, scan_id: int, scope_name: str | None = None,
+) -> int | None:
+    """The scan saved just before `scan_id`, or None if it is the first.
+
+    When `scope_name` is set, only earlier scans with that same name count.
+    """
+    if scope_name is None:
+        row = conn.execute("SELECT MAX(id) FROM scans WHERE id < ?", (scan_id,)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(id) FROM scans WHERE id < ? AND scope_name = ?",
+            (scan_id, scope_name),
+        ).fetchone()
     return row[0] if row and row[0] is not None else None
 
 
-def latest_two_scan_ids(conn: sqlite3.Connection) -> list[int]:
+def latest_two_scan_ids(conn: sqlite3.Connection, scope_name: str | None = None) -> list[int]:
     """Newest first, at most two ids."""
-    rows = conn.execute("SELECT id FROM scans ORDER BY id DESC LIMIT 2").fetchall()
+    if scope_name is None:
+        rows = conn.execute("SELECT id FROM scans ORDER BY id DESC LIMIT 2").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id FROM scans WHERE scope_name = ? ORDER BY id DESC LIMIT 2",
+            (scope_name,),
+        ).fetchall()
     return [r[0] for r in rows]
 
 
-def list_scans(conn: sqlite3.Connection) -> list[dict]:
-    """Newest first: id, time, subnet, demo flag, device count."""
-    rows = conn.execute(
-        "SELECT s.id, s.started_at, s.subnet, s.demo, COUNT(d.id)"
-        " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
-        " GROUP BY s.id ORDER BY s.id DESC"
-    ).fetchall()
+def list_scans(conn: sqlite3.Connection, scope_name: str | None = None) -> list[dict]:
+    """Newest first: id, time, subnet, scope name, demo flag, device count."""
+    if scope_name is None:
+        rows = conn.execute(
+            "SELECT s.id, s.started_at, s.subnet, s.scope_name, s.demo, COUNT(d.id)"
+            " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
+            " GROUP BY s.id ORDER BY s.id DESC"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT s.id, s.started_at, s.subnet, s.scope_name, s.demo, COUNT(d.id)"
+            " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
+            " WHERE s.scope_name = ?"
+            " GROUP BY s.id ORDER BY s.id DESC",
+            (scope_name,),
+        ).fetchall()
     return [
-        {"id": r[0], "started_at": r[1], "subnet": r[2], "demo": bool(r[3]),
-         "device_count": r[4]}
+        {
+            "id": r[0],
+            "started_at": r[1],
+            "subnet": r[2],
+            "scope_name": r[3],
+            "demo": bool(r[4]),
+            "device_count": r[5],
+        }
         for r in rows
     ]
 
@@ -685,22 +751,31 @@ def apply_trust(scan: dict | None, trusted: dict[str, dict]) -> dict | None:
     return scan
 
 
-def load_scan_with_diff(conn: sqlite3.Connection, scan_id: int | None = None) -> tuple[dict | None, dict | None]:
+def load_scan_with_diff(
+    conn: sqlite3.Connection,
+    scan_id: int | None = None,
+    scope_name: str | None = None,
+) -> tuple[dict | None, dict | None]:
     """Load a scan (latest when scan_id is None) plus its diff against the
     scan before it. Labels and trust flags are applied to both sides.
 
-    Returns (None, None) when there are no scans or the id is unknown.
+    When `scope_name` is set, the scan and the one before it are limited
+    to that scope. Returns (None, None) when there are no scans or the id
+    is unknown or belongs to a different scope.
     """
     if scan_id is None:
-        scan_id = latest_scan_id(conn)
+        scan_id = latest_scan_id(conn, scope_name)
         if scan_id is None:
             return None, None
     trusted = get_trusted(conn)
     scan = apply_trust(load_scan(conn, scan_id), trusted)
     if scan is None:
         return None, None
+    if scope_name is not None and scan.get("scope_name") != scope_name:
+        return None, None
     diff = None
-    prev_id = previous_scan_id(conn, scan_id)
+    prev_scope = scope_name if scope_name is not None else None
+    prev_id = previous_scan_id(conn, scan_id, prev_scope)
     if prev_id is not None:
         diff = diff_scans(apply_trust(load_scan(conn, prev_id), trusted), scan)
     return scan, diff

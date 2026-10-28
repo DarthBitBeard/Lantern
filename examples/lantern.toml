@@ -7,12 +7,18 @@
 #   - private RFC1918 ranges only (10/8, 172.16/12, 192.168/16)
 #   - at most 1024 addresses (a /22); a /24 is the normal size
 #   - no loopback, no link-local, no public addresses, no IPv6
+# One run may name several scopes. A repeated name is scanned once.
+# Overlapping ranges are collapsed, and the unique addresses in the
+# whole run must still be at most 1024.
 # One subnet per scope. Any setting other than "subnet" and "description"
 # is rejected, so this file cannot turn on excludes, extra CIDRs, or a
 # different port list.
 #
 #   python3 -m lantern scopes --config lantern.toml
 #   python3 -m lantern scan --config lantern.toml --scope home
+#   python3 -m lantern scan --config lantern.toml --scope home --scope lab
+#   python3 -m lantern scan --config lantern.toml --all
+#   python3 -m lantern history --scope home
 
 [scopes.home]
 subnet = "192.168.1.0/24"

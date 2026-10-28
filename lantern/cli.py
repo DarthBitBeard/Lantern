@@ -18,11 +18,19 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from . import __version__, demo
-from .discovery import arp_table, guess_subnet, ping_host, reverse_hostname, validate_subnet
+from .discovery import (
+    MAX_SCAN_HOSTS,
+    arp_table,
+    guess_subnet,
+    merged_address_count,
+    ping_host,
+    reverse_hostname,
+    validate_subnet,
+)
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .report import describe_change, to_html, to_json
 from .scanner import scan_host
-from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope
+from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope, validate_scope_name
 from .store import connect, list_scans, load_scan_with_diff, save_scan, write_private_file
 
 DEFAULT_DB = Path("data/lantern.db")
@@ -42,16 +50,10 @@ def _scan_one(ip: str, macs: dict[str, str], ports) -> dict:
     }
 
 
-def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
-    """Discover live hosts on one private subnet and port-scan each.
-
-    Raises ValueError for an invalid or unsafe subnet. Never touches the
-    network in demo mode.
-    """
-    if demo_mode:
-        return demo.demo_scan_1()
-    network = validate_subnet(subnet_text)
-    hosts = [str(ip) for ip in network.hosts()]
+def _scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
+    """Ping and port-scan these addresses. An empty list does not touch the network."""
+    if not hosts:
+        return []
     macs = arp_table()
 
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
@@ -64,6 +66,18 @@ def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> 
     ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
         return list(pool.map(lambda ip: _scan_one(ip, macs, ports), ordered))
+
+
+def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
+    """Discover live hosts on one private subnet and port-scan each.
+
+    Raises ValueError for an invalid or unsafe subnet. Never touches the
+    network in demo mode.
+    """
+    if demo_mode:
+        return demo.demo_scan_1()
+    network = validate_subnet(subnet_text)
+    return _scan_hosts([str(ip) for ip in network.hosts()], ports)
 
 
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
@@ -79,8 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p = sub.add_parser("scan", help="Scan your private subnet.")
     _add_db_arg(scan_p)
     scan_p.add_argument("--subnet", help="e.g. 192.168.1.0/24. Auto-detected if omitted.")
-    scan_p.add_argument("--config", help="TOML file of named scopes. With --scope, default is ./lantern.toml.")
-    scan_p.add_argument("--scope", help="Scope name in --config. Required when the file defines more than one.")
+    scan_p.add_argument("--config", help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml.")
+    scan_p.add_argument(
+        "--scope", action="append",
+        help="Scope name in --config. Repeat to scan several, in the order given. "
+             "A repeated name is scanned once.",
+    )
+    scan_p.add_argument(
+        "--all", action="store_true",
+        help="Scan every named scope in --config, in file order. "
+             "One run is capped at 1024 unique addresses.",
+    )
     scan_p.add_argument("--demo", action="store_true", help="Use fake demo data, no network scan.")
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
 
@@ -93,15 +116,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     diff_p = sub.add_parser("diff", help="Show what changed between the last two saved scans.")
     _add_db_arg(diff_p)
+    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope.")
     diff_p.add_argument("--format", choices=["text", "json"], default="text")
 
     report_p = sub.add_parser("report", help="Print a saved scan (latest by default) as JSON or HTML.")
     _add_db_arg(report_p)
+    report_p.add_argument("--scope", help="Report the latest scan of this scope.")
     report_p.add_argument("--scan-id", type=int, help="Scan id from `lantern history`. Default: latest.")
     report_p.add_argument("--format", choices=["json", "html"], default="json")
 
     history_p = sub.add_parser("history", help="List saved scans, newest first.")
     _add_db_arg(history_p)
+    history_p.add_argument("--scope", help="List only scans tagged with this scope.")
     history_p.add_argument("--format", choices=["text", "json"], default="text")
 
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
@@ -623,27 +649,110 @@ def _scope_config_path(args) -> Path:
     return Path(DEFAULT_CONFIG_NAME)
 
 
-def _resolve_scan_subnet(args) -> str:
-    """Choose the subnet string before any discovery or probing.
+def _scope_names(args) -> list[str]:
+    names = getattr(args, "scope", None) or []
+    if isinstance(names, str):
+        names = [names]
+    return list(names)
 
-    `--subnet` still works on its own. A scope file is optional and is
-    checked with the same rules as `--subnet`.
+
+def _one_scope_name(args) -> str | None:
+    """A single --scope on history, diff, or report. Rejects a bad name."""
+    name = getattr(args, "scope", None)
+    if isinstance(name, list):
+        name = name[0] if name else None
+    if not name:
+        return None
+    return validate_scope_name(name)
+
+
+def _resolve_scan_subnet(args) -> tuple[str, str | None]:
+    """Choose one subnet before any discovery or probing.
+
+    `--subnet` still works on its own. A single named scope is checked
+    with the same rules as `--subnet`. Returns (subnet, scope name).
     """
+    names = _scope_names(args)
     if args.demo:
-        if args.config or args.scope:
-            raise ValueError("--demo cannot be combined with --config or --scope.")
-        return demo.DEMO_SUBNET
-    if args.subnet and (args.config or args.scope):
+        if args.config or names or getattr(args, "all", False):
+            raise ValueError("--demo cannot be combined with --config, --scope, or --all.")
+        return demo.DEMO_SUBNET, None
+    if getattr(args, "all", False) or len(names) > 1:
+        raise ValueError("Use the multi-scope scan for --all or repeated --scope.")
+    if args.subnet and (args.config or names):
         raise ValueError("Pass either --subnet or --config/--scope, not both.")
-    if args.config or args.scope:
-        scope = select_scope(load_scopes(_scope_config_path(args)), args.scope)
-        return scope.subnet
+    if args.config or names:
+        scope = select_scope(load_scopes(_scope_config_path(args)), names[0] if names else None)
+        validate_scope_name(scope.name)
+        validate_subnet(scope.subnet)
+        return scope.subnet, scope.name
     if args.subnet:
-        return args.subnet
+        return args.subnet, None
     guessed = guess_subnet()
     if not guessed:
         raise ValueError("Could not auto-detect your subnet. Pass --subnet 192.168.1.0/24")
-    return guessed
+    return guessed, None
+
+
+def _dedupe_scopes(scopes):
+    """First occurrence of each scope name, in that order."""
+    seen: set[str] = set()
+    chosen = []
+    for scope in scopes:
+        if scope.name in seen:
+            continue
+        seen.add(scope.name)
+        chosen.append(scope)
+    return chosen
+
+
+def _scopes_to_scan(args):
+    """Every scope for this invocation, already validated. Raises ValueError.
+
+    Repeated names are dropped. Overlapping ranges count once. The unique
+    addresses across the whole run must be at most 1024, or this raises
+    before any probe.
+    """
+    names = _scope_names(args)
+    if args.all and names:
+        raise ValueError("Pass either --all or --scope, not both.")
+    if args.subnet and (args.all or names or args.config):
+        raise ValueError("Pass either --subnet or --config/--scope, not both.")
+    if args.demo:
+        raise ValueError("--demo cannot be combined with --config, --scope, or --all.")
+    loaded = load_scopes(_scope_config_path(args))
+    if args.all:
+        chosen = list(loaded.values())
+    else:
+        chosen = [select_scope(loaded, name) for name in names]
+    chosen = _dedupe_scopes(chosen)
+    networks = []
+    for scope in chosen:
+        validate_scope_name(scope.name)
+        networks.append(validate_subnet(scope.subnet))
+    total = merged_address_count(networks)
+    if total > MAX_SCAN_HOSTS:
+        raise ValueError(
+            f"These scopes cover {total} unique addresses. "
+            f"Lantern scans at most {MAX_SCAN_HOSTS} unique addresses in one run."
+        )
+    return chosen
+
+
+def _print_scope_summary(ran: list[str], failed: list[tuple[str, str]], fmt: str) -> None:
+    if fmt == "json":
+        print(json.dumps({
+            "ran": ran,
+            "failed": [{"scope": name, "error": error} for name, error in failed],
+        }, indent=2))
+        return
+    print("Scopes ran: " + (", ".join(ran) if ran else "(none)"))
+    if failed:
+        print("Scopes failed: " + ", ".join(name for name, _error in failed))
+        for name, error in failed:
+            print(f"  {name}: {error}")
+    else:
+        print("Scopes failed: (none)")
 
 
 def _cmd_scopes(args) -> int:
@@ -804,8 +913,42 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         return 0
 
     if args.command == "scan":
+        names = _scope_names(args)
+        multi = bool(getattr(args, "all", False) or len(names) > 1)
+        if multi:
+            try:
+                chosen = _scopes_to_scan(args)
+            except ValueError as exc:
+                return _err(str(exc))
+            ran: list[str] = []
+            failed: list[tuple[str, str]] = []
+            seen_hosts: set[str] = set()
+            found: dict[str, dict] = {}
+            for scope in chosen:
+                try:
+                    network = validate_subnet(scope.subnet)
+                    subnet = str(network)
+                    scope_hosts = [str(ip) for ip in network.hosts()]
+                    fresh = [ip for ip in scope_hosts if ip not in seen_hosts]
+                    if args.format == "text":
+                        print(
+                            f"Scanning {scope.name} {subnet} "
+                            f"({network.num_addresses} addresses)...",
+                            file=sys.stderr,
+                        )
+                    if fresh:
+                        for device in _scan_hosts(fresh, DEFAULT_PORTS):
+                            found[device["ip"]] = device
+                        seen_hosts.update(fresh)
+                    devices = [found[ip] for ip in scope_hosts if ip in found]
+                    save_scan(conn, subnet, devices, demo=False, scope_name=scope.name)
+                    ran.append(scope.name)
+                except Exception as exc:
+                    failed.append((scope.name, str(exc) or exc.__class__.__name__))
+            _print_scope_summary(ran, failed, args.format)
+            return 1 if failed else 0
         try:
-            subnet = _resolve_scan_subnet(args)
+            subnet, scope_name = _resolve_scan_subnet(args)
             network = validate_subnet(subnet)
             subnet = str(network)
             if not args.demo and args.format == "text":
@@ -813,8 +956,8 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             devices = run_scan(subnet, DEFAULT_PORTS, demo_mode=args.demo)
         except ValueError as exc:
             return _err(str(exc))
-        scan_id = save_scan(conn, subnet, devices, demo=args.demo)
-        scan, diff = load_scan_with_diff(conn, scan_id)
+        scan_id = save_scan(conn, subnet, devices, demo=args.demo, scope_name=scope_name)
+        scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope_name)
         if args.format == "json":
             print(to_json(scan, diff))
         elif args.format == "html":
@@ -824,9 +967,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         return 0
 
     if args.command == "diff":
-        scan, diff = load_scan_with_diff(conn)
+        try:
+            scope_name = _one_scope_name(args)
+        except ValueError as exc:
+            return _err(str(exc))
+        scan, diff = load_scan_with_diff(conn, scope_name=scope_name)
         if scan is None or diff is None:
-            print("Need at least two saved scans. Run `lantern demo` or `lantern scan` twice.")
+            if scope_name:
+                print(f"Need at least two saved scans for scope {scope_name}.")
+            else:
+                print("Need at least two saved scans. Run `lantern demo` or `lantern scan` twice.")
             return 0
         if args.format == "json":
             print(json.dumps(diff, indent=2))
@@ -835,27 +985,47 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         return 0
 
     if args.command == "report":
-        scan, diff = load_scan_with_diff(conn, args.scan_id)
+        try:
+            scope_name = _one_scope_name(args)
+        except ValueError as exc:
+            return _err(str(exc))
+        scan, diff = load_scan_with_diff(conn, args.scan_id, scope_name=scope_name)
         if scan is None:
             if args.scan_id is not None:
+                if scope_name:
+                    return _err(f"No scan with id {args.scan_id} for scope {scope_name}.")
                 return _err(f"No scan with id {args.scan_id}. See `lantern history`.")
-            print("No scans yet. Run `lantern demo` or `lantern scan` first.")
+            if scope_name:
+                print(f"No scans for scope {scope_name}.")
+            else:
+                print("No scans yet. Run `lantern demo` or `lantern scan` first.")
             return 0
         print(to_json(scan, diff) if args.format == "json" else to_html(scan, diff))
         return 0
 
     if args.command == "history":
-        scans = list_scans(conn)
+        try:
+            scope_name = _one_scope_name(args)
+        except ValueError as exc:
+            return _err(str(exc))
+        scans = list_scans(conn, scope_name)
         if args.format == "json":
             print(json.dumps({"scans": scans}, indent=2))
             return 0
         if not scans:
-            print("No scans yet. Run `lantern demo` or `lantern scan` first.")
+            if scope_name:
+                print(f"No scans for scope {scope_name}.")
+            else:
+                print("No scans yet. Run `lantern demo` or `lantern scan` first.")
             return 0
-        print(f"{'id':>4}  {'started (UTC)':<26} {'subnet':<18} {'devices':>7}  demo")
+        scope_width = max(16, *(len(scan.get("scope_name") or "-") for scan in scans))
+        print(f"{'id':>4}  {'started (UTC)':<26} {'subnet':<18} {'scope':<{scope_width}} {'devices':>7}  demo")
         for scan in scans:
-            print(f"{scan['id']:>4}  {scan['started_at'][:26]:<26} {scan['subnet']:<18} "
-                  f"{scan['device_count']:>7}  {'yes' if scan['demo'] else ''}")
+            print(
+                f"{scan['id']:>4}  {scan['started_at'][:26]:<26} {scan['subnet']:<18} "
+                f"{(scan.get('scope_name') or '-'):<{scope_width}} "
+                f"{scan['device_count']:>7}  {'yes' if scan['demo'] else ''}"
+            )
         return 0
 
     return _err(f"Unknown command: {args.command}")

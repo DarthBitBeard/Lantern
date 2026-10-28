@@ -51,16 +51,18 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Real scan | `python3 -m lantern scan --subnet 192.168.1.0/24` |
 | List named scopes | `python3 -m lantern scopes --config lantern.toml` |
 | Scan one named scope | `python3 -m lantern scan --config lantern.toml --scope home` |
-| Diff last two scans | `python3 -m lantern diff` |
-| List saved scans | `python3 -m lantern history` |
-| HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` for an older scan) |
+| Scan several scopes | `python3 -m lantern scan --config lantern.toml --scope home --scope lab` |
+| Scan every scope | `python3 -m lantern scan --config lantern.toml --all` |
+| Diff last two scans | `python3 -m lantern diff` (add `--scope home` to stay inside one scope) |
+| List saved scans | `python3 -m lantern history` (add `--scope home` to list one scope) |
+| HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` or `--scope home`) |
 | Tests | `python3 tests/run_tests.py` |
 
 Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <command> --help`. Errors go to stderr with exit code 2.
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
-Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then stamps schema version 1. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
+Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then upgrades it. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. Schema version 2 adds `scope_name` on each scan. A database already at schema 1 is copied to `.v1.bak` and then gains that column; older rows keep a null scope name. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
 
 On macOS and Linux, a new database file, that migration backup, and the HTML file from `lantern demo` are created mode `0600` (readable and writable only by your user). This holds under the usual umask `022` and under a permissive umask. If the directory for a new database does not exist yet, Lantern creates it mode `0700`. A directory that already exists stays at the mode you set. If a database or backup already on disk is readable by the group or by other users, Lantern prints a warning to stderr and leaves that file unchanged. A database path that is a symlink is refused.
 
@@ -99,9 +101,14 @@ To keep a few networks on file, copy [`examples/lantern.toml`](examples/lantern.
 ```bash
 python3 -m lantern scopes --config lantern.toml
 python3 -m lantern scan --config lantern.toml --scope home
+python3 -m lantern scan --config lantern.toml --scope home --scope lab
+python3 -m lantern scan --config lantern.toml --all
+python3 -m lantern history --scope home
+python3 -m lantern diff --scope home
+python3 -m lantern report --scope home
 ```
 
-Each scope is one private subnet (`subnet`) plus an optional `description`. A scope file larger than 64 KiB is refused before it is parsed. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. If it defines several, `--scope` is required. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config` or `--scope` is an error. The dashboard does not read `lantern.toml`; its subnet field is unchanged.
+Each scope is one private subnet (`subnet`) plus an optional `description`. A scope file larger than 64 KiB is refused before it is parsed. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. Repeat `--scope` to scan a chosen list in the order given, or pass `--all` to scan every named scope in file order. Each stored scan is tagged with its scope name. `history`, `diff`, and `report` take `--scope` to stay inside that name. A diff compares the latest two scans of that scope, not a scan from a different scope. One scope that fails during the scan does not drop the others; the summary lists which ran and which failed, and the command exits 1. A bad name or a public range is refused before any probe, and the command exits 2. One run scans at most 1024 unique addresses. Repeated names are scanned once, overlapping ranges count once, and a merged total over 1024 exits 2 before any probe. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config`, `--scope`, or `--all` is an error, and so is passing `--all` together with `--scope`. The dashboard does not read `lantern.toml`. When a saved scan has a scope name, the page shows that name escaped.
 
 A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then TCP-connects to the 25 risk ports on each live host, 8 hosts at a time. Expect roughly 10 to 30 seconds for a /24. Hosts that block ping and are not in the ARP cache are missed; run the scan twice if your router has just rebooted.
 
@@ -112,8 +119,8 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 ## Safety rules, enforced in code
 
 - Private RFC1918 subnets only. Public, loopback, and link-local addresses are refused.
-- At most 1024 addresses per scan (a /22), normally a /24.
-- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused.
+- At most 1024 unique addresses in one run (a /22), normally a /24. Repeated scope names and overlapping ranges do not raise that total.
+- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused. Several scopes in one run still share the 1024 unique-address cap.
 - No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
 - Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
 - The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set, and warns on stderr if that directory is looser than 0700 (for example 0755). For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.

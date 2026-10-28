@@ -166,8 +166,10 @@ function renderSummary(scan, diff) {
     <div class="stat ${unknown ? "warn" : ""}"><b>${unknown}</b><span>unknown / untrusted</span></div>
     <div class="stat ${critical ? "bad" : ""}"><b>${critical}</b><span>critical devices</span></div>
     <div class="stat ${high ? "warn" : ""}"><b>${high}</b><span>high-risk devices</span></div>`;
+  if (scan.scope_name) el.innerHTML += `<p>Scope: ${esc(scan.scope_name)}</p>`;
   const which = viewingId === null ? "Latest" : `Scan #${scan.id}`;
-  $("status").textContent = `${which} | ${scan.subnet} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}`;
+  const scopeText = scan.scope_name ? ` | ${scan.scope_name}` : "";
+  $("status").textContent = `${which} | ${scan.subnet}${scopeText} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}`;
 }
 
 function renderDiff(scan, diff) {
@@ -219,9 +221,16 @@ function renderDevice(device) {
     : `<span class="badge unknown">unknown</span>`;
   const mac = device.mac || "";
   const disabled = mac ? "" : "disabled";
+  const extra = [
+    device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
+    device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
+    device.tag ? `<p>Tag: ${esc(device.tag)}</p>` : "",
+    device.notes ? `<p>Notes: ${esc(device.notes)}</p>` : "",
+  ].join("");
   return `<article class="device ${device.trusted ? "" : "unknown"}">
     <h2>${name} ${trustBadge}</h2>
     <p class="meta">${esc(device.ip)}${mac ? ` &middot; ${esc(mac)}` : ""}${device.hostname ? ` &middot; ${esc(device.hostname)}` : ""}</p>
+    ${extra}
     ${worst ? `<p>Worst risk: <span class="badge ${esc(worst)}">${esc(worst)}</span></p>` : ""}
     <div class="ports">${ports}</div>
     <ul class="findings">${findings}</ul>
@@ -288,12 +297,15 @@ async function saveTrust(mac, trusted, btn) {
   }
 }
 
+function historyOption(scan) {
+  const scope = scan.scope_name ? ` ${esc(scan.scope_name)}` : "";
+  return `<option value="${esc(scan.id)}">#${esc(scan.id)} ${esc(formatTime(scan.started_at))}${scope} (${esc(scan.device_count)} devices)${scan.demo ? " demo" : ""}</option>`;
+}
+
 async function loadHistory() {
   const data = await api("/api/scans");
   const select = $("history");
-  select.innerHTML = `<option value="">Latest scan</option>` + data.scans.map((s) =>
-    `<option value="${s.id}">#${s.id} ${esc(formatTime(s.started_at))} (${s.device_count} devices)${s.demo ? " demo" : ""}</option>`
-  ).join("");
+  select.innerHTML = `<option value="">Latest scan</option>` + data.scans.map(historyOption).join("");
   select.value = viewingId === null ? "" : String(viewingId);
   if (select.value !== (viewingId === null ? "" : String(viewingId))) {
     // The selected scan no longer exists; fall back to latest.

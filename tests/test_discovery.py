@@ -9,6 +9,7 @@ from lantern.discovery import (
     MAX_SCAN_HOSTS,
     MIN_PREFIXLEN,
     guess_subnet,
+    merged_address_count,
     parse_neighbors,
     ping_command,
     validate_subnet,
@@ -18,6 +19,17 @@ from lantern.discovery import (
 class ValidateSubnetTests(unittest.TestCase):
     def test_host_bits_are_dropped(self):
         self.assertEqual(str(validate_subnet(" 192.168.1.37/24 ")), "192.168.1.0/24")
+
+    def test_merged_address_count_collapses_overlap(self):
+        wide = validate_subnet("192.168.0.0/22")
+        inside = validate_subnet("192.168.2.0/24")
+        other = validate_subnet("10.1.0.0/24")
+        self.assertEqual(merged_address_count([wide, inside]), wide.num_addresses)
+        self.assertEqual(
+            merged_address_count([wide, other]),
+            wide.num_addresses + other.num_addresses,
+        )
+        self.assertEqual(merged_address_count([]), 0)
 
     def test_largest_allowed_prefix(self):
         network = validate_subnet(f"10.1.0.0/{MIN_PREFIXLEN}")

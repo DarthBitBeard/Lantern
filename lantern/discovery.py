@@ -3,7 +3,8 @@
 Safety rules, enforced here and in the CLI:
 - Only RFC1918 private subnets (10/8, 172.16/12, 192.168/16).
 - Refuse anything larger than MAX_SCAN_HOSTS addresses (a /22).
-  The normal case is a /24.
+  The normal case is a /24. A run that names several scopes uses
+  that same cap on the unique addresses across the whole run.
 - No scanning of public IPs, ever.
 - Discovery is ping + ARP + a TCP connect to a few common ports.
   No exploits, no password guessing, no packet crafting.
@@ -54,6 +55,28 @@ def validate_subnet(text: str) -> ipaddress.IPv4Network:
             f"Lantern scans at most {MAX_SCAN_HOSTS} (a /{MIN_PREFIXLEN}), normally a /24."
         )
     return network
+
+
+def merged_address_count(networks) -> int:
+    """Unique addresses covered by these networks, including network and broadcast.
+
+    Overlapping and adjacent ranges are collapsed. An empty list is 0.
+    """
+    intervals = sorted(
+        (int(network.network_address), int(network.broadcast_address))
+        for network in networks
+    )
+    if not intervals:
+        return 0
+    total = 0
+    start, end = intervals[0]
+    for left, right in intervals[1:]:
+        if left <= end + 1:
+            end = max(end, right)
+            continue
+        total += end - start + 1
+        start, end = left, right
+    return total + (end - start + 1)
 
 
 def _hostname_ipv4() -> str | None:

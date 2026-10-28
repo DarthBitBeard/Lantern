@@ -114,6 +114,32 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(first_diff)
         self.assertFalse(first["devices"][0]["trusted"])
 
+    def test_scope_name_filters_history_and_the_previous_scan(self):
+        home_a = save_scan(
+            self.conn, "192.168.50.0/24", [_dev("192.168.50.10")], scope_name="home",
+        )
+        save_scan(self.conn, "10.50.0.0/24", [_dev("10.50.0.10")], scope_name="lab")
+        home_b = save_scan(
+            self.conn, "192.168.50.0/24",
+            [_dev("192.168.50.10"), _dev("192.168.50.11")],
+            scope_name="home",
+        )
+        self.assertEqual(load_scan(self.conn, home_a)["scope_name"], "home")
+        self.assertEqual(
+            [row["id"] for row in list_scans(self.conn, "home")],
+            [home_b, home_a],
+        )
+        self.assertEqual(
+            [row["scope_name"] for row in list_scans(self.conn, "lab")],
+            ["lab"],
+        )
+        scan, diff = load_scan_with_diff(self.conn, scope_name="home")
+        self.assertEqual(scan["id"], home_b)
+        self.assertEqual([d["ip"] for d in diff["added"]], ["192.168.50.11"])
+        self.assertTrue(all(not d["ip"].startswith("10.50.") for d in diff["added"]))
+        self.assertEqual(previous_scan_id(self.conn, home_b, "home"), home_a)
+        self.assertIsNone(load_scan_with_diff(self.conn, home_b, scope_name="lab")[0])
+
     def test_set_trusted_upsert_and_untrust(self):
         set_trusted(self.conn, "aa:bb:cc:dd:ee:ff", "TV", True)
         set_trusted(self.conn, "AA:BB:CC:DD:EE:FF", "", False)
@@ -197,7 +223,8 @@ class MigrationTests(unittest.TestCase):
         try:
             self.assertEqual(schema_version(conn), SCHEMA_VERSION)
             self.assertEqual(
-                conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0], 1
+                conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0],
+                SCHEMA_VERSION,
             )
             applied = conn.execute("SELECT applied_at FROM schema_version").fetchone()[0]
             self.assertTrue(applied)
@@ -212,11 +239,12 @@ class MigrationTests(unittest.TestCase):
         _write_v030(self.path)
         conn = connect(self.path)
         try:
-            self.assertEqual(schema_version(conn), 1)
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
             scan = load_scan(conn, 1)
             self.assertEqual(scan["started_at"], "2026-10-27T12:00:00+00:00")
             self.assertEqual(scan["subnet"], "192.168.1.0/24")
             self.assertTrue(scan["demo"])
+            self.assertIsNone(scan["scope_name"])
             self.assertEqual(
                 [(d["ip"], d["mac"], d["hostname"], d["label"]) for d in scan["devices"]],
                 [
@@ -253,6 +281,57 @@ class MigrationTests(unittest.TestCase):
         again = connect(self.path)
         again.close()
         self.assertEqual([p.name for p in Path(self.tmp.name).glob("*.bak")], ["lantern.db.v0.bak"])
+
+    def test_schema_1_database_gains_scope_name_and_keeps_rows(self):
+        """A database stamped at schema 1 upgrades forward to schema 2.
+
+        The previous layout has scans, devices, and trusted devices, plus
+        the version table, and no scope_name column. Opening it copies the
+        file to `.v1.bak` and leaves that copy on schema 1.
+        """
+        _write_v030(self.path)
+        raw = sqlite3.connect(self.path)
+        raw.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        raw.execute("INSERT INTO schema_version VALUES (1, '2026-10-27T00:00:00+00:00')")
+        raw.commit()
+        raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            self.assertGreaterEqual(SCHEMA_VERSION, 2)
+            scan = load_scan(conn, 1)
+            self.assertIsNone(scan["scope_name"])
+            self.assertEqual(scan["devices"][0]["ip"], "192.168.1.10")
+            self.assertEqual(scan["devices"][1]["ip"], "192.168.1.99")
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(scans)")]
+            self.assertIn("scope_name", columns)
+            self.assertEqual(
+                get_trusted(conn),
+                {"de:ad:be:ef:00:99": {"label": "Mystery box", "trusted": True}},
+            )
+        finally:
+            conn.close()
+
+        backups = list(Path(self.tmp.name).glob("*.bak"))
+        self.assertEqual([p.name for p in backups], ["lantern.db.v1.bak"])
+        saved = sqlite3.connect(backups[0])
+        try:
+            saved_columns = [row[1] for row in saved.execute("PRAGMA table_info(scans)")]
+            self.assertNotIn("scope_name", saved_columns)
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 1)
+            self.assertEqual(saved.execute("SELECT COUNT(*) FROM devices").fetchone()[0], 2)
+            self.assertEqual(saved.execute("SELECT label FROM trusted_devices").fetchone()[0], "Mystery box")
+        finally:
+            saved.close()
+
+        again = connect(self.path)
+        again.close()
+        self.assertEqual([p.name for p in Path(self.tmp.name).glob("*.bak")], ["lantern.db.v1.bak"])
 
     def test_newer_schema_is_refused_and_left_in_place(self):
         _write_v030(self.path)
