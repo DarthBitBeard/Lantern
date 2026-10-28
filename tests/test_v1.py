@@ -352,6 +352,38 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(len(parsed[1]), len(parsed[0]))
                 self.assertEqual(dict(zip(parsed[0], parsed[1]))["scan_id"], str(second))
 
+    def test_findings_csv_export_defuses_titles_and_fixes(self):
+        conn = connect(self.db)
+        try:
+            scan_id = save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.15",
+                    "aa:bb:cc:dd:ee:15",
+                    findings=[{
+                        "port": 445,
+                        "service": "smb",
+                        "severity": "high",
+                        "title": "=cmd|calc",
+                        "fix": "\u200b-2+2",
+                    }],
+                )],
+            )
+        finally:
+            conn.close()
+        status, body, _ = self._request(
+            f"/api/v1/export?what=findings&format=csv&scan_id={scan_id}",
+            token=self.token,
+        )
+        self.assertEqual(status, 200, body[:300])
+        parsed = list(csv.reader(io.StringIO(body, newline="")))
+        row = dict(zip(parsed[0], parsed[1]))
+        self.assertEqual(row["scan_id"], str(scan_id))
+        self.assertEqual(row["title"], "'=cmd|calc")
+        self.assertTrue(row["fix"].startswith("'"))
+        self.assertIn("-2+2", row["fix"])
+
     def test_errors_are_fixed_and_exports_are_limited(self):
         scan_id = self._seed()[1]
         with mock.patch("lantern.v1.status_document", side_effect=ValueError("secret-marker-path")):
@@ -530,6 +562,37 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(document["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["service"], "telnet")
+
+    def test_findings_csv_defuses_titles_and_fixes(self):
+        conn = connect(self.db)
+        try:
+            scan_id = save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.10",
+                    "aa:bb:cc:dd:ee:10",
+                    findings=[{
+                        "port": 23,
+                        "service": "telnet",
+                        "severity": "critical",
+                        "title": "=cmd|calc",
+                        "fix": "\u00a0+SUM(1)",
+                    }],
+                )],
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("export", "--what", "findings", "--format", "csv")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err + out)
+        parsed = list(csv.reader(io.StringIO(out, newline="")))
+        row = dict(zip(parsed[0], parsed[1]))
+        self.assertEqual(row["scan_id"], str(scan_id))
+        self.assertEqual(row["title"], "'=cmd|calc")
+        self.assertTrue(row["fix"].startswith("'"), row["fix"])
+        self.assertIn("+SUM(1)", row["fix"])
+        self.assertEqual(len(parsed[1]), len(parsed[0]))
 
     def test_export_errors_do_not_print_a_traceback(self):
         self._finding_scan()
