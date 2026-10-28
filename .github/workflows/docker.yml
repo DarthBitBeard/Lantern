@@ -1,0 +1,45 @@
+name: Docker
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Build the image and run an offline smoke test.
+# Do not start the default command: the Dockerfile binds the dashboard
+# on 0.0.0.0, and this job must not listen or scan. Container networking
+# is disabled so the smoke test cannot reach a network.
+jobs:
+  image:
+    name: build and offline smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t lantern:ci .
+      - name: Smoke test with no network
+        run: |
+          set -euo pipefail
+          version=$(docker run --rm --network none lantern:ci lantern --version)
+          echo "$version"
+          case "$version" in
+            lantern\ *) ;;
+            *) echo "unexpected version output: $version" >&2; exit 1 ;;
+          esac
+
+          demo=$(docker run --rm --network none lantern:ci lantern demo --db /tmp/lantern-ci.db)
+          echo "$demo"
+          case "$demo" in
+            *192.168.1.99*) ;;
+            *) echo "demo did not report the fake device" >&2; exit 1 ;;
+          esac
+
+          # Loopback is refused in-process, before any probe. A zero exit
+          # would mean the safety check did not run.
+          if docker run --rm --network none lantern:ci lantern scan --subnet 127.0.0.1/32; then
+            echo "loopback subnet was not refused" >&2
+            exit 1
+          fi
