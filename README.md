@@ -61,7 +61,7 @@ Default database file: `data/lantern.db` (created automatically; gitignored).
 - Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`.
 - API smoke check: `curl -s http://127.0.0.1:8068/api/status` and `curl -s -X POST http://127.0.0.1:8068/api/demo -H 'Content-Type: application/json' -d '{}'`.
 - If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
-- Subnet auto-detect uses the machine's outbound private IPv4. If it cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
+- Subnet auto-detect uses the machine's outbound private IPv4, then its hostname. A hostname lookup that takes more than half a second is skipped, so a slow DNS answer cannot stall the dashboard. If Lantern still cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
 
 ## Scan your own network
 
