@@ -139,12 +139,28 @@ def defuse_cell(value) -> str:
 
 
 def csv_bytes(headers: list[str], rows: list[list]) -> bytes:
-    buffer = io.StringIO(newline="")
-    writer = csv.writer(buffer, dialect="excel", quoting=csv.QUOTE_ALL, lineterminator="\r\n")
-    writer.writerow(headers)
-    for row in rows:
-        writer.writerow([defuse_cell(cell) for cell in row])
-    return buffer.getvalue().encode("utf-8")
+    """Write CSV a row at a time and stop once the byte cap is passed.
+
+    The partial buffer is discarded. Callers do not send it.
+    """
+    buffer = io.BytesIO()
+    text = io.TextIOWrapper(buffer, encoding="utf-8", newline="")
+    writer = csv.writer(text, dialect="excel", quoting=csv.QUOTE_ALL, lineterminator="\r\n")
+
+    def _row(values: list) -> None:
+        writer.writerow(values)
+        text.flush()
+        if buffer.tell() > MAX_V1_RESPONSE_BYTES:
+            raise V1Error(413, "too_large")
+
+    try:
+        _row(headers)
+        for row in rows:
+            _row([defuse_cell(cell) for cell in row])
+        text.flush()
+        return buffer.getvalue()
+    finally:
+        text.detach()
 
 
 def as_z(value) -> str | None:
@@ -221,10 +237,20 @@ def _too_many(count: int) -> None:
 
 
 def _finish(payload: dict) -> bytes:
-    body = json.dumps(payload).encode("utf-8")
-    if len(body) > MAX_V1_RESPONSE_BYTES:
-        raise V1Error(413, "too_large")
-    return body
+    """Encode JSON and stop if the encoded bytes pass the cap.
+
+    The row objects themselves are still bounded by ``MAX_V1_ROWS``. The
+    encoded body is not kept once it exceeds ``MAX_V1_RESPONSE_BYTES``.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    for piece in json.JSONEncoder().iterencode(payload):
+        data = piece.encode("utf-8")
+        size += len(data)
+        if size > MAX_V1_RESPONSE_BYTES:
+            raise V1Error(413, "too_large")
+        chunks.append(data)
+    return b"".join(chunks)
 
 
 def _page(rows: list, limit: int, offset: int) -> list:
@@ -617,10 +643,7 @@ def _project_rows(headers: list[str], rows: list[dict]) -> list[list]:
 
 
 def _csv_body(headers: list[str], rows: list[list]) -> bytes:
-    body = csv_bytes(headers, rows)
-    if len(body) > MAX_V1_RESPONSE_BYTES:
-        raise V1Error(413, "too_large")
-    return body
+    return csv_bytes(headers, rows)
 
 
 def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int, str, str]:
