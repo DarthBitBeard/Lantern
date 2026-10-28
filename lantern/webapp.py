@@ -289,6 +289,13 @@ def parse_allow_host(value: str) -> tuple[str, int | None]:
         raise ValueError(
             f"--allow-host value {value!r} must be a specific host, not an unspecified address."
         )
+    # inet_aton accepts 127.1 and 0x7f000001. They are not strict hosts.
+    if ip is None and (
+        re.fullmatch(r"(?:\d+\.){1,2}\d+", host) or re.fullmatch(r"0x[0-9a-f]+", host)
+    ):
+        raise ValueError(
+            f"--allow-host value {value!r} must be a specific host, not an unspecified address."
+        )
     return host, port
 
 
@@ -472,15 +479,22 @@ class _DeadlineRaw(io.RawIOBase):
     just before the per-read timeout does not start a new full window.
     """
 
-    def __init__(self, sock, deadline_fn, per_read: float):
+    def __init__(self, sock, deadline_fn, per_read: float, headers_done):
         self._sock = sock
         self._deadline_fn = deadline_fn
         self._per_read = per_read
+        self._headers_done = headers_done
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer) -> int:
+        # After the headers, body reads and the following response write
+        # use the normal per-read timeout. Leaving the shrinking header
+        # deadline on the socket would cut off a large report.
+        if self._headers_done():
+            self._sock.settimeout(self._per_read)
+            return self._sock.recv_into(buffer)
         remaining = self._deadline_fn() - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("header deadline exceeded")
@@ -511,16 +525,44 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.connection = self.request
         if self.timeout is not None:
             self.connection.settimeout(self.timeout)
+        self._headers_complete = False
         self._header_deadline = time.monotonic() + float(self.header_timeout)
-        raw = _DeadlineRaw(self.connection, lambda: self._header_deadline, float(self.timeout))
+        raw = _DeadlineRaw(
+            self.connection,
+            lambda: self._header_deadline,
+            float(self.timeout),
+            lambda: self._headers_complete,
+        )
         self.rfile = io.BufferedReader(raw)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
     def handle_one_request(self):
         # A keep-alive request gets its own deadline. The reader consults
-        # this attribute on every recv.
+        # this attribute on every recv until the headers are done.
+        self._headers_complete = False
         self._header_deadline = time.monotonic() + float(self.header_timeout)
         super().handle_one_request()
+
+    def parse_request(self) -> bool:
+        ok = super().parse_request()
+        self._headers_complete = True
+        self._restore_idle_timeout()
+        # A GET or HEAD body is not read. On keep-alive those bytes would
+        # be the next request. Close instead of parsing them.
+        if ok and self._framing_requires_close():
+            self.close_connection = True
+        return ok
+
+    def _restore_idle_timeout(self) -> None:
+        try:
+            self.connection.settimeout(self.timeout)
+        except OSError:
+            pass
+
+    def end_headers(self) -> None:
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        super().end_headers()
 
     def version_string(self):
         return "Lantern"
@@ -542,8 +584,6 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CSP)
-        if self.close_connection:
-            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -645,16 +685,27 @@ class LanternHandler(BaseHTTPRequestHandler):
             return True
         return self._token_ok()
 
-    def _reject_transfer_encoding(self, *, unread_body: bool) -> bool:
-        """True when Transfer-Encoding is present and a 400 was sent.
+    def _framing_requires_close(self) -> bool:
+        """True when unread bytes must not be parsed as another request."""
+        if "Transfer-Encoding" in self.headers:
+            return True
+        for raw in self.headers.get_all("Content-Length") or []:
+            try:
+                if int(str(raw).strip()) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
 
+    def _reject_transfer_encoding(self) -> bool:
+        """True when any Transfer-Encoding header was present and a 400 was sent.
+
+        An empty value still counts. Truthiness would ignore ``Transfer-Encoding:``.
         The connection is closed so leftover bytes are not a second request.
         """
-        if not self.headers.get("Transfer-Encoding"):
+        if "Transfer-Encoding" not in self.headers:
             return False
         self.close_connection = True
-        if unread_body:
-            self.close_connection = True
         self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
         return True
 
@@ -666,14 +717,22 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding(unread_body=True):
+        if self._reject_transfer_encoding():
             return
         path = urlparse(self.path).path
         if self.lan_bound and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
             return
         self.close_connection = True
-        self._send_json(405, {"error": "Method not allowed."})
+        self.send_response(405)
+        self.send_header("Content-Type", "application/json")
+        body = json.dumps({"error": "Method not allowed."}).encode()
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Allow", "GET, HEAD, POST")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_OPTIONS(self):
         self._unsupported_method()
@@ -740,7 +799,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=False)
             return
-        if self._reject_transfer_encoding(unread_body=False):
+        if self._reject_transfer_encoding():
             return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -829,7 +888,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding(unread_body=True):
+        if self._reject_transfer_encoding():
             return
         if not parsed.path.startswith("/api/"):
             self.close_connection = True  # body left unread
