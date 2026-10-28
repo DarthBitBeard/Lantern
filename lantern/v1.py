@@ -238,22 +238,48 @@ def _device_identity(device: dict) -> tuple[str, str]:
     return str(ipaddress.ip_address(str(device["ip"]).strip())), "ip"
 
 
+def _count_devices(conn, scan_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM devices WHERE scan_id = ?", (scan_id,)
+    ).fetchone()[0]
+
+
 def _seen_bounds(conn) -> dict[tuple[str, str], tuple[str, str]]:
+    """First and last sighting per device, aggregated in SQL.
+
+    One row comes back per MAC (or per IP when there is no MAC), not one
+    row per device in every scan.
+    """
     found: dict[tuple[str, str], tuple[str, str]] = {}
     rows = conn.execute(
-        "SELECT d.ip, d.mac, s.started_at FROM devices d "
-        "JOIN scans s ON s.id = d.scan_id"
+        """
+        SELECT
+            CASE
+                WHEN d.mac IS NOT NULL AND d.mac != ''
+                THEN lower(replace(d.mac, '-', ':'))
+                ELSE NULL
+            END,
+            d.ip,
+            MIN(s.started_at),
+            MAX(s.started_at)
+        FROM devices d
+        JOIN scans s ON s.id = d.scan_id
+        GROUP BY 1, CASE WHEN d.mac IS NOT NULL AND d.mac != '' THEN '' ELSE d.ip END
+        """
     )
-    for ip, mac, started in rows:
-        try:
-            key = _device_identity({"ip": ip, "mac": mac})
-        except ValueError:
-            continue
+    for mac_key, ip, first, last in rows:
+        if mac_key:
+            key = (mac_key, "mac")
+        else:
+            try:
+                key = (str(ipaddress.ip_address(str(ip).strip())), "ip")
+            except ValueError:
+                continue
         previous = found.get(key)
         if previous is None:
-            found[key] = (started, started)
+            found[key] = (first, last)
         else:
-            found[key] = (min(previous[0], started), max(previous[1], started))
+            found[key] = (min(previous[0], first), max(previous[1], last))
     return found
 
 
@@ -287,7 +313,7 @@ def _ports(device: dict) -> list[dict]:
 def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private: bool) -> dict:
     key, key_type = _device_identity(device)
     asset = assets.get(f"{key_type}:{key}")
-    first, last = seen.get((key_type, key), (scan["started_at"], scan["started_at"]))
+    first, last = seen.get((key, key_type), (scan["started_at"], scan["started_at"]))
     body = {
         "key": key,
         "key_type": key_type,
@@ -352,10 +378,7 @@ def _sort_devices(rows: list[dict]) -> list[dict]:
 def device_rows(conn, query: dict, *, private: bool) -> tuple[dict, list[dict]]:
     """Return the scan and every matching device, before pagination."""
     scan_id = _resolve_scan_id(conn, query)
-    count = conn.execute(
-        "SELECT COUNT(*) FROM devices WHERE scan_id = ?", (scan_id,)
-    ).fetchone()[0]
-    _too_many(count)
+    _too_many(_count_devices(conn, scan_id))
     scan = _load_trusted_scan(conn, scan_id)
     assets = _assets(conn)
     seen = _seen_bounds(conn)
@@ -472,8 +495,15 @@ def findings_document(conn, query: dict) -> dict:
 
 
 def diff_document(conn, query: dict) -> dict:
-    scan = _select_scan(conn, query)
-    prev_id = previous_scan_id(conn, scan["id"], scan.get("scope_name"))
+    scan_id = _resolve_scan_id(conn, query)
+    _too_many(_count_devices(conn, scan_id))
+    scope_name = conn.execute(
+        "SELECT scope_name FROM scans WHERE id = ?", (scan_id,)
+    ).fetchone()[0]
+    prev_id = previous_scan_id(conn, scan_id, scope_name)
+    if prev_id is not None:
+        _too_many(_count_devices(conn, prev_id))
+    scan = _load_trusted_scan(conn, scan_id)
     assets = _assets(conn)
     seen = _seen_bounds(conn)
     added, removed, changed = [], [], []

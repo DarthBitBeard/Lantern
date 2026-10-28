@@ -306,6 +306,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(macless["first_seen"].endswith("Z"))
         named = data["items"][1]
         self.assertEqual(named["key"], "aa:bb:cc:dd:ee:10")
+        self.assertLess(named["first_seen"], named["last_seen"])
         self.assertEqual(named["owner"], "A" * 80)
         self.assertTrue(named["trusted"])
         self.assertEqual(named["label"], "Named")
@@ -410,6 +411,13 @@ class ApiTests(unittest.TestCase):
                 f"/api/v1/devices?scan_id={scan_id}", token=self.token,
             )
         self.assertEqual(status, 413, body)
+        with mock.patch("lantern.v1._load_trusted_scan", side_effect=AssertionError("built")):
+            with mock.patch.object(v1, "MAX_V1_ROWS", 0):
+                status, body, _ = self._request(
+                    f"/api/v1/diffs?scan_id={scan_id}", token=self.token,
+                )
+        self.assertEqual(status, 413, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "too_large")
         started = threading.Event()
         release = threading.Event()
 
