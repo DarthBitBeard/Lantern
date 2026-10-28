@@ -163,7 +163,7 @@ API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` i
 
 On loopback, `GET` needs an allowed `Host` and does not need the token. `POST /api/*` also needs the header `X-Lantern-Token`. The dashboard reads that value from `<meta name="lantern-token">` in the page and sends it on POST. A new token is generated each time the process starts. It is not printed and it is not written to the request log. Any local user or process that can connect to that loopback port can read the page, and therefore the token, and can read `GET /api/*` without it. With Docker host networking, that `127.0.0.1` is the host's loopback, so the same is true of every user on the Docker host.
 
-`--strict-auth` (or `LANTERN_STRICT_AUTH=1`) is off by default. It never puts the token in the page, and every `/api` route, including `GET`, requires `X-Lantern-Token` in both loopback and LAN mode. The comparison and the short delay on a presented mismatch are the same as the other modes. On an interactive terminal, a generated token is printed once as `http://127.0.0.1:PORT/#token=...`. The fragment is not sent to the server. The page script stores it in `sessionStorage`, removes it from the address bar with `history.replaceState`, and sends it as `X-Lantern-Token`. Without a terminal, which is how `docker logs` works, Lantern does not generate or print a token; set `LANTERN_API_TOKEN_FILE` or `LANTERN_API_TOKEN`. `--debug` does not print a generated token either. There is no separate config file for this flag. The environment variable is the non-flag setting, the same way the token is configured.
+`--strict-auth` (or `LANTERN_STRICT_AUTH=1`) is off by default. It never puts the token in the page, and every `/api` route, including `GET`, requires `X-Lantern-Token` in both loopback and LAN mode. The comparison and the short delay on a presented mismatch are the same as the other modes. On an interactive terminal, a generated token is printed once as `http://127.0.0.1:PORT/#token=...`. Open that link in the browser. The token is valid until Lantern restarts. The `#token` fragment is not sent to the server. The page script stores it in `sessionStorage` only in this mode and in LAN mode, removes it from the address bar with `history.replaceState`, and sends it as `X-Lantern-Token`. A 403 clears that stored token and asks again, including after a restart leaves a stale value. Without a terminal, which is how `docker logs` works, Lantern does not generate or print a token. Prefer `LANTERN_API_TOKEN_FILE` over `LANTERN_API_TOKEN`: on Linux the process environment is `/proc/<pid>/environ` (mode 0400), so the same user and root can read an env token there. A mode-0400 token file is not copied into that environment. `--debug` does not print a generated token either. There is no separate config file for this flag. The environment variable is the non-flag setting, the same way the token is configured.
 
 With `--allow-lan`, `GET /api/*` (inventory, status, and HTML or JSON reports) needs the same header as `POST`. The page does not contain the token. Paste it once into the dashboard; the browser keeps it in `sessionStorage` for that tab and sends it as `X-Lantern-Token`. Static files such as `app.js` stay available without the token. The comparison is `hmac.compare_digest`. A token that is presented and does not match waits a short fixed time. The token is not written to the log. `--debug` does not print a generated token; set the file or `LANTERN_API_TOKEN` instead.
 
@@ -179,6 +179,23 @@ Docker, for a homelab host:
 mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
 docker compose up -d
 # on the host: http://127.0.0.1:8068/
+```
+
+Strict auth in Docker has no terminal, so Lantern will not print a token. Set `LANTERN_STRICT_AUTH=1` and mount a mode-0400 token file. Do not put the token in `LANTERN_API_TOKEN`: on Linux `/proc/<pid>/environ` is mode 0400, so the same user and root can read an env token. The file is not copied into that environment.
+
+```bash
+umask 077
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > lantern_token
+chmod 400 lantern_token
+sudo chown 10001:10001 lantern_token
+```
+
+Point the container at that file and turn strict auth on. The image command stays `--host 127.0.0.1`. For Compose, the commented `secrets:` block in `docker-compose.yml` is the mount. Add the two environment entries next to it, and do not write the token into the compose file:
+
+```yaml
+environment:
+  LANTERN_STRICT_AUTH: "1"
+  LANTERN_API_TOKEN_FILE: /run/secrets/lantern_token
 ```
 
 The compose file uses host networking so a scan can see the host LAN (the ARP cache and neighbor hosts). The dashboard itself binds `127.0.0.1`. With host networking that is the host's loopback, not the LAN. Compose does not publish port 8068.

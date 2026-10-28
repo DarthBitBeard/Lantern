@@ -575,7 +575,12 @@ class WebBindTests(unittest.TestCase):
         self.assertNotIn(token, out)
         self.assertEqual(err.count(token), 1)
         self.assertIn(f"http://127.0.0.1:9/#token={token}", err)
-        self.assertIn("fragment is not sent", err)
+        self.assertIn(
+            "Open this link (the token is valid until Lantern restarts; "
+            "the #token fragment is not sent to the server):",
+            err,
+        )
+        self.assertNotIn("Open once", err)
         self.assertNotIn("API token (printed once", err)
         self.assertEqual(serve.call_args.kwargs["api_token"], token)
         self.assertTrue(serve.call_args.kwargs["strict_auth"])
@@ -707,6 +712,10 @@ class WebBindTests(unittest.TestCase):
             cli.main(["web", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--allow-lan", out.getvalue())
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("--strict-auth", help_text)
+        self.assertIn("valid until Lantern restarts", help_text)
+        self.assertNotIn("Open once", help_text)
 
 
 class TokenFileTests(unittest.TestCase):

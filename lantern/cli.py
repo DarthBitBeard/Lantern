@@ -140,8 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Do not embed the API token in the page, and require it on every "
             "/api route, including GET. Also enabled by LANTERN_STRICT_AUTH=1. "
-            "On a terminal, a generated token is printed once as a #token link. "
-            "Without a terminal, set LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN. "
+            "On a terminal, a generated token is printed once as a link. "
+            "The token is valid until Lantern restarts. The #token fragment "
+            "is not sent to the server. Without a terminal, set "
+            "LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN. "
             "The default dashboard does not use this flag."
         ),
     )
@@ -646,7 +648,8 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             if web_bind.strict_auth:
                 link = one_time_open_link(args.host, args.port, web_bind.token)
                 print(
-                    "Open once (the #token fragment is not sent to the server): "
+                    "Open this link (the token is valid until Lantern restarts; "
+                    "the #token fragment is not sent to the server): "
                     + link,
                     file=sys.stderr,
                     flush=True,

@@ -20,7 +20,10 @@ function storedToken() {
 }
 
 function lanternToken() {
-  return storedToken() || pageToken();
+  // Default mode trusts the token embedded in the page. A stored value must
+  // not override it, or a crafted #token= link would break later requests.
+  if (needsStoredToken()) return storedToken() || pageToken();
+  return pageToken() || storedToken();
 }
 
 function authMode() {
@@ -119,7 +122,7 @@ async function api(path, options) {
   opts.headers = headers;
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (res.status === 403 && lanMode()) {
+  if (res.status === 403 && needsStoredToken()) {
     try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (err) { /* private mode */ }
     showTokenPrompt();
   }
@@ -376,6 +379,10 @@ $("report-link").addEventListener("click", async (event) => {
     const token = lanternToken();
     if (token) headers["X-Lantern-Token"] = token;
     const res = await fetch($("report-link").getAttribute("href"), { headers });
+    if (res.status === 403 && needsStoredToken()) {
+      try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (err) { /* private mode */ }
+      showTokenPrompt();
+    }
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `Request failed (${res.status})`);
@@ -433,9 +440,8 @@ if (tokenForm) {
   });
 }
 
-takeFragmentToken();
-
 if (needsStoredToken()) {
+  takeFragmentToken();
   const note = $("exposure-note");
   if (note && lanMode()) {
     note.textContent = "LAN mode. Every API call needs the startup token. Data stays in one SQLite file on this machine. Never expose this port to the internet.";

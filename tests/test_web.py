@@ -1576,8 +1576,47 @@ class StrictAuthTests(unittest.TestCase):
         self.assertNotIn("fetch(", body)
         self.assertNotIn("XMLHttpRequest", body)
         call = script.index("takeFragmentToken();")
-        self.assertLess(call, script.index("if (needsStoredToken())"))
+        guard = script.rfind("if (needsStoredToken())", 0, call)
+        self.assertGreater(guard, start)
+        self.assertNotIn("else", script[guard:call])
+        self.assertEqual(script.count("takeFragmentToken();"), 1)
         self.assertIn('headers["X-Lantern-Token"] = token', script)
+
+    def test_stale_token_is_cleared_for_strict_auth_and_not_for_default_mode(self):
+        """A 403 re-prompts whenever the page has no embedded token.
+
+        Default mode must prefer the page token, so a stored #token= value
+        cannot replace it. These checks read app.js. They do not open a browser.
+        """
+        script = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(script.count("403 && needsStoredToken()"), 2)
+        self.assertNotIn("403 && lanMode()", script)
+        report = script[
+            script.index('$("report-link").addEventListener'):
+            script.index('$("search").addEventListener')
+        ]
+        self.assertIn("403 && needsStoredToken()", report)
+        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", report)
+        self.assertIn("showTokenPrompt()", report)
+        api_fn = script[script.index("async function api("):script.index("function postJson(")]
+        self.assertIn("403 && needsStoredToken()", api_fn)
+        self.assertIn("sessionStorage.removeItem(TOKEN_STORAGE)", api_fn)
+        choose = script[script.index("function lanternToken()"):script.index("function authMode()")]
+        self.assertIn("if (needsStoredToken()) return storedToken() || pageToken();", choose)
+        self.assertIn("return pageToken() || storedToken();", choose)
+        self.assertLess(
+            choose.index("storedToken() || pageToken()"),
+            choose.index("return pageToken() || storedToken();"),
+        )
+
+        def choose_token(page, stored, needs_stored):
+            if needs_stored:
+                return stored or page
+            return page or stored
+
+        self.assertEqual(choose_token("page-token", "junk", False), "page-token")
+        self.assertEqual(choose_token("", "stored-token", True), "stored-token")
+        self.assertEqual(choose_token("page-token", "", False), "page-token")
 
     def test_strict_auth_without_a_token_is_refused(self):
         with self.assertRaises(ValueError):
