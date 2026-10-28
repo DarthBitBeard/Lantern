@@ -283,6 +283,9 @@ class MigrationTests(unittest.TestCase):
             )
             indexes = [row[1] for row in conn.execute("PRAGMA index_list('devices')")]
             self.assertIn("devices_scan_id", indexes)
+            self.assertIsNotNone(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assets'"
+            ).fetchone())
         finally:
             conn.close()
 
@@ -355,6 +358,62 @@ class MigrationTests(unittest.TestCase):
         again = connect(self.path)
         again.close()
         self.assertEqual([p.name for p in Path(self.tmp.name).glob("*.bak")], ["lantern.db.v1.bak"])
+
+    def test_schema_2_database_gains_assets_and_keeps_rows(self):
+        """A database stamped at schema 2 upgrades forward to schema 3."""
+        from lantern.store import _migration_1_v030_baseline, _migration_2_scope_name
+
+        raw = sqlite3.connect(self.path)
+        try:
+            apply_migrations(
+                raw,
+                migrations={1: _migration_1_v030_baseline, 2: _migration_2_scope_name},
+                target=2,
+                db_path=self.path,
+            )
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
+                ("2026-10-28T00:00:00+00:00", "10.9.0.0/24", 0, "home"),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?)",
+                ("10.9.0.4", "aa:bb:cc:dd:ee:04", None, None, "[]", "[]"),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            self.assertGreaterEqual(SCHEMA_VERSION, 3)
+            scan = load_scan(conn, 1)
+            self.assertEqual(scan["scope_name"], "home")
+            self.assertEqual(scan["devices"][0]["mac"], "aa:bb:cc:dd:ee:04")
+            self.assertIsNotNone(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assets'"
+            ).fetchone())
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+        backups = list(Path(self.tmp.name).glob("*.bak"))
+        self.assertEqual([p.name for p in backups], ["lantern.db.v2.bak"])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+        saved = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 2)
+            self.assertIsNone(saved.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assets'"
+            ).fetchone())
+            self.assertEqual(saved.execute("SELECT scope_name FROM scans").fetchone()[0], "home")
+        finally:
+            saved.close()
 
     def test_newer_schema_is_refused_and_left_in_place(self):
         _write_v030(self.path)

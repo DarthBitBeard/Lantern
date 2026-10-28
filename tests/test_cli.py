@@ -498,9 +498,12 @@ class CliTests(unittest.TestCase):
             )
         self.assertEqual(code, 0, err)
         self.assertEqual(scan_hosts.call_count, 1)
-        self.assertIn("Scopes ran: home", out)
+        # Exact line: "Scopes ran: home, home" still contains the old substring.
+        self.assertEqual(
+            [line for line in out.splitlines() if line.startswith("Scopes ran:")],
+            ["Scopes ran: home"],
+        )
         self.assertNotIn("HOME", out)
-        # HOME is resolved to the stored name before the exact-name dedupe.
 
     def test_history_diff_and_report_use_the_stored_scope_spelling(self):
         path = self._write_scopes('[scopes.Lab-2]\nsubnet = "10.50.0.0/24"\n', name="lab2.toml")
@@ -529,6 +532,107 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
         self.assertEqual(json.loads(out)["device_count"], 2)
+
+    def _save_named_scan(self, scope_name, ips):
+        from lantern.store import connect, save_scan
+
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.51.0/24",
+                [self._device(ip) for ip in ips],
+                scope_name=scope_name,
+            )
+        finally:
+            conn.close()
+
+    def test_history_diff_and_report_keep_a_scope_missing_from_the_file(self):
+        path = self._write_scopes('[scopes.home]\nsubnet = "192.168.50.0/24"\n', name="home-only.toml")
+        self._save_named_scan("workshop", ["192.168.51.10"])
+        self._save_named_scan("workshop", ["192.168.51.10", "192.168.51.11"])
+
+        code, out, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "workshop", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            [row["scope_name"] for row in json.loads(out)["scans"]],
+            ["workshop", "workshop"],
+        )
+        code, out, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "home", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scans"], [])
+
+        code, out, err = self.run_cli(
+            "diff", "--config", str(path), "--scope", "workshop", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual([d["ip"] for d in json.loads(out)["added"]], ["192.168.51.11"])
+        code, out, err = self.run_cli(
+            "report", "--config", str(path), "--scope", "workshop", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scope_name"], "workshop")
+        self.assertEqual(json.loads(out)["device_count"], 2)
+
+    def test_history_diff_and_report_keep_a_removed_scope(self):
+        path = self._write_scopes(
+            '[scopes.lab-west]\nsubnet = "192.168.51.0/24"\n',
+            name="renamed.toml",
+        )
+        self._save_named_scan("Lab-2", ["192.168.51.10"])
+        self._save_named_scan("Lab-2", ["192.168.51.10", "192.168.51.11"])
+
+        code, out, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "Lab-2", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            [row["scope_name"] for row in json.loads(out)["scans"]],
+            ["Lab-2", "Lab-2"],
+        )
+        code, out, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "lab-2", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scans"], [])
+        code, out, err = self.run_cli(
+            "diff", "--config", str(path), "--scope", "Lab-2", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual([d["ip"] for d in json.loads(out)["added"]], ["192.168.51.11"])
+        code, out, err = self.run_cli(
+            "report", "--config", str(path), "--scope", "Lab-2", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
+
+    def test_history_uses_the_typed_scope_when_the_file_is_broken(self):
+        path = self._write_scopes("this is not [valid toml\n", name="broken.toml")
+        self._save_named_scan("workshop", ["192.168.51.10"])
+        self._save_named_scan("workshop", ["192.168.51.10", "192.168.51.11"])
+
+        code, out, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "workshop", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Invalid TOML", err)
+        self.assertEqual(
+            [row["scope_name"] for row in json.loads(out)["scans"]],
+            ["workshop", "workshop"],
+        )
+        code, _, err = self.run_cli(
+            "history", "--config", str(path), "--scope", "bad name",
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("not allowed", err)
+        for command in ("diff", "report"):
+            code, _, err = self.run_cli(command, "--config", str(path), "--scope", "workshop")
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("Invalid TOML", err)
 
     def test_diff_without_scope_does_not_cross_scopes(self):
         path = self._two_scopes()

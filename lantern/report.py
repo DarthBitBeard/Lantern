@@ -5,17 +5,42 @@ from __future__ import annotations
 import html
 import json
 
+from .assets import device_asset_fields
+
+
+def _device_for_report(device: dict) -> dict:
+    shown = dict(device)
+    shown.update(device_asset_fields(device))
+    return shown
+
+
+def _diff_for_report(diff: dict | None) -> dict | None:
+    if diff is None:
+        return None
+    changed = []
+    for change in diff.get("changed") or []:
+        copied = dict(change)
+        if change.get("device"):
+            copied["device"] = _device_for_report(change["device"])
+        changed.append(copied)
+    return {
+        "added": [_device_for_report(device) for device in diff.get("added") or []],
+        "removed": [_device_for_report(device) for device in diff.get("removed") or []],
+        "changed": changed,
+    }
+
 
 def scan_to_dict(scan: dict, diff: dict | None = None) -> dict:
+    devices = [_device_for_report(device) for device in scan["devices"]]
     return {
         "id": scan["id"],
         "started_at": scan["started_at"],
         "subnet": scan["subnet"],
         "scope_name": scan.get("scope_name"),
         "demo": scan["demo"],
-        "device_count": len(scan["devices"]),
-        "devices": scan["devices"],
-        "diff": diff,
+        "device_count": len(devices),
+        "devices": devices,
+        "diff": _diff_for_report(diff),
     }
 
 
@@ -33,16 +58,45 @@ def describe_change(change: dict) -> str:
     return f"{ip}: " + "; ".join(parts) if parts else f"{ip}: no change"
 
 
+def _html_text(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
 def _device_extra(device: dict) -> str:
-    """Escaped lines for fields a report may show beside the address."""
+    """Escaped inventory lines. The trust label is rendered separately."""
+    fields = device_asset_fields(device)
     lines = []
     if device.get("label") and device.get("hostname"):
-        lines.append(f"<p>Hostname: {html.escape(str(device['hostname']))}</p>")
-    for key, title in (("owner", "Owner"), ("tag", "Tag"), ("notes", "Notes")):
-        value = device.get(key)
+        lines.append(f"<p>Hostname: {_html_text(device['hostname'])}</p>")
+    for key, title in (
+        ("owner", "Owner"),
+        ("location", "Location"),
+        ("criticality", "Criticality"),
+        ("notes", "Notes"),
+    ):
+        value = fields[key]
         if value:
-            lines.append(f"<p>{title}: {html.escape(str(value))}</p>")
+            lines.append(f"<p>{title}: {_html_text(value)}</p>")
+    if fields["tags"]:
+        lines.append(f"<p>Tags: {_html_text(', '.join(fields['tags']))}</p>")
     return "".join(lines)
+
+
+def _device_diff_label(device: dict) -> str:
+    """Escaped IP plus any inventory fields, for the diff section."""
+    fields = device_asset_fields(device)
+    bits = [_html_text(device.get("ip") or "")]
+    if fields["owner"]:
+        bits.append("owner " + _html_text(fields["owner"]))
+    if fields["location"]:
+        bits.append("location " + _html_text(fields["location"]))
+    if fields["criticality"]:
+        bits.append("criticality " + _html_text(fields["criticality"]))
+    if fields["tags"]:
+        bits.append("tags " + _html_text(", ".join(fields["tags"])))
+    if fields["notes"]:
+        bits.append("notes " + _html_text(fields["notes"]))
+    return " ".join(bits)
 
 
 def _finding_rows(device: dict) -> str:
@@ -86,14 +140,14 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
 
     diff_html = ""
     if diff:
-        added = ", ".join(d["ip"] for d in diff["added"]) or "none"
-        removed = ", ".join(d["ip"] for d in diff["removed"]) or "none"
-        changed = "; ".join(describe_change(c) for c in diff["changed"]) or "none"
+        added = ", ".join(_device_diff_label(d) for d in diff["added"]) or "none"
+        removed = ", ".join(_device_diff_label(d) for d in diff["removed"]) or "none"
+        changed = "; ".join(_html_text(describe_change(c)) for c in diff["changed"]) or "none"
         diff_html = f"""
         <section><h2>What changed since the last scan</h2>
-        <p><strong>New devices:</strong> {html.escape(added)}</p>
-        <p><strong>Devices gone:</strong> {html.escape(removed)}</p>
-        <p><strong>Port changes:</strong> {html.escape(changed)}</p></section>"""
+        <p><strong>New devices:</strong> {added}</p>
+        <p><strong>Devices gone:</strong> {removed}</p>
+        <p><strong>Port changes:</strong> {changed}</p></section>"""
 
     return f"""<h1>Lantern scan report</h1>
 <p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {html.escape(str(scan.get('scope_name') or ''))} | {len(scan['devices'])} devices

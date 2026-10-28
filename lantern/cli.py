@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
-from . import __version__, demo
+from . import __version__, assets as assetlib, demo
 from .discovery import (
     MAX_SCAN_HOSTS,
     arp_table,
@@ -117,21 +117,52 @@ def build_parser() -> argparse.ArgumentParser:
     diff_p = sub.add_parser("diff", help="Show what changed between the last two saved scans.")
     _add_db_arg(diff_p)
     diff_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope. Matched without regard to case against the name in --config.")
+    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope. Matched without regard to case against the name in --config. If that name is not in the file, or the file cannot be read, the typed name is used.")
     diff_p.add_argument("--format", choices=["text", "json"], default="text")
 
     report_p = sub.add_parser("report", help="Print a saved scan (latest by default) as JSON or HTML.")
     _add_db_arg(report_p)
     report_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    report_p.add_argument("--scope", help="Report the latest scan of this scope. Matched without regard to case against the name in --config.")
+    report_p.add_argument("--scope", help="Report the latest scan of this scope. Matched without regard to case against the name in --config. If that name is not in the file, or the file cannot be read, the typed name is used.")
     report_p.add_argument("--scan-id", type=int, help="Scan id from `lantern history`. Default: latest.")
     report_p.add_argument("--format", choices=["json", "html"], default="json")
 
     history_p = sub.add_parser("history", help="List saved scans, newest first.")
     _add_db_arg(history_p)
     history_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
-    history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config.")
+    history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config. If that name is not in the file, or the file cannot be read, the typed name is used.")
     history_p.add_argument("--format", choices=["text", "json"], default="text")
+
+    asset_p = sub.add_parser("asset", help="Record owner, location, tags, criticality, and notes for a device.")
+    asset_sub = asset_p.add_subparsers(dest="asset_command", required=True)
+
+    asset_set = asset_sub.add_parser("set", help="Set inventory fields for a device from a saved scan.")
+    _add_db_arg(asset_set)
+    asset_set.add_argument("key", help="MAC address, or an IPv4 address when the device has no MAC.")
+    asset_set.add_argument("--owner", help="Owner, 1 to 80 characters.")
+    asset_set.add_argument("--location", help="Location, 1 to 80 characters.")
+    asset_set.add_argument("--tag", action="append", help="Tag. Repeat for several. Replaces the previous list.")
+    asset_set.add_argument("--criticality", choices=["low", "medium", "high", "critical"])
+    asset_set.add_argument("--notes", help="Notes, 1 to 500 characters.")
+
+    asset_show = asset_sub.add_parser("show", help="Show inventory fields for one device.")
+    _add_db_arg(asset_show)
+    asset_show.add_argument("key", help="MAC address, or an IPv4 address when the device has no MAC.")
+    asset_show.add_argument("--format", choices=["text", "json"], default="text")
+
+    asset_list = asset_sub.add_parser("list", help="List recorded inventory fields.")
+    _add_db_arg(asset_list)
+    asset_list.add_argument("--config", help="TOML file used to match --scope without regard to case.")
+    asset_list.add_argument("--scope", help="Only devices that appear in scans of this scope. Matched without regard to case against the name in --config, or against a unique name already stored on a scan.")
+    asset_list.add_argument("--tag", help="Only devices with this tag.")
+    asset_list.add_argument("--criticality", choices=["low", "medium", "high", "critical"])
+    asset_list.add_argument("--owner", help="Only devices with this owner.")
+    asset_list.add_argument("--format", choices=["text", "json"], default="text")
+
+    asset_clear = asset_sub.add_parser("clear", help="Remove inventory fields for one device.")
+    _add_db_arg(asset_clear)
+    asset_clear.add_argument("key", help="MAC address, or an IPv4 address when the device has no MAC.")
+    asset_clear.add_argument("--field", help="One of owner, location, tags, criticality, notes. Omit to remove the whole record.")
 
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
     _add_db_arg(web_p)
@@ -646,6 +677,13 @@ def _print_text_diff(diff: dict) -> None:
         print("Nothing changed since the previous scan.")
 
 
+def _prepare_report(conn, scan, diff):
+    """Attach current inventory fields for CLI report and diff output."""
+    assetlib.attach_assets(conn, scan)
+    assetlib.attach_assets_to_diff(conn, diff)
+    return scan, diff
+
+
 def _scope_config_path(args) -> Path:
     if getattr(args, "config", None):
         return Path(args.config)
@@ -659,24 +697,86 @@ def _scope_names(args) -> list[str]:
     return list(names)
 
 
-def _one_scope_name(args) -> str | None:
-    """A single --scope on history, diff, or report.
+def _stored_scope_name(conn, name: str) -> str:
+    """Scope name already stored on a scan, after the name-format check.
 
-    The typed name is checked against the scope-name rules before any case
-    folding. When a scope file is available, the stored spelling is the one
-    ``select_scope`` returns, so ``lab-2`` finds ``Lab-2``.
+    An exact stored spelling wins. Otherwise a single case-insensitive match
+    is used. Two stored spellings that differ only by case are refused.
     """
+    rows = conn.execute(
+        "SELECT DISTINCT scope_name FROM scans WHERE scope_name IS NOT NULL"
+    ).fetchall()
+    stored_names = []
+    for (stored,) in rows:
+        if isinstance(stored, str) and stored not in stored_names:
+            stored_names.append(stored)
+    if name in stored_names:
+        return name
+    folded = name.casefold()
+    matches = [stored for stored in stored_names if stored.casefold() == folded]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Scope name {name!r} matches more than one stored scope. "
+            "Pass the exact stored spelling."
+        )
+    return name
+
+
+def _typed_scope_name(args) -> str | None:
+    """The --scope text after the name-format check, before any case folding."""
     name = getattr(args, "scope", None)
     if isinstance(name, list):
         name = name[0] if name else None
     if not name:
         return None
     validate_scope_name(name)
+    return name
+
+
+def _one_scope_name(args) -> str | None:
+    """A single --scope on history, diff, or report.
+
+    The typed name is checked before any case folding. When a scope file
+    contains the name, that file's spelling is used, so ``lab-2`` finds
+    ``Lab-2``. If the name is not in the file, or the file cannot be loaded,
+    the typed name is used. These commands do not scan, so a broken scope
+    file must not hide rows stored under that exact name.
+    """
+    name = _typed_scope_name(args)
+    if name is None:
+        return None
+    explicit = getattr(args, "config", None)
+    path = _scope_config_path(args)
+    if not explicit and not path.is_file():
+        return name
+    try:
+        return select_scope(load_scopes(path), name).name
+    except ValueError:
+        return name
+
+
+def _asset_list_scope(args, conn) -> str | None:
+    """Scope filter for ``asset list``.
+
+    The name is checked, then resolved from the config file. If that file
+    no longer contains the scope, a unique case-insensitive match against
+    names already stored on scans is used. History, diff, and report do not
+    use this lookup; a missing or unreadable file falls back to the typed name.
+    """
+    name = _typed_scope_name(args)
+    if name is None:
+        return None
     explicit = getattr(args, "config", None)
     path = _scope_config_path(args)
     if explicit or path.is_file():
-        return select_scope(load_scopes(path), name).name
-    return name
+        try:
+            return select_scope(load_scopes(path), name).name
+        except ValueError as exc:
+            if "Unknown scope" not in str(exc):
+                raise
+    return _stored_scope_name(conn, name)
 
 
 def _resolve_scan_subnet(args) -> tuple[str, str | None]:
@@ -797,6 +897,90 @@ def _cmd_scopes(args) -> int:
     for scope in scopes:
         print(f"{scope.name:<{name_width}}  {scope.subnet:<{subnet_width}}  {scope.description or ''}")
     return 0
+
+
+def _asset_updates(args) -> dict:
+    updates = {}
+    if args.owner is not None:
+        updates["owner"] = assetlib.validate_owner(args.owner)
+    if args.location is not None:
+        updates["location"] = assetlib.validate_location(args.location)
+    if args.tag is not None:
+        updates["tags"] = assetlib.validate_tags(args.tag)
+    if args.criticality is not None:
+        updates["criticality"] = assetlib.validate_criticality(args.criticality)
+    if args.notes is not None:
+        updates["notes"] = assetlib.validate_notes(args.notes)
+    if not updates:
+        raise ValueError(
+            "Pass at least one of --owner, --location, --tag, --criticality, or --notes."
+        )
+    return updates
+
+
+def _print_asset_text(item: dict) -> None:
+    kind = "MAC" if item["kind"] == "mac" else "IP"
+    print(f"{kind}: {assetlib.strip_for_text(item['key'])}")
+    print(f"Owner: {assetlib.strip_for_text(item.get('owner'))}")
+    print(f"Location: {assetlib.strip_for_text(item.get('location'))}")
+    print(f"Criticality: {assetlib.strip_for_text(item.get('criticality'))}")
+    tags = ", ".join(assetlib.strip_for_text(tag) for tag in item.get("tags") or [])
+    print(f"Tags: {tags}")
+    print(f"Notes: {assetlib.strip_for_text(item.get('notes'))}")
+
+
+def _cmd_asset(args, conn) -> int:
+    try:
+        if args.asset_command == "set":
+            updates = _asset_updates(args)
+            asset_key, kind = assetlib.resolve_asset_key(conn, args.key)
+            saved = assetlib.set_asset(conn, asset_key, kind, **updates)
+            _print_asset_text(saved)
+            return 0
+        if args.asset_command == "show":
+            asset_key, _kind = assetlib.resolve_asset_key(conn, args.key)
+            saved = assetlib.get_asset(conn, asset_key)
+            if saved is None:
+                shown = asset_key.split(":", 1)[1]
+                print(f"No asset recorded for {shown}.")
+                return 0
+            if args.format == "json":
+                print(json.dumps(saved, indent=2))
+            else:
+                _print_asset_text(saved)
+            return 0
+        if args.asset_command == "list":
+            scope_name = _asset_list_scope(args, conn)
+            tag = assetlib.validate_tag(args.tag) if args.tag else None
+            owner = assetlib.validate_owner(args.owner) if args.owner else None
+            criticality = (
+                assetlib.validate_criticality(args.criticality) if args.criticality else None
+            )
+            rows = assetlib.list_assets(
+                conn,
+                tag=tag,
+                criticality=criticality,
+                owner=owner,
+                scope_name=scope_name,
+            )
+            if args.format == "json":
+                print(json.dumps({"assets": rows}, indent=2))
+                return 0
+            if not rows:
+                print("No assets recorded.")
+                return 0
+            for item in rows:
+                _print_asset_text(item)
+                print()
+            return 0
+        if args.asset_command == "clear":
+            asset_key, _kind = assetlib.resolve_asset_key(conn, args.key)
+            assetlib.clear_asset(conn, asset_key, args.field)
+            print("Cleared.")
+            return 0
+    except ValueError as exc:
+        return _err(str(exc))
+    return _err(f"Unknown asset command: {args.asset_command}")
 
 
 def main(argv=None) -> int:
@@ -923,6 +1107,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             return _err(str(exc))
         return 0
 
+    if args.command == "asset":
+        return _cmd_asset(args, conn)
+
     if args.command == "demo":
         save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True)
         id2 = save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
@@ -971,7 +1158,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                     ran.append(scope.name)
                     if args.format == "html":
                         scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope.name)
-                        saved.append((scan, diff))
+                        saved.append(_prepare_report(conn, scan, diff))
                 except Exception as exc:
                     failed.append((scope.name, str(exc) or exc.__class__.__name__))
             _print_scope_summary(ran, failed, args.format, saved)
@@ -986,7 +1173,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         except ValueError as exc:
             return _err(str(exc))
         scan_id = save_scan(conn, subnet, devices, demo=args.demo, scope_name=scope_name)
-        scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope_name)
+        scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scan_id, scope_name=scope_name))
         if args.format == "json":
             print(to_json(scan, diff))
         elif args.format == "html":
@@ -1000,7 +1187,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             scope_name = _one_scope_name(args)
         except ValueError as exc:
             return _err(str(exc))
-        scan, diff = load_scan_with_diff(conn, scope_name=scope_name)
+        scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scope_name=scope_name))
         if scan is None or diff is None:
             label = scope_name or (scan.get("scope_name") if scan else None)
             if label:
@@ -1019,7 +1206,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             scope_name = _one_scope_name(args)
         except ValueError as exc:
             return _err(str(exc))
-        scan, diff = load_scan_with_diff(conn, args.scan_id, scope_name=scope_name)
+        scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, args.scan_id, scope_name=scope_name))
         if scan is None:
             if args.scan_id is not None:
                 if scope_name:
