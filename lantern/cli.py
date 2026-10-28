@@ -325,7 +325,8 @@ def main(argv=None) -> int:
             return _err(web_bind.error)
 
     try:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        # connect() creates a missing parent at mode 0700. A mkdir here
+        # would leave that directory at 0755 under umask 022.
         conn = connect(db_path)
     except (OSError, sqlite3.Error, ValueError) as exc:
         return _err(f"Cannot open database {db_path}: {exc}")

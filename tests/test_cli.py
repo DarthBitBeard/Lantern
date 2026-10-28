@@ -3,6 +3,8 @@
 import contextlib
 import io
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +68,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("No scan with id 99", err)
 
+    def test_demo_creates_private_data_dir_and_database(self):
+        """Under umask 022 the CLI used to leave data/ at 0755.
+
+        connect() has to create that directory at 0700 and the database at
+        0600, including when umask is 000.
+        """
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
+        previous = os.umask(0o022)
+        try:
+            for mask in (0o022, 0o000):
+                os.umask(mask)
+                root = Path(self.tmp.name) / f"mask-{mask:03o}"
+                root.mkdir()
+                os.chmod(root, 0o755)
+                db = root / "data" / "lantern.db"
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(["--db", str(db), "demo"])
+                self.assertEqual(code, 0, err.getvalue())
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(db.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(db.stat().st_mode), 0o600)
+                self.assertIn("HTML report:", out.getvalue())
+        finally:
+            os.umask(previous)
+
     def test_report_applies_trusted_labels(self):
         self.run_cli("demo")
         from lantern.store import connect, set_trusted
@@ -112,7 +141,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(scan["devices"][1]["mac"], "aa:bb:cc:dd:ee:07")
 
     def test_bad_db_path_and_port(self):
-        # A plain file where the parent directory should be: mkdir fails.
+        # A plain file where the parent directory should be: open fails.
         Path(self.tmp.name, "file.db").write_text("")
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
