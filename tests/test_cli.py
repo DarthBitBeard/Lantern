@@ -500,6 +500,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(scan_hosts.call_count, 1)
         self.assertIn("Scopes ran: home", out)
         self.assertNotIn("HOME", out)
+        # HOME is resolved to the stored name before the exact-name dedupe.
+
+    def test_history_diff_and_report_use_the_stored_scope_spelling(self):
+        path = self._write_scopes('[scopes.Lab-2]\nsubnet = "10.50.0.0/24"\n', name="lab2.toml")
+        with mock.patch.object(cli, "run_scan", return_value=[self._device("10.50.0.10")]):
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "LAB-2", "--format", "json",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
+        with mock.patch.object(cli, "run_scan", return_value=[
+            self._device("10.50.0.10"), self._device("10.50.0.11"),
+        ]):
+            code, _, err = self.run_cli("scan", "--config", str(path), "--scope", "lab-2")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("history", "--config", str(path), "--scope", "lab-2", "--format", "json")
+        self.assertEqual(code, 0, err)
+        scans = json.loads(out)["scans"]
+        self.assertEqual([row["scope_name"] for row in scans], ["Lab-2", "Lab-2"])
+
+        code, out, err = self.run_cli("diff", "--config", str(path), "--scope", "LAB-2", "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([d["ip"] for d in json.loads(out)["added"]], ["10.50.0.11"])
+
+        code, out, err = self.run_cli("report", "--config", str(path), "--scope", "Lab-2", "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
+        self.assertEqual(json.loads(out)["device_count"], 2)
 
     def test_diff_without_scope_does_not_cross_scopes(self):
         path = self._two_scopes()

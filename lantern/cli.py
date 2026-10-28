@@ -116,18 +116,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     diff_p = sub.add_parser("diff", help="Show what changed between the last two saved scans.")
     _add_db_arg(diff_p)
-    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope.")
+    diff_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    diff_p.add_argument("--scope", help="Diff the latest two scans of this scope. Matched without regard to case against the name in --config.")
     diff_p.add_argument("--format", choices=["text", "json"], default="text")
 
     report_p = sub.add_parser("report", help="Print a saved scan (latest by default) as JSON or HTML.")
     _add_db_arg(report_p)
-    report_p.add_argument("--scope", help="Report the latest scan of this scope.")
+    report_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    report_p.add_argument("--scope", help="Report the latest scan of this scope. Matched without regard to case against the name in --config.")
     report_p.add_argument("--scan-id", type=int, help="Scan id from `lantern history`. Default: latest.")
     report_p.add_argument("--format", choices=["json", "html"], default="json")
 
     history_p = sub.add_parser("history", help="List saved scans, newest first.")
     _add_db_arg(history_p)
-    history_p.add_argument("--scope", help="List only scans tagged with this scope.")
+    history_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config.")
     history_p.add_argument("--format", choices=["text", "json"], default="text")
 
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
@@ -657,13 +660,23 @@ def _scope_names(args) -> list[str]:
 
 
 def _one_scope_name(args) -> str | None:
-    """A single --scope on history, diff, or report. Rejects a bad name."""
+    """A single --scope on history, diff, or report.
+
+    The typed name is checked against the scope-name rules before any case
+    folding. When a scope file is available, the stored spelling is the one
+    ``select_scope`` returns, so ``lab-2`` finds ``Lab-2``.
+    """
     name = getattr(args, "scope", None)
     if isinstance(name, list):
         name = name[0] if name else None
     if not name:
         return None
-    return validate_scope_name(name)
+    validate_scope_name(name)
+    explicit = getattr(args, "config", None)
+    path = _scope_config_path(args)
+    if explicit or path.is_file():
+        return select_scope(load_scopes(path), name).name
+    return name
 
 
 def _resolve_scan_subnet(args) -> tuple[str, str | None]:
@@ -695,17 +708,17 @@ def _resolve_scan_subnet(args) -> tuple[str, str | None]:
 
 
 def _dedupe_scopes(scopes):
-    """First occurrence of each scope name, in that order.
+    """First occurrence of each stored scope name, in that order.
 
-    Names that differ only by case count as the same scope.
+    Case folding happens earlier: the file rejects names that differ only
+    by case, and ``select_scope`` returns the stored spelling.
     """
     seen: set[str] = set()
     chosen = []
     for scope in scopes:
-        key = scope.name.casefold()
-        if key in seen:
+        if scope.name in seen:
             continue
-        seen.add(key)
+        seen.add(scope.name)
         chosen.append(scope)
     return chosen
 
