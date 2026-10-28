@@ -161,7 +161,7 @@ The dashboard binds to loopback by default (`127.0.0.1`) and has no login, by de
 Docker, for a homelab host:
 
 ```bash
-mkdir -p data && sudo chown 10001:10001 data && chmod 700 data
+mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
 docker compose up -d
 # on the host: http://127.0.0.1:8068/
 ```
