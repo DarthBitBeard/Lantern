@@ -352,6 +352,41 @@ class WebBindTests(unittest.TestCase):
             self.assertFalse(decision.strict_auth)
             self.assertFalse(decision.print_token)
 
+    def test_opt_out_warning_names_the_env_and_lan_still_needs_the_token(self):
+        decision = cli.resolve_web_bind(
+            "127.0.0.1", False, strict_auth=False, strict_off_because="env",
+        )
+        self.assertIsNone(decision.error)
+        self.assertIn("LANTERN_STRICT_AUTH set to an off value", decision.warning)
+        self.assertIn("local-user token gap", decision.warning)
+
+        decision = cli.resolve_web_bind(
+            "192.168.1.10", True,
+            allow_hosts=["192.168.1.10"],
+            environ={cli.TOKEN_ENV: "b" * 32},
+            tty=False,
+            strict_auth=False,
+            strict_off_because="env",
+        )
+        self.assertIsNone(decision.error, decision.error)
+        self.assertIn("A LAN bind still requires the token", decision.warning)
+        self.assertIn("LANTERN_STRICT_AUTH set to an off value", decision.warning)
+
+        for raw in ("false", "no", "off"):
+            source = cli.strict_off_source(False, False, {cli.STRICT_AUTH_ENV: raw})
+            decision = cli.resolve_web_bind(
+                "127.0.0.1", False, strict_auth=False, strict_off_because=source,
+            )
+            self.assertIn(f"LANTERN_STRICT_AUTH={raw}", decision.warning, raw)
+            self.assertNotIn("LANTERN_STRICT_AUTH=0", decision.warning, raw)
+        source = cli.strict_off_source(False, False, {cli.STRICT_AUTH_ENV: "0"})
+        decision = cli.resolve_web_bind(
+            "127.0.0.1", False, strict_auth=False, strict_off_because=source,
+        )
+        self.assertIn("LANTERN_STRICT_AUTH=0", decision.warning)
+        source = cli.strict_off_source(False, True, {cli.STRICT_AUTH_ENV: "1"})
+        self.assertEqual(source, "flag")
+
     def test_non_loopback_without_flag_is_refused(self):
         decision = cli.resolve_web_bind(
             "0.0.0.0", False, environ={cli.TOKEN_ENV: "a" * 32}, tty=True,

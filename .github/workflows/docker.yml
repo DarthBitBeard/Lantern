@@ -12,7 +12,10 @@ permissions:
 # the internet. The default command binds 127.0.0.1. A non-loopback bind
 # without --allow-lan must be refused before it listens. --allow-lan
 # without a token must be refused. A start that uses a token file must
-# not write that token to docker logs. This job does not log in, push,
+# not write that token to docker logs. With a mode-0400 token file,
+# GET /api/* inside the container is 403 without the token and 200
+# with it. The check reads the file in the container and does not
+# print the token. This job does not log in, push,
 # tag, or publish an image, and it does not scan.
 
 jobs:
@@ -313,11 +316,26 @@ jobs:
             *"$token"*) echo "default command logged the token" >&2; exit 1 ;;
           esac
           docker exec "$cid" python -c '
-          import urllib.request
+          import urllib.error, urllib.request
           token = open("/run/secrets/lantern_token", encoding="utf-8").read().strip()
-          page = urllib.request.urlopen("http://127.0.0.1:8068/", timeout=5).read().decode()
+          base = "http://127.0.0.1:8068"
+          page = urllib.request.urlopen(base + "/", timeout=5).read().decode()
           if token in page:
               raise SystemExit("index.html contains the API token")
+          for path in ("/api/status", "/api/scans"):
+              try:
+                  urllib.request.urlopen(base + path, timeout=5)
+              except urllib.error.HTTPError as exc:
+                  if exc.code != 403:
+                      raise SystemExit("expected 403 for %s without a token, got %s" % (path, exc.code))
+              else:
+                  raise SystemExit("GET %s without a token was allowed" % path)
+              req = urllib.request.Request(
+                  base + path, headers={"X-Lantern-Token": token},
+              )
+              with urllib.request.urlopen(req, timeout=5) as resp:
+                  if resp.status != 200:
+                      raise SystemExit("GET %s with the token was not 200" % path)
           '
 
           docker rm -f "$cid" >/dev/null 2>&1 || true

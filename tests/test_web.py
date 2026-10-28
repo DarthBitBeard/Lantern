@@ -672,8 +672,12 @@ class LanModeTests(unittest.TestCase):
         hdrs.update(headers or {})
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
+        # POST /api/demo writes two scans. A 5s urlopen timeout expired on a
+        # slow Windows runner while that response status line was still
+        # unread. Other calls in this helper stay at 5s.
+        timeout = 20 if method == "POST" and path.startswith("/api/demo") else 5
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers

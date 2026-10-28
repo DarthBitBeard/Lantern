@@ -1,3 +1,4 @@
+# Strict auth is the default: the container needs a token file (uncomment environment/secrets below) or it exits 2 (restart: on-failure:3 stops after 3 tries).
 services:
   lantern:
     build: .

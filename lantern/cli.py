@@ -461,24 +461,50 @@ def _lan_warning(host: str, allowed: frozenset[str], source: str | None) -> str:
     return "\n".join(lines)
 
 
-def strict_off_source(flag: bool, opt_out: bool, environ: dict) -> str | None:
-    """Why strict auth is off, after the env value has been validated."""
-    value, _error = _strict_env_value(environ)
-    if opt_out and value == "off":
-        return "both"
-    if opt_out:
-        return "flag"
-    if value == "off":
-        return "env"
+def _strict_off_raw(environ: dict) -> str | None:
+    """The off value as written, lowercased, or None when the env is not an opt-out."""
+    raw = environ.get(STRICT_AUTH_ENV) if environ else None
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if value in _STRICT_FALSE:
+        return value
     return None
 
 
+def strict_off_source(flag: bool, opt_out: bool, environ: dict) -> str | None:
+    """Why strict auth is off, after the env value has been validated.
+
+    ``flag`` is ``--no-strict-auth``. ``env:<value>`` is an off setting, and
+    the value is ``0``, ``false``, ``no``, or ``off`` so the warning can name
+    what was set. ``both:<value>`` is the flag and an off setting together.
+    """
+    value, _error = _strict_env_value(environ)
+    shown = _strict_off_raw(environ) if value == "off" else None
+    if opt_out and shown is not None:
+        return f"both:{shown}"
+    if opt_out:
+        return "flag"
+    if shown is not None:
+        return f"env:{shown}"
+    return None
+
+
+def _off_value_phrase(raw: str | None) -> str:
+    if raw:
+        return f"LANTERN_STRICT_AUTH={raw}"
+    return "LANTERN_STRICT_AUTH set to an off value"
+
+
 def _opt_out_how(source: str | None) -> str:
-    if source == "flag":
+    kind, _, raw = (source or "").partition(":")
+    if kind == "flag":
         return "--no-strict-auth"
-    if source == "env":
-        return "LANTERN_STRICT_AUTH=0"
-    return "--no-strict-auth or LANTERN_STRICT_AUTH=0"
+    if kind == "env":
+        return _off_value_phrase(raw or None)
+    if kind == "both":
+        return f"--no-strict-auth or {_off_value_phrase(raw or None)}"
+    return "--no-strict-auth or LANTERN_STRICT_AUTH set to an off value"
 
 
 def _opt_out_note(source: str | None = None) -> str:
