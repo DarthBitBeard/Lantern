@@ -9,8 +9,10 @@ services:
     # and the dashboard must not be reachable from the LAN by default.
     #
     # Opting in to a LAN bind is not recommended. Prefer an SSH tunnel or
-    # Tailscale to 127.0.0.1. If you do opt in, mount a token file mode
-    # 0400 owned by uid 10001. Do not write the token into this file.
+    # Tailscale to 127.0.0.1. If you do opt in, mount a regular token file
+    # mode 0400 owned by uid 10001. Do not use a symlink. Mode 0444 is
+    # refused: this file's mode is mounted as-is. Do not write the token
+    # into this file.
     # Docker has no terminal, so Lantern will not print a token into
     # `docker logs`. Without the file or LANTERN_API_TOKEN the command
     # exits 2 and does not listen. --host 0.0.0.0 also needs --allow-host

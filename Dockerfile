@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Digest is the multi-arch index for library/python:3.12-slim, taken from
+# registry-1.docker.io Docker-Content-Digest (verified 2026-10-28).
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
 # The dashboard listens on loopback. CMD below passes --host 127.0.0.1.
 # A non-loopback address needs `lantern web --allow-lan` and a startup

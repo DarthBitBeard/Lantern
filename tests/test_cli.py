@@ -6,6 +6,8 @@ import json
 import os
 import stat
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -172,7 +174,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--allow-host", err)
         self.assertNotIn("Traceback", err)
-        for bad in ("0.0.0.0", "[::]", "[fe80::1%eth0]", "*", "10.0.0.0/24"):
+        for bad in ("0.0.0.0", "[::]", "[fe80::1%eth0]", "*", "10.0.0.0/24", "0", "00", "2130706433"):
             code, _, err = self.run_cli("web", "--allow-host", bad)
             self.assertEqual(code, 2, bad)
             self.assertIn("--allow-host", err)
@@ -539,12 +541,43 @@ class WebBindTests(unittest.TestCase):
                 mock.patch.object(cli, "new_api_token", return_value=token), \
                 mock.patch("lantern.webapp.serve") as serve:
             code, out, err = self.run_cli(
-                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9", "--debug",
+                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9",
             )
         self.assertEqual(code, 0, err)
         self.assertNotIn(token, out)
         self.assertEqual(err.count(token), 1)
         self.assertIn("API token (printed once, not logged):", err)
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertFalse(serve.call_args.kwargs["debug"])
+
+    def test_cli_debug_on_a_tty_does_not_print_a_generated_token(self):
+        token = "d" * 43
+        env = self._no_token_env()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve")):
+            code, out, err = self.run_cli(
+                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9", "--debug",
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("--debug does not print a generated token", err)
+        self.assertNotIn(token, out)
+        self.assertNotIn(token, err)
+        self.assertNotIn("API token (printed", err)
+        self.assertFalse(Path(self.db).exists())
+
+        env[cli.TOKEN_ENV] = token
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli(
+                "web", "--host", "192.168.1.50", "--allow-lan", "--port", "9", "--debug",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertNotIn(token, err)
         self.assertEqual(serve.call_args.kwargs["api_token"], token)
         self.assertTrue(serve.call_args.kwargs["debug"])
 
@@ -595,6 +628,85 @@ class WebBindTests(unittest.TestCase):
             cli.main(["web", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--allow-lan", out.getvalue())
+
+
+class TokenFileTests(unittest.TestCase):
+    """Token files are regular, small, and private. No socket is opened."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.token = "f" * 32
+
+    def test_fifo_is_refused_without_hanging(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo is not available")
+        path = Path(self.tmp.name) / "token.fifo"
+        os.mkfifo(path)
+        box = {}
+
+        def read():
+            try:
+                cli._read_token_file(str(path))
+            except ValueError as exc:
+                box["error"] = exc
+
+        worker = threading.Thread(target=read, daemon=True)
+        started = time.monotonic()
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive(), "token file read blocked on a FIFO")
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn("regular file", str(box.get("error")))
+        self.assertNotIn(self.token, str(box.get("error")))
+
+    def test_symlink_is_refused_and_the_target_is_not_read(self):
+        if os.name == "nt":
+            self.skipTest("symlink refusal is checked on POSIX")
+        target = Path(self.tmp.name) / "secret"
+        target.write_text(self.token, encoding="utf-8")
+        link = Path(self.tmp.name) / "link"
+        link.symlink_to(target)
+        with self.assertRaises(ValueError) as ctx:
+            cli._read_token_file(str(link))
+        message = str(ctx.exception)
+        self.assertIn("symlink", message)
+        self.assertNotIn(self.token, message)
+        self.assertEqual(target.read_text(encoding="utf-8"), self.token)
+
+    def test_oversized_file_is_refused(self):
+        path = Path(self.tmp.name) / "big"
+        path.write_bytes(b"a" * (cli.MAX_TOKEN_FILE_BYTES + 1))
+        if os.name != "nt":
+            os.chmod(path, 0o400)
+        started = time.monotonic()
+        with self.assertRaises(ValueError) as ctx:
+            cli._read_token_file(str(path))
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn("4 KiB", str(ctx.exception))
+        self.assertNotIn("a" * 40, str(ctx.exception))
+
+        long_token = Path(self.tmp.name) / "long"
+        long_token.write_text("b" * 600, encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(long_token, 0o400)
+        with self.assertRaises(ValueError) as ctx:
+            cli._read_token_file(str(long_token))
+        self.assertIn("512", str(ctx.exception))
+        self.assertNotIn("b" * 40, str(ctx.exception))
+
+    def test_group_readable_file_is_refused_and_mode_0400_is_accepted(self):
+        if os.name == "nt":
+            self.skipTest("POSIX token file modes are not checked on Windows")
+        path = Path(self.tmp.name) / "token"
+        path.write_text(self.token + "\n", encoding="utf-8")
+        os.chmod(path, 0o644)
+        with self.assertRaises(ValueError) as ctx:
+            cli._read_token_file(str(path))
+        self.assertIn("0400", str(ctx.exception))
+        self.assertNotIn(self.token, str(ctx.exception))
+        os.chmod(path, 0o400)
+        self.assertEqual(cli._read_token_file(str(path)), self.token)
 
 
 if __name__ == "__main__":
