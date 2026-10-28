@@ -188,7 +188,7 @@ class CliTests(unittest.TestCase):
             taken.bind(("127.0.0.1", 0))
             taken.listen(1)
             port = taken.getsockname()[1]
-            code, _, err = self.run_cli("web", "--port", str(port))
+            code, _, err = self.run_cli("web", "--no-strict-auth", "--port", str(port))
         self.assertEqual(code, 2)
         self.assertIn("Cannot bind", err)
 
@@ -334,6 +334,7 @@ class WebBindTests(unittest.TestCase):
         env = os.environ.copy()
         env.pop(cli.TOKEN_ENV, None)
         env.pop(cli.TOKEN_FILE_ENV, None)
+        env.pop(cli.STRICT_AUTH_ENV, None)
         return env
 
     def test_loopback_needs_no_token(self):
@@ -345,9 +346,10 @@ class WebBindTests(unittest.TestCase):
                 "127.0.0.1", allow, token_factory=fail_mint, environ={}, tty=True,
             )
             self.assertIsNone(decision.error)
-            self.assertIsNone(decision.warning)
+            self.assertIn("local-user token gap", decision.warning)
             self.assertIsNone(decision.token)
             self.assertFalse(decision.lan_bound)
+            self.assertFalse(decision.strict_auth)
             self.assertFalse(decision.print_token)
 
     def test_non_loopback_without_flag_is_refused(self):
@@ -492,25 +494,68 @@ class WebBindTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertFalse(Path(self.db).exists())
 
-    def test_cli_loopback_does_not_warn(self):
+    def test_cli_loopback_without_a_terminal_exits_before_listen(self):
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
         for host in ("127.0.0.1", "localhost", "::1"):
-            with mock.patch("lantern.webapp.serve") as serve:
-                code, _, err = self.run_cli("web", "--host", host, "--port", "9")
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                    mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve")):
+                code, out, err = self.run_cli("web", "--host", host, "--port", "9")
+            self.assertEqual(code, 2, (host, err))
+            self.assertIn("refusing to start without a valid API token", err)
+            self.assertNotIn("#token=", err)
+            self.assertNotIn("Lantern dashboard", out)
+            self.assertEqual(out, "")
+            self.assertFalse(Path(self.db).exists(), host)
+
+    def test_cli_default_tty_prints_the_fragment_link(self):
+        token = "k" * 43
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", return_value=token), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli("web", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertEqual(err.count(token), 1)
+        self.assertIn(f"http://127.0.0.1:9/#token={token}", err)
+        self.assertNotIn("API token (printed once", err)
+        self.assertTrue(serve.call_args.kwargs["strict_auth"])
+        self.assertEqual(serve.call_args.kwargs["api_token"], token)
+        self.assertFalse(serve.call_args.kwargs["lan_bound"])
+
+    def test_cli_no_strict_auth_restores_the_embedded_page_token(self):
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
+        for host in ("127.0.0.1", "localhost", "::1"):
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                    mock.patch("lantern.webapp.serve") as serve:
+                code, _, err = self.run_cli(
+                    "web", "--no-strict-auth", "--host", host, "--port", "9",
+                )
             self.assertEqual(code, 0, (host, err))
-            self.assertNotIn("WARNING", err)
+            self.assertIn("local-user token gap", err)
+            self.assertNotIn("binding beyond loopback", err)
             self.assertEqual(serve.call_args.kwargs["host"], host)
+            self.assertFalse(serve.call_args.kwargs["strict_auth"])
             self.assertNotIn("api_token", serve.call_args.kwargs)
-            self.assertNotIn("token", serve.call_args.kwargs)
 
     def test_cli_allow_lan_on_loopback_does_not_mint(self):
         with mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
                 mock.patch("lantern.webapp.serve") as serve:
-            code, _, err = self.run_cli("web", "--allow-lan", "--port", "9")
-        self.assertEqual(code, 0)
-        self.assertNotIn("WARNING", err)
+            code, _, err = self.run_cli(
+                "web", "--no-strict-auth", "--allow-lan", "--port", "9",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("binding beyond loopback", err)
         self.assertEqual(serve.call_args.kwargs["host"], "127.0.0.1")
         self.assertNotIn("api_token", serve.call_args.kwargs)
         self.assertFalse(serve.call_args.kwargs["lan_bound"])
+        self.assertFalse(serve.call_args.kwargs["strict_auth"])
 
     def test_cli_non_tty_passes_env_token_without_printing_it(self):
         token = "n" * 32
@@ -546,10 +591,11 @@ class WebBindTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn(token, out)
         self.assertEqual(err.count(token), 1)
-        self.assertIn("API token (printed once, not logged):", err)
+        self.assertIn(f"http://192.168.1.50:9/#token={token}", err)
+        self.assertNotIn("API token (printed once", err)
         self.assertEqual(serve.call_args.kwargs["api_token"], token)
         self.assertFalse(serve.call_args.kwargs["debug"])
-        self.assertFalse(serve.call_args.kwargs["strict_auth"])
+        self.assertTrue(serve.call_args.kwargs["strict_auth"])
 
     def test_strict_auth_link_uses_loopback_and_a_fragment(self):
         token = "u" * 32
@@ -719,8 +765,13 @@ class WebBindTests(unittest.TestCase):
         for word in ("1", "true", "yes", "on", "0", "false", "no", "off", "empty"):
             self.assertIn(word, help_text)
         self.assertIn("does not override this flag", help_text)
+        self.assertIn("--no-strict-auth", help_text)
+        self.assertIn("local-user", help_text)
 
     def test_strict_auth_off_values_do_not_override_the_flag(self):
+        enabled, error = cli.strict_auth_requested(False, {})
+        self.assertIsNone(error)
+        self.assertTrue(enabled)
         for raw in ("0", "false", "no", "off", "", "  0  "):
             enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
             self.assertIsNone(error, raw)
@@ -728,10 +779,18 @@ class WebBindTests(unittest.TestCase):
             enabled, error = cli.strict_auth_requested(True, {cli.STRICT_AUTH_ENV: raw})
             self.assertIsNone(error, raw)
             self.assertTrue(enabled, raw)
+            enabled, error = cli.strict_auth_requested(
+                False, {cli.STRICT_AUTH_ENV: raw}, opt_out=True,
+            )
+            self.assertFalse(enabled, raw)
         for raw in ("1", "true", "yes", "on", " TRUE "):
             enabled, error = cli.strict_auth_requested(False, {cli.STRICT_AUTH_ENV: raw})
             self.assertIsNone(error, raw)
             self.assertTrue(enabled, raw)
+        enabled, error = cli.strict_auth_requested(
+            False, {cli.STRICT_AUTH_ENV: "1"}, opt_out=True,
+        )
+        self.assertFalse(enabled)
 
 
 class TokenFileTests(unittest.TestCase):

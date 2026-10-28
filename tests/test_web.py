@@ -1549,8 +1549,11 @@ class StrictAuthTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         run_scan.assert_called_once()
 
-    def test_legacy_loopback_still_embeds_the_token_and_allows_get(self):
-        server = make_server(Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0)
+    def test_opt_out_loopback_embeds_the_token_and_allows_get(self):
+        """``strict_auth=False`` is the ``--no-strict-auth`` server."""
+        server = make_server(
+            Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0, strict_auth=False,
+        )
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
         self.assertFalse(server.RequestHandlerClass.strict_auth)
