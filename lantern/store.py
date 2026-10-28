@@ -60,6 +60,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _decode_db_text(value: bytes) -> str:
+    """UTF-8 text from SQLite. Invalid bytes become U+FFFD, not an exception."""
+    return value.decode("utf-8", errors="replace")
+
+
 def _newer_message(found: int, target: int) -> str:
     return (
         f"Database schema version {found} is newer than this Lantern "
@@ -578,6 +583,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """
     _prepare_database_file(db_path)
     conn = sqlite3.connect(str(db_path))
+    conn.text_factory = _decode_db_text
     try:
         apply_migrations(conn, db_path=db_path)
     except Exception:

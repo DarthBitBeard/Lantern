@@ -382,6 +382,40 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(len(parsed[1]), len(parsed[0]))
                 self.assertEqual(dict(zip(parsed[0], parsed[1]))["scan_id"], str(second))
 
+    def test_invalid_utf8_in_the_database_does_not_500(self):
+        conn = connect(self.db)
+        try:
+            scan_id = save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.10",
+                    "aa:bb:cc:dd:ee:10",
+                    hostname="ok",
+                    findings=[{
+                        "port": 80, "service": "http", "severity": "info",
+                        "title": "t", "fix": "f",
+                    }],
+                )],
+            )
+            conn.execute(
+                "UPDATE devices SET hostname = CAST(x'fffe3d41' AS TEXT) WHERE scan_id = ?",
+                (scan_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        for path in (
+            f"/api/v1/devices?scan_id={scan_id}",
+            f"/api/v1/findings?scan_id={scan_id}",
+            f"/api/v1/diffs?scan_id={scan_id}",
+            f"/api/v1/export?what=devices&format=json&scan_id={scan_id}",
+            f"/api/v1/export?what=findings&format=csv&scan_id={scan_id}",
+        ):
+            status, body, _ = self._request(path, token=self.token)
+            self.assertEqual(status, 200, (path, body[:240]))
+            self.assertNotIn("server_error", body)
+
     def test_findings_csv_export_defuses_titles_and_fixes(self):
         conn = connect(self.db)
         try:
