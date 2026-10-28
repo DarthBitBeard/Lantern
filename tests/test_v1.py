@@ -320,6 +320,13 @@ class ApiTests(unittest.TestCase):
         )
         findings = json.loads(body)["items"]
         self.assertEqual([item["severity"] for item in findings], ["critical", "info"])
+        status, body, _ = self._request(f"/api/v1/diffs?scan_id={second}", token=self.token)
+        diff = json.loads(body)
+        added = [item for item in diff["added"] if item["ip"] == "192.168.50.2"]
+        self.assertEqual(len(added), 1)
+        self.assertIn("owner", added[0])
+        self.assertIn("location", added[0])
+        self.assertIn("notes", added[0])
         status, body, _ = self._request("/api/v1/devices?limit=1234567890", token=self.token)
         self.assertEqual(status, 400, body)
         self.assertNotIn("1234567890", json.loads(body)["error"]["message"])
