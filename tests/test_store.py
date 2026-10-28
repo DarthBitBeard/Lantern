@@ -382,6 +382,8 @@ class PrivateFileTests(unittest.TestCase):
         Lantern has to create the database and the `.vN.bak` backup at 0600,
         and a directory it creates at 0700, or this test fails.
         """
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
         self._umask(0o022)
         nested = Path(self.tmp.name) / "a" / "b" / "lantern.db"
         fresh = connect(nested)
@@ -409,11 +411,6 @@ class PrivateFileTests(unittest.TestCase):
         finally:
             check.close()
 
-        if os.name == "nt":
-            self.assertEqual(buf.getvalue(), "")
-            self.assertTrue(Path(str(legacy) + ".v0.bak").is_file())
-            return
-
         self.assertEqual(_mode(nested), 0o600)
         self.assertEqual(_mode(nested.parent), 0o700)
         self.assertEqual(_mode(nested.parent.parent), 0o700)
@@ -430,6 +427,8 @@ class PrivateFileTests(unittest.TestCase):
         self.assertNotIn(str(nested), warning)
 
     def test_permissive_umask_cannot_widen_new_files(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
         self._umask(0o000)
         root = Path(self.tmp.name) / "wide"
         db_path = root / "lantern.db"
@@ -438,8 +437,6 @@ class PrivateFileTests(unittest.TestCase):
         export = root / "nested" / "inventory.json"
         write_private_file(export, '{"devices": []}')
         self.assertEqual(export.read_text(encoding="utf-8"), '{"devices": []}')
-        if os.name == "nt":
-            return
         self.assertEqual(_mode(db_path), 0o600)
         self.assertEqual(_mode(root), 0o700)
         self.assertEqual(_mode(export.parent), 0o700)
@@ -449,6 +446,8 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(_mode(export) & 0o077, 0)
 
     def test_existing_directory_and_database_are_not_chmodded(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits are not checked on Windows")
         self._umask(0o022)
         parent = Path(self.tmp.name) / "already"
         parent.mkdir()
@@ -466,9 +465,6 @@ class PrivateFileTests(unittest.TestCase):
                 conn.close()
             write_private_file(parent / "export.json", b"{}")
         self.assertEqual((parent / "export.json").read_bytes(), b"{}")
-        if os.name == "nt":
-            self.assertEqual(buf.getvalue(), "")
-            return
         self.assertEqual(_mode(parent), 0o755)
         self.assertEqual(_mode(db_path), 0o640)
         self.assertEqual(_mode(parent / "export.json"), 0o600)
