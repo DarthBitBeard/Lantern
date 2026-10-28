@@ -28,7 +28,7 @@ from .discovery import (
     validate_subnet,
 )
 from .ports import DEFAULT_PORTS, findings_for_ports
-from .report import describe_change, to_html, to_json
+from .report import describe_change, multi_scope_html, to_html, to_json
 from .scanner import scan_host
 from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope, validate_scope_name
 from .store import connect, list_scans, load_scan_with_diff, save_scan, write_private_file
@@ -695,13 +695,17 @@ def _resolve_scan_subnet(args) -> tuple[str, str | None]:
 
 
 def _dedupe_scopes(scopes):
-    """First occurrence of each scope name, in that order."""
+    """First occurrence of each scope name, in that order.
+
+    Names that differ only by case count as the same scope.
+    """
     seen: set[str] = set()
     chosen = []
     for scope in scopes:
-        if scope.name in seen:
+        key = scope.name.casefold()
+        if key in seen:
             continue
-        seen.add(scope.name)
+        seen.add(key)
         chosen.append(scope)
     return chosen
 
@@ -739,12 +743,20 @@ def _scopes_to_scan(args):
     return chosen
 
 
-def _print_scope_summary(ran: list[str], failed: list[tuple[str, str]], fmt: str) -> None:
+def _print_scope_summary(
+    ran: list[str],
+    failed: list[tuple[str, str]],
+    fmt: str,
+    scans: list[tuple[dict, dict | None]] | None = None,
+) -> None:
     if fmt == "json":
         print(json.dumps({
             "ran": ran,
             "failed": [{"scope": name, "error": error} for name, error in failed],
         }, indent=2))
+        return
+    if fmt == "html":
+        print(multi_scope_html(scans or [], failed))
         return
     print("Scopes ran: " + (", ".join(ran) if ran else "(none)"))
     if failed:
@@ -922,6 +934,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(str(exc))
             ran: list[str] = []
             failed: list[tuple[str, str]] = []
+            saved: list[tuple[dict, dict | None]] = []
             seen_hosts: set[str] = set()
             found: dict[str, dict] = {}
             for scope in chosen:
@@ -930,7 +943,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                     subnet = str(network)
                     scope_hosts = [str(ip) for ip in network.hosts()]
                     fresh = [ip for ip in scope_hosts if ip not in seen_hosts]
-                    if args.format == "text":
+                    if args.format != "json":
                         print(
                             f"Scanning {scope.name} {subnet} "
                             f"({network.num_addresses} addresses)...",
@@ -941,11 +954,14 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             found[device["ip"]] = device
                         seen_hosts.update(fresh)
                     devices = [found[ip] for ip in scope_hosts if ip in found]
-                    save_scan(conn, subnet, devices, demo=False, scope_name=scope.name)
+                    scan_id = save_scan(conn, subnet, devices, demo=False, scope_name=scope.name)
                     ran.append(scope.name)
+                    if args.format == "html":
+                        scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope.name)
+                        saved.append((scan, diff))
                 except Exception as exc:
                     failed.append((scope.name, str(exc) or exc.__class__.__name__))
-            _print_scope_summary(ran, failed, args.format)
+            _print_scope_summary(ran, failed, args.format, saved)
             return 1 if failed else 0
         try:
             subnet, scope_name = _resolve_scan_subnet(args)
@@ -973,8 +989,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             return _err(str(exc))
         scan, diff = load_scan_with_diff(conn, scope_name=scope_name)
         if scan is None or diff is None:
-            if scope_name:
-                print(f"Need at least two saved scans for scope {scope_name}.")
+            label = scope_name or (scan.get("scope_name") if scan else None)
+            if label:
+                print(f"Need at least two saved scans for scope {label}.")
             else:
                 print("Need at least two saved scans. Run `lantern demo` or `lantern scan` twice.")
             return 0

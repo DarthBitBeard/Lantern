@@ -42,6 +42,21 @@ class ValidateSubnetTests(unittest.TestCase):
         for text in ("10.0.0.0/24", "172.16.5.0/24", "192.168.0.0/24"):
             self.assertEqual(str(validate_subnet(text)), text)
 
+    def test_rejects_blocks_that_is_private_would_allow(self):
+        for text in (
+            "0.0.0.0/24",
+            "240.0.0.0/24",
+            "192.0.0.0/24",
+            "192.0.2.0/24",
+            "198.51.100.0/24",
+            "203.0.113.0/24",
+            "198.18.0.0/24",
+            "100.64.0.0/24",
+        ):
+            with self.assertRaises(ValueError, msg=text) as ctx:
+                validate_subnet(text)
+            self.assertIn("10.0.0.0/8", str(ctx.exception), text)
+
     def test_rejects_ipv6_loopback_link_local_and_garbage(self):
         for text in ("fd00::/64", "127.0.0.0/24", "169.254.0.0/24", "not a subnet", "", "192.168.1.0/"):
             with self.assertRaises(ValueError, msg=text):

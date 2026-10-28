@@ -27,6 +27,14 @@ IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 MAX_SCAN_HOSTS = 1024
 MIN_PREFIXLEN = 32 - (MAX_SCAN_HOSTS.bit_length() - 1)  # 22
 
+# A scope must sit entirely inside one of these. Python's is_private is
+# wider (0/8, 240/4, TEST-NET, 198.18/15, 192.0.0.0/24) and is not used.
+_RFC1918 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
 _EMPTY_MAC = "00:00:00:00:00:00"
 # Resolving this machine's hostname can wait on DNS for a long time on macOS.
 # Auto-detect must not stall a scan or the dashboard on that lookup.
@@ -47,8 +55,11 @@ def validate_subnet(text: str) -> ipaddress.IPv4Network:
         raise ValueError(f"Not a valid subnet: {text!r}. Example: 192.168.1.0/24") from exc
     if network.version != 4:
         raise ValueError("Lantern scans IPv4 subnets only.")
-    if not network.is_private or network.is_loopback or network.is_link_local:
-        raise ValueError("Lantern only scans private home networks, not public IPs.")
+    if not any(network.subnet_of(block) for block in _RFC1918):
+        raise ValueError(
+            "Lantern only scans private home networks "
+            "(10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)."
+        )
     if network.prefixlen < MIN_PREFIXLEN:
         raise ValueError(
             f"Subnet is too large: {text} has {network.num_addresses} addresses. "
@@ -133,10 +144,10 @@ def guess_subnet() -> str | None:
     """Guess the local /24 from the machine's own IP. Returns a string or None."""
     for local_ip in _local_ipv4_candidates():
         try:
-            addr = ipaddress.ip_address(local_ip)
+            host = ipaddress.ip_network(f"{local_ip}/32", strict=False)
         except ValueError:
             continue
-        if addr.is_private and not addr.is_loopback and not addr.is_link_local:
+        if any(host.subnet_of(block) for block in _RFC1918):
             return str(ipaddress.ip_network(f"{local_ip}/24", strict=False))
     return None
 

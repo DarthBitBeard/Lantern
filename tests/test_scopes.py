@@ -129,6 +129,16 @@ class LoadScopesTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             select_scope(scopes, "office")
         self.assertIn("Unknown scope", str(ctx.exception))
+        self.assertEqual(select_scope(scopes, "LAB").subnet, "10.1.0.0/24")
+
+    def test_case_variant_scope_names_are_rejected(self):
+        self.write(
+            '[scopes.home]\nsubnet = "192.168.1.0/24"\n'
+            '[scopes.Home]\nsubnet = "10.1.0.0/24"\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("except for case", str(ctx.exception))
 
     def test_rejects_scope_config_larger_than_64_kib(self):
         marker = "NOT-A-PARSE-ERROR-MARKER"

@@ -140,6 +140,29 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(previous_scan_id(self.conn, home_b, "home"), home_a)
         self.assertIsNone(load_scan_with_diff(self.conn, home_b, scope_name="lab")[0])
 
+    def test_default_diff_stays_inside_the_scans_own_scope(self):
+        save_scan(self.conn, "192.168.50.0/24", [_dev("192.168.50.10")], scope_name="home")
+        save_scan(self.conn, "10.50.0.0/24", [_dev("10.50.0.10")], scope_name="lab")
+        home_b = save_scan(
+            self.conn, "192.168.50.0/24",
+            [_dev("192.168.50.10"), _dev("192.168.50.11")],
+            scope_name="home",
+        )
+        lab_b = save_scan(self.conn, "10.50.0.0/24", [_dev("10.50.0.10")], scope_name="lab")
+        bare = save_scan(self.conn, "10.9.0.0/24", [_dev("10.9.0.9")])
+
+        scan, diff = load_scan_with_diff(self.conn, lab_b)
+        self.assertEqual(scan["scope_name"], "lab")
+        self.assertEqual(diff["added"], [])
+        self.assertEqual(diff["removed"], [])
+        scan, diff = load_scan_with_diff(self.conn, home_b)
+        self.assertEqual([d["ip"] for d in diff["added"]], ["192.168.50.11"])
+        self.assertFalse(any(d["ip"].startswith("10.") for d in diff["added"] + diff["removed"]))
+        scan, diff = load_scan_with_diff(self.conn, bare)
+        self.assertIsNone(scan["scope_name"])
+        self.assertIsNone(diff)
+        self.assertIsNone(previous_scan_id(self.conn, bare, None))
+
     def test_set_trusted_upsert_and_untrust(self):
         set_trusted(self.conn, "aa:bb:cc:dd:ee:ff", "TV", True)
         set_trusted(self.conn, "AA:BB:CC:DD:EE:FF", "", False)

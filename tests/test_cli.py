@@ -457,6 +457,86 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(code, 2, command)
                 self.assertIn("not allowed", err)
 
+    def test_all_refuses_non_rfc1918_before_probe(self):
+        path = self._write_scopes('[scopes.zero]\nsubnet = "0.0.0.0/24"\n', name="zero.toml")
+        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+            code, _, err = self.run_cli("scan", "--config", str(path), "--all")
+        self.assertEqual(code, 2, err)
+        self.assertIn("10.0.0.0/8", err)
+        scan_hosts.assert_not_called()
+        run_scan.assert_not_called()
+
+    def test_unique_address_cap_allows_1024_and_refuses_1025(self):
+        allowed = self._write_scopes(
+            '[scopes.left]\nsubnet = "10.0.0.0/23"\n'
+            '[scopes.right]\nsubnet = "10.0.2.0/23"\n',
+            name="cap1024.toml",
+        )
+        refused = self._write_scopes(
+            '[scopes.wide]\nsubnet = "10.4.0.0/22"\n'
+            '[scopes.one]\nsubnet = "10.8.0.1/32"\n',
+            name="cap1025.toml",
+        )
+        with mock.patch.object(cli, "_scan_hosts", return_value=[]) as scan_hosts:
+            code, out, err = self.run_cli("scan", "--config", str(allowed), "--all")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(scan_hosts.call_count, 2)
+        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+            code, _, err = self.run_cli("scan", "--config", str(refused), "--all")
+        self.assertEqual(code, 2, err)
+        self.assertIn("1025 unique addresses", err)
+        scan_hosts.assert_not_called()
+
+    def test_case_variant_scope_flags_scan_once(self):
+        path = self._two_scopes()
+        with mock.patch.object(cli, "_scan_hosts", return_value=[]) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "home", "--scope", "HOME",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(scan_hosts.call_count, 1)
+        self.assertIn("Scopes ran: home", out)
+        self.assertNotIn("HOME", out)
+
+    def test_diff_without_scope_does_not_cross_scopes(self):
+        path = self._two_scopes()
+
+        def fake(hosts, ports=None):
+            if hosts[0].startswith("192.168.50."):
+                return [self._device("192.168.50.10")]
+            return [self._device("10.50.0.10")]
+
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake):
+            code, _, err = self.run_cli("scan", "--config", str(path), "--all")
+            self.assertEqual(code, 0, err)
+            code, _, err = self.run_cli("scan", "--config", str(path), "--all")
+            self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("diff")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing changed", out)
+        self.assertNotIn("192.168.50.10", out)
+        code, out, err = self.run_cli("report")
+        report = json.loads(out)
+        self.assertEqual(report["scope_name"], "lab")
+        self.assertEqual(report["diff"]["added"], [])
+        self.assertEqual(report["diff"]["removed"], [])
+
+    def test_all_html_is_one_html_document(self):
+        path = self._two_scopes()
+        with mock.patch.object(cli, "_scan_hosts", return_value=[]):
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--all", "--format", "html",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.lstrip().lower().startswith("<!doctype html"), out[:80])
+        self.assertEqual(out.lower().count("<!doctype html"), 1)
+        self.assertIn("scope home", out)
+        self.assertIn("scope lab", out)
+        self.assertNotIn("Scopes ran: home, lab\n", out)
+
     def test_run_refuses_before_probe_when_unique_addresses_exceed_1024(self):
         parts = []
         for i in range(40):
