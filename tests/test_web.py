@@ -519,6 +519,12 @@ class AllowlistUnitTests(unittest.TestCase):
         bad_values = (
             "",
             "*",
+            "*.home",
+            "192.168.1.0/24",
+            "0.0.0.0",
+            "0.0.0.0:8068",
+            "[::]",
+            "[fe80::1%eth0]",
             "http://dash.example",
             "bad host",
             "::1",
@@ -551,6 +557,363 @@ class AllowlistUnitTests(unittest.TestCase):
         self.assertIsNone(webapp.origin_allowlist_key("http://evil.example:8068/steal"))
         self.assertIsNone(webapp.origin_allowlist_key("javascript:alert(1)"))
         self.assertIsNone(webapp.origin_allowlist_key("http://user:pass@127.0.0.1:8068"))
+
+    def test_lan_allowlist_is_only_the_configured_address(self):
+        allowed = webapp.build_lan_allowlist("192.168.1.50", 8068)
+        self.assertEqual(allowed, frozenset({"192.168.1.50:8068"}))
+        self.assertNotIn("127.0.0.1:8068", allowed)
+        self.assertNotIn("localhost:8068", allowed)
+        self.assertNotIn("[::1]:8068", allowed)
+        self.assertNotIn("0.0.0.0:8068", allowed)
+
+        with_name = webapp.build_lan_allowlist(
+            "192.168.1.50", 8068, ["dashboard.home", "10.1.1.9:8443"],
+        )
+        self.assertEqual(
+            with_name,
+            frozenset({
+                "192.168.1.50:8068",
+                "dashboard.home:8068",
+                "10.1.1.9:8443",
+            }),
+        )
+
+        unspecified = webapp.build_lan_allowlist("0.0.0.0", 8068, ["192.168.1.50"])
+        self.assertEqual(unspecified, frozenset({"192.168.1.50:8068"}))
+        for host in ("0.0.0.0", "::", "0.0.0.0"):
+            with self.assertRaises(ValueError):
+                webapp.build_lan_allowlist(host, 8068)
+            with self.assertRaises(ValueError):
+                webapp.build_lan_allowlist(host, 8068, ["dashboard.home"])
+
+    def test_banner_names_the_mode_and_omits_the_token(self):
+        token = "banner-token-must-not-appear-here"
+        loopback = "\n".join(webapp.startup_lines(
+            "127.0.0.1", 8068, lan_bound=False,
+            allowed_hosts=frozenset({"127.0.0.1:8068", "localhost:8068", "[::1]:8068"}),
+        ))
+        self.assertIn("http://127.0.0.1:8068/", loopback)
+        self.assertIn("loopback only", loopback)
+        self.assertNotIn("no login", loopback)
+        self.assertNotIn("local only", loopback)
+        self.assertNotIn(token, loopback)
+
+        lan = "\n".join(webapp.startup_lines(
+            "0.0.0.0", 8068, lan_bound=True,
+            allowed_hosts=frozenset({"192.168.1.50:8068"}),
+        ))
+        self.assertIn("every API call requires the startup token", lan)
+        self.assertIn("192.168.1.50:8068", lan)
+        self.assertNotIn("no login", lan)
+        self.assertNotIn(token, lan)
+
+        v6 = "\n".join(webapp.startup_lines(
+            "::1", 8068, lan_bound=False, allowed_hosts=frozenset({"[::1]:8068"}),
+        ))
+        self.assertIn("http://[::1]:8068/", v6)
+
+
+class LanModeTests(unittest.TestCase):
+    """LAN rules on a 127.0.0.1 listener. The allowlist host is not the socket."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.token = "LanternTokenValue0123456789abcdEF"
+        self.lan_host = "192.168.1.50"
+        with mock.patch("lantern.webapp.secrets.token_urlsafe", side_effect=AssertionError("second token")):
+            self.server = make_server(
+                Path(self.tmp.name) / "lan.db",
+                host=self.lan_host,
+                listen_host="127.0.0.1",
+                port=0,
+                lan_bound=True,
+                api_token=self.token,
+            )
+        self.port = self.server.server_address[1]
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.host = f"{self.lan_host}:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        server = getattr(self, "server", None)
+        if server is not None:
+            self.server = None
+            server.shutdown()
+            server.server_close()
+        tmp = getattr(self, "tmp", None)
+        if tmp is not None:
+            self.tmp = None
+            tmp.cleanup()
+
+    def request(self, path, method="GET", body=None, headers=None, token=False, raw=None):
+        hdrs = {"Host": self.host, "Content-Type": "application/json"}
+        if token is not False:
+            hdrs[webapp.TOKEN_HEADER] = self.token if token is None else token
+        hdrs.update(headers or {})
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.read().decode(), resp.headers
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode(), exc.headers
+
+    def test_get_requires_the_one_token_and_the_page_does_not_hold_it(self):
+        self.assertEqual(self.server.RequestHandlerClass.api_token, self.token)
+        self.assertEqual(
+            self.server.RequestHandlerClass.allowed_hosts,
+            frozenset({self.host}),
+        )
+        for path in ("/api/scans", "/api/status", "/api/report?format=json", "/api/report?format=html"):
+            status, body, _ = self.request(path)
+            self.assertEqual(status, 403, (path, body))
+            self.assertNotIn(self.token, body)
+
+        status, body, _ = self.request("/api/scans", token=self.token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["scans"], [])
+
+        status, body, _ = self.request("/api/scans", token="not-the-lan-token-value-at-all")
+        self.assertEqual(status, 403, body)
+        status, body, _ = self.request("/api/scans", token=self.token[:-1])
+        self.assertEqual(status, 403, body)
+
+        status, page, _ = self.request("/")
+        self.assertEqual(status, 200, page)
+        self.assertNotIn(self.token, page)
+        self.assertNotIn(webapp.TOKEN_PLACEHOLDER, page)
+        self.assertIn('name="lantern-auth" content="token"', page)
+        self.assertIn('id="token-entry"', page)
+        status, page, _ = self.request("/index.html")
+        self.assertNotIn(self.token, page)
+        status, script, _ = self.request("/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("sessionStorage", script)
+        self.assertIn("X-Lantern-Token", script)
+        self.assertNotIn(self.token, script)
+
+        status, body, _ = self.request(
+            "/api/scans",
+            headers={"Host": f"127.0.0.1:{self.port}"},
+        )
+        self.assertEqual(status, 403, body)
+        status, body, _ = self.request(
+            "/api/scans",
+            token=self.token,
+            headers={"Host": f"127.0.0.1:{self.port}"},
+        )
+        self.assertEqual(status, 403, body)
+        status, body, _ = self.request(
+            "/api/report?format=html",
+            headers={"Host": f"127.0.0.1:{self.port}"},
+        )
+        self.assertEqual(status, 403, body)
+
+    def test_post_and_report_with_the_token_and_a_foreign_origin_still_fails(self):
+        evil = f"evil.example:{self.port}"
+        status, body, _ = self.request(
+            "/api/demo",
+            method="POST",
+            body={},
+            token=self.token,
+            headers={"Host": evil, "Origin": f"http://{evil}"},
+        )
+        self.assertEqual(status, 403, body)
+        status, body, _ = self.request(
+            "/api/demo",
+            method="POST",
+            body={},
+            token=self.token,
+            headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(status, 403, body)
+        status, body, _ = self.request("/api/demo", method="POST", body={})
+        self.assertEqual(status, 403, body)
+
+        status, body, _ = self.request("/api/demo", method="POST", body={}, token=self.token)
+        self.assertEqual(status, 200, body)
+        status, report, _ = self.request("/api/report?format=html", token=self.token)
+        self.assertEqual(status, 200, report)
+        self.assertIn("Telnet", report)
+        status, report, _ = self.request("/api/report?format=json", token=self.token)
+        self.assertEqual(status, 200, report)
+        status, blocked, _ = self.request("/api/report?format=html")
+        self.assertEqual(status, 403, blocked)
+        self.assertNotIn("Telnet", blocked)
+
+        blob = (Path(self.tmp.name) / "lan.db").read_bytes()
+        self.assertNotIn(self.token.encode(), blob)
+
+    def test_token_compare_is_constant_time_and_not_logged(self):
+        with mock.patch("lantern.webapp.hmac.compare_digest", return_value=True) as compare:
+            status, body, _ = self.request("/api/scans", token=self.token)
+        self.assertEqual(status, 200, body)
+        compare.assert_called_with(self.token, self.token)
+
+        self.server.RequestHandlerClass.debug = True
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                status, body, _ = self.request("/api/scans", token=self.token)
+                self.assertEqual(status, 200, body)
+                status, page, _ = self.request("/")
+                self.assertNotIn(self.token, page)
+        finally:
+            self.server.RequestHandlerClass.debug = False
+        logged = err.getvalue()
+        self.assertIn("GET /api/scans", logged)
+        self.assertNotIn(self.token, logged)
+        self.assertNotIn(webapp.TOKEN_HEADER, logged)
+
+
+class HardeningTests(unittest.TestCase):
+    """F-05, F-06, F-13, and N-3. Listeners are loopback only."""
+
+    setUp = WebTests.setUp
+    tearDown = WebTests.tearDown
+    request = WebTests.request
+    _token_in = WebTests._token_in
+    _fetch_token = WebTests._fetch_token
+
+    def test_errors_do_not_return_exception_text(self):
+        secret = "secret-path-/tmp/lantern-should-not-leak"
+        err = io.StringIO()
+        with mock.patch("lantern.webapp.list_scans", side_effect=RuntimeError(secret)), \
+                contextlib.redirect_stderr(err):
+            status, body, _ = self.request("/api/scans")
+        self.assertEqual(status, 500, body)
+        self.assertEqual(json.loads(body), {"error": webapp.SERVER_ERROR_MESSAGE})
+        self.assertNotIn(secret, body)
+        self.assertNotIn("Traceback", body)
+        self.assertNotIn("RuntimeError", body)
+        self.assertNotIn(secret, err.getvalue())
+
+        self.server.RequestHandlerClass.debug = True
+        err = io.StringIO()
+        try:
+            with mock.patch("lantern.webapp.list_scans", side_effect=RuntimeError(secret)), \
+                    contextlib.redirect_stderr(err):
+                status, body, _ = self.request("/api/scans")
+        finally:
+            self.server.RequestHandlerClass.debug = False
+        self.assertEqual(status, 500, body)
+        self.assertNotIn(secret, body)
+        self.assertIn(secret, err.getvalue())
+
+        status, body, _ = self.request("/api/scans/" + "9" * 40)
+        self.assertEqual(status, 400, body)
+        self.assertNotIn("SQLite", body)
+        self.assertNotIn("Python int", body)
+        self.assertNotIn("Traceback", body)
+
+    def test_absolute_form_targets_are_rejected(self):
+        port = self.port
+
+        def send(payload: bytes) -> bytes:
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                sock.sendall(payload)
+                data = b""
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        break
+                    data += chunk
+            return data
+
+        absolute_evil = (
+            f"GET http://evil.example:{port}/api/scans HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
+        data = send(absolute_evil)
+        self.assertTrue(data.startswith(b"HTTP/1.1 400"), data)
+        self.assertNotIn(b"evil.example", data)
+        self.assertNotIn(self.token.encode(), data)
+
+        absolute_loopback = (
+            f"GET http://127.0.0.1:{port}/api/scans HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
+        data = send(absolute_loopback)
+        self.assertTrue(data.startswith(b"HTTP/1.1 400"), data)
+
+        evil_host = (
+            f"GET http://127.0.0.1:{port}/api/scans HTTP/1.1\r\n"
+            f"Host: evil.example:{port}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
+        data = send(evil_host)
+        self.assertTrue(data.startswith(b"HTTP/1.1 403"), data)
+
+        origin = (
+            f"GET /api/scans HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode()
+        data = send(origin)
+        self.assertTrue(data.startswith(b"HTTP/1.1 200"), data)
+
+    def test_connection_cap_and_timeout(self):
+        self.assertEqual(webapp.MAX_BODY_BYTES, 64 * 1024)
+        self.assertEqual(webapp.REQUEST_TIMEOUT_SECONDS, 10)
+        self.assertEqual(self.server.RequestHandlerClass.timeout, 10)
+
+        server = make_server(
+            Path(self.tmp.name) / "cap.db",
+            host="127.0.0.1",
+            port=0,
+            max_connections=1,
+            request_timeout=2,
+        )
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        self.assertEqual(server.server_address[0], "127.0.0.1")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        held = socket.create_connection(("127.0.0.1", port), timeout=2)
+        self.addCleanup(held.close)
+        import time
+        time.sleep(0.2)
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as extra:
+            extra.settimeout(2)
+            data = b""
+            while True:
+                try:
+                    chunk = extra.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        self.assertIn(b"503", data)
+        self.assertNotIn(b"Traceback", data)
+
+    def test_ipv6_loopback_accepts_connections(self):
+        try:
+            server = make_server(Path(self.tmp.name) / "v6.db", host="::1", port=0)
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback is not available: {exc}")
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertEqual(server.address_family, socket.AF_INET6)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://[::1]:{port}"
+        try:
+            status, page, _ = self.request("/", base=base)
+        except urllib.error.URLError as exc:
+            self.skipTest(f"IPv6 loopback is not reachable: {exc}")
+        self.assertEqual(status, 200, page)
+        self.assertNotIn(self.token, page)
+        match = re.search(r'<meta name="lantern-token" content="([^"]+)"', page)
+        self.assertIsNotNone(match, page)
+        self.assertGreaterEqual(len(match.group(1)), 32)
+        self.assertNotEqual(match.group(1), self.token)
+        self.assertEqual(server.RequestHandlerClass.api_token, match.group(1))
 
 
 if __name__ == "__main__":

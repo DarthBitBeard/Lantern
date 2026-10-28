@@ -111,25 +111,31 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 - A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused.
 - No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
 - Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
-- The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set. For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
+- The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set, and warns on stderr if that directory is looser than 0700 (for example 0755). For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
 
 Only scan networks you own or have explicit permission to scan. See [SECURITY.md](SECURITY.md).
 
 ## Threat model
 
-Lantern is a local admin tool. The dashboard has no login. The checks below are there to stop another website in the same browser, not to keep out a person who can already open the page.
+Lantern is a local admin tool. The dashboard has no accounts. On loopback the checks stop another website in the same browser. A LAN bind is a separate, explicit choice and requires one startup token on every API call.
 
 What it resists:
 
 - Another site triggering a scan or reading the inventory (cross-site requests, and DNS rebinding where a public name starts pointing at `127.0.0.1`).
 - A scan of a network that is not a small private range.
+- A LAN client calling the API without the startup token. In that mode the page does not contain the token.
 
 What it does not resist:
 
-- Anyone who can open an allowed Host can read the page, and the page contains the API token. That person can call the API. `--allow-host` does not add a login, and binding to something other than loopback (`--host`) is still an explicit choice with the same warning as before.
+- On loopback, anyone who can open an allowed Host can read the page, and that page contains the token used for `POST`. That person can call the API. `--allow-host` does not add a login.
+- On a LAN bind, anyone who has the startup token can read the inventory and start scans. Treat that token like a password. It is not an account system.
 - A person at the keyboard, or another local user who can read the SQLite file.
 
-Every request, including `GET` and the index, must send a `Host` of `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, or a host you named with `--allow-host`. Nothing else is accepted. A name you did not list is refused even when it resolves to loopback, which is the rebinding case. State-changing `POST /api/*` calls also require `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe`, embeds it in the dashboard page, and compares it with `hmac.compare_digest`. It is not written to the log. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` (curl, or another non-browser client) is accepted only when the token is valid.
+Every request must send an allowed `Host`. On loopback that is `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, plus any host you named with `--allow-host`. With `--allow-lan`, the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added, and a wildcard is not accepted. A name you did not list is refused even when it resolves to loopback.
+
+Loopback `POST /api/*` requires `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe` (256 bits), embeds it in the dashboard page, and compares it with `hmac.compare_digest`. It is not written to the log. `GET` on loopback needs the Host check and does not need the token. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` is accepted only when the token is valid.
+
+A LAN bind uses that same header for `POST` and for `GET` of inventory, status, and reports. The token is the one the CLI loaded or generated. It is not embedded in the page and it is not written to the log.
 
 Scanning is unchanged: private RFC1918 ranges only, at most 1024 addresses, no loopback or link-local targets. The Host allowlist does not widen that.
 
@@ -142,7 +148,7 @@ python3 -m lantern web
 # open http://127.0.0.1:8068/
 ```
 
-API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` is loopback on this port or a host passed with `--allow-host`.
+API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` is on the allowlist. On loopback that is this port's loopback names, or a host passed with `--allow-host`. With `--allow-lan` it is only the bind address and `--allow-host`.
 
 | Route | Returns |
 | --- | --- |
@@ -155,13 +161,15 @@ API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` i
 | `POST /api/demo` `{}` | saves the two demo scans |
 | `POST /api/trust` `{"mac": "...", "label": "...", "trusted": true}` | labels a device by MAC |
 
-`GET` needs an allowed `Host` and does not need the token. `POST /api/*` also needs the header `X-Lantern-Token`. The dashboard reads that value from `<meta name="lantern-token">` in the page and sends it on every POST. A new token is generated each time the process starts. It is not printed and it is not written to the request log.
+On loopback, `GET` needs an allowed `Host` and does not need the token. `POST /api/*` also needs the header `X-Lantern-Token`. The dashboard reads that value from `<meta name="lantern-token">` in the page and sends it on POST. A new token is generated each time the process starts. It is not printed and it is not written to the request log.
 
-POST bodies must be JSON with `Content-Type: application/json` and under 64 KiB (415 or 413 otherwise). If a POST includes `Origin`, that origin's host and port must be on the same allowlist (`http` or `https` only). A POST with no `Origin` is accepted only when the token is valid. A bad Host, a missing or wrong token, or a disallowed Origin is a generic 403. Scan results include trusted labels and `trusted`/`known` flags per device.
+With `--allow-lan`, `GET /api/*` (inventory, status, and HTML or JSON reports) needs the same header as `POST`. The page does not contain the token. Paste it once into the dashboard; the browser keeps it in `sessionStorage` for that tab and sends it as `X-Lantern-Token`. Static files such as `app.js` stay available without the token. The comparison is `hmac.compare_digest`. The token is not written to the log, including `--debug`.
 
-`--allow-host` is repeatable. `python3 -m lantern web --allow-host dashboard.home` also accepts `Host: dashboard.home:<port>`. `python3 -m lantern web --allow-host dashboard.home:8443` accepts that exact host and port. Bracket an IPv6 address (`--allow-host '[2001:db8::5]'`). The default allowlist is only `127.0.0.1`, `localhost`, and `[::1]` on the bound port.
+POST bodies must be JSON with `Content-Type: application/json` and at most 64 KiB (415 or 413 otherwise). If a POST includes `Origin`, that origin's host and port must be on the same allowlist (`http` or `https` only). A POST with no `Origin` is accepted only when the token is valid. A bad Host, a missing or wrong token, or a disallowed Origin is a generic 403. An unexpected server error is a generic 500; the exception text is logged only with `--debug`. Each connection has a 10 second socket timeout, and the process caps concurrent connections. A request target must be a path; an absolute URL in the request line is a 400. Scan results include trusted labels and `trusted`/`known` flags per device.
 
-The dashboard binds to loopback by default (`127.0.0.1`) and has no login, by design for local use. Any other address, including `0.0.0.0`, is refused unless you also pass `--allow-lan`. That flag does not open the port by itself. Until the dashboard can require a startup API token, Lantern exits with `requires S1 token support` and does not listen. When that token parameter exists on the server, `--allow-lan` generates a token with `secrets.token_urlsafe`, prints it once on stderr, and prints a loud warning that the bind is reachable beyond this machine. Prefer an SSH tunnel or Tailscale to `127.0.0.1`. Never expose port 8068 to the internet.
+`--allow-host` is repeatable. `python3 -m lantern web --allow-host dashboard.home` also accepts `Host: dashboard.home:<port>`. `python3 -m lantern web --allow-host dashboard.home:8443` accepts that exact host and port. Bracket an IPv6 address (`--allow-host '[2001:db8::5]'`). `0.0.0.0`, `::`, a zone id such as `[fe80::1%eth0]`, a wildcard, and a CIDR are rejected. On loopback the default allowlist is only `127.0.0.1`, `localhost`, and `[::1]` on the bound port. `::1` is a real IPv6 loopback listener, not only an allowed Host value.
+
+The dashboard binds to loopback by default (`127.0.0.1`). Any other address, including `0.0.0.0` and `::`, is refused unless you also pass `--allow-lan`. That flag still does not open the port by itself. It exits 2, before listening, unless it has a token of at least 128 bits (22 urlsafe characters). The token comes from `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal. The generated token is printed once on that terminal and nowhere else. When stderr is not a terminal, which is how `docker logs` works, Lantern does not generate or print a token; set the file or the environment variable. The token is not written to the database or the request log. `--host 0.0.0.0` or `--host ::` also needs `--allow-host` set to the LAN address clients will send, because the unspecified address is not put on the allowlist. Prefer an SSH tunnel or Tailscale to `127.0.0.1`. Never expose port 8068 to the internet.
 
 Docker, for a homelab host:
 
@@ -175,9 +183,9 @@ The compose file uses host networking so a scan can see the host LAN (the ARP ca
 
 The container runs as uid 10001, not root. Compose drops every capability (`--cap-drop ALL`), makes the root filesystem read-only, mounts a tmpfs on `/tmp`, keeps the SQLite file on the `/data` volume, and sets `no-new-privileges`. ICMP ping needs `CAP_NET_RAW` and a ping binary. This image adds neither. TCP connect scans and the host ARP cache work with all capabilities dropped. A setuid or file-capability ping would not help: `no-new-privileges` ignores both. The comments in `Dockerfile` and `docker-compose.yml` record the same flags.
 
-To opt in to a LAN bind, override the command with `--host 0.0.0.0` and `--allow-lan` (the compose file has the snippet). Until API token support lands, that command refuses to start. When it does start, read the one-time token from the logs. Prefer Tailscale or an SSH tunnel instead.
+To opt in to a LAN bind, put the token in a file mode 0400 owned by uid 10001 and point `LANTERN_API_TOKEN_FILE` at it (the compose file has a commented `secrets:` snippet). Override the command with `--host 0.0.0.0`, `--allow-lan`, and `--allow-host` set to the LAN address. Do not put the token in `docker-compose.yml`. The container has no terminal, so Lantern will not print a token into `docker logs`. Without the file or `LANTERN_API_TOKEN`, the command exits 2 and does not listen. Prefer Tailscale or an SSH tunnel instead.
 
-CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command's listening socket is `127.0.0.1:8068`, a non-loopback bind without `--allow-lan` is refused, and `--allow-lan` does not start an unauthenticated listener. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
+CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command's listening socket is `127.0.0.1:8068`, a non-loopback bind without `--allow-lan` is refused, `--allow-lan` without a token is refused, and a start that uses a token file does not put that token in `docker logs`. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
 
 ## What it scans
 

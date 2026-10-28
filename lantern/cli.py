@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import ipaddress
 import json
+import os
 import secrets
 import sqlite3
+import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -114,16 +115,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="HOST",
-        help="Extra Host header to accept, besides 127.0.0.1, localhost, and [::1] "
-             "on the bound port. Repeatable. A value with no port uses the bound port.",
+        help="Extra Host header to accept. On loopback the defaults are "
+             "127.0.0.1, localhost, and [::1] on the bound port. With --allow-lan, "
+             "only this list and the explicit bind address are accepted. "
+             "Repeatable. A value with no port uses the bound port. "
+             "Unspecified addresses and zone ids are rejected.",
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
     web_p.add_argument(
         "--allow-lan",
         action="store_true",
         help=(
-            "Allow a non-loopback bind. Refused until the dashboard can require "
-            "a startup API token. When that exists, the token is printed once."
+            "Allow a non-loopback bind. Requires one startup API token from "
+            "LANTERN_API_TOKEN_FILE, else LANTERN_API_TOKEN, else an interactive "
+            "terminal. The token is never written to the log. Binding 0.0.0.0 or "
+            ":: also needs --allow-host with the LAN address clients will use."
         ),
     )
     return parser
@@ -134,20 +140,24 @@ def _err(message: str) -> int:
     return 2
 
 
-# Keyword names S1 may add to webapp.serve() for the startup API token.
-# The first one present is the one the CLI fills in. A **kwargs catch-all
-# does not count: passing a token the server ignores would still be an
-# unauthenticated LAN bind.
-_TOKEN_PARAM_NAMES = ("api_token", "token", "startup_token")
+TOKEN_FILE_ENV = "LANTERN_API_TOKEN_FILE"
+TOKEN_ENV = "LANTERN_API_TOKEN"
 
 
 class WebBind(NamedTuple):
-    """Decision for `lantern web` before the server is constructed."""
+    """Decision for `lantern web` before the server is constructed.
+
+    ``token`` is passed into ``serve(api_token=...)`` when ``lan_bound`` is
+    set. It is printed only when ``print_token`` is true, which is an
+    auto-generated token on an interactive terminal. ``warning`` never
+    contains the token.
+    """
 
     error: str | None = None
     warning: str | None = None
     token: str | None = None
-    token_param: str | None = None
+    lan_bound: bool = False
+    print_token: bool = False
 
 
 def is_loopback_host(host: str) -> bool:
@@ -172,29 +182,15 @@ def is_loopback_host(host: str) -> bool:
 
 
 def new_api_token() -> str:
-    """One startup token. Printed once; never written to the database."""
+    """One startup token. 256 bits. Never written to the database or the log."""
     return secrets.token_urlsafe(32)
 
 
-def webapp_token_param(serve_fn) -> str | None:
-    """Keyword `serve()` accepts for a startup API token, or None.
-
-    None means S1's token check is not in this process. Callers must not
-    listen on a non-loopback address in that case.
-    """
+def _stderr_is_tty() -> bool:
     try:
-        params = inspect.signature(serve_fn).parameters
-    except (TypeError, ValueError):
-        return None
-    allowed = (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    )
-    for name in _TOKEN_PARAM_NAMES:
-        param = params.get(name)
-        if param is not None and param.kind in allowed:
-            return name
-    return None
+        return bool(sys.stderr.isatty())
+    except Exception:
+        return False
 
 
 def _load_serve():
@@ -202,13 +198,133 @@ def _load_serve():
     return serve
 
 
-def resolve_web_bind(host: str, allow_lan: bool, token_param: str | None,
-                      token_factory=None) -> WebBind:
+def _read_token_file(path: str) -> str:
+    """Read a token file. The error does not include the file contents."""
+    file_path = Path(path)
+    try:
+        data = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"Cannot read {TOKEN_FILE_ENV} ({file_path}): {exc.strerror or exc}. "
+            "Refusing to start."
+        ) from exc
+    token = data.strip()
+    from .webapp import api_token_error
+
+    if api_token_error(token):
+        raise ValueError(
+            f"{TOKEN_FILE_ENV} does not contain a valid API token "
+            "(at least 128 bits, 22 urlsafe characters). Refusing to start."
+        )
+    return token
+
+
+def _warn_token_file_mode(path: str) -> None:
+    """Warn when the token file is group- or world-readable. Do not chmod it."""
+    if os.name == "nt":
+        return
+    file_path = Path(path)
+    try:
+        mode = stat.S_IMODE(file_path.stat().st_mode)
+    except OSError:
+        return
+    if mode & 0o077 == 0:
+        return
+    try:
+        print(
+            f"Warning: {file_path} is readable by group or others (mode {mode:04o}). "
+            "A token file should be mode 0400. Lantern will not change it.",
+            file=sys.stderr,
+        )
+    except OSError:
+        return
+
+
+def load_api_token(environ: dict, *, tty: bool, token_factory=None):
+    """Resolve the LAN token. Returns (token, error, print_token, source).
+
+    Precedence is ``LANTERN_API_TOKEN_FILE``, then ``LANTERN_API_TOKEN``,
+    then an auto-generated token. Generation happens only on an interactive
+    terminal, because a non-TTY stderr is what ``docker logs`` stores.
+    ``error`` and the caller’s warning never contain the token. ``source``
+    is ``file``, ``env``, ``generated``, or None.
+    """
+    from .webapp import api_token_error
+
+    if TOKEN_FILE_ENV in environ:
+        raw_path = environ.get(TOKEN_FILE_ENV)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None, (
+                f"{TOKEN_FILE_ENV} is empty. Refusing to start."
+            ), False, None
+        try:
+            token = _read_token_file(raw_path.strip())
+        except ValueError as exc:
+            return None, str(exc), False, None
+        _warn_token_file_mode(raw_path.strip())
+        return token, None, False, "file"
+
+    if TOKEN_ENV in environ:
+        raw = environ.get(TOKEN_ENV)
+        token = raw.strip() if isinstance(raw, str) else ""
+        if api_token_error(token):
+            return None, (
+                f"refusing to start: {TOKEN_ENV} is missing or shorter than "
+                "128 bits (22 urlsafe characters)."
+            ), False, None
+        return token, None, False, "env"
+
+    if not tty:
+        return None, (
+            "refusing to start without a valid API token. "
+            f"Set {TOKEN_FILE_ENV} or {TOKEN_ENV}. "
+            "An auto-generated token is printed only on an interactive terminal "
+            "and is never written to logs."
+        ), False, None
+
+    token = (token_factory or new_api_token)()
+    if api_token_error(token):
+        return None, (
+            "refusing to start without a valid API token "
+            "(at least 128 bits, 22 urlsafe characters)."
+        ), False, None
+    return token, None, True, "generated"
+
+
+def _lan_warning(host: str, allowed: frozenset[str], source: str | None) -> str:
+    lines = [
+        "WARNING: Lantern is binding beyond loopback.",
+        f"WARNING: listen address {host} is reachable from other machines.",
+        "WARNING: allowed Host values: " + ", ".join(sorted(allowed)),
+        "WARNING: anyone with the token has full control; GET data is also protected.",
+        "WARNING: do not expose this port to the internet or an untrusted LAN.",
+    ]
+    if source == "file":
+        lines.append(
+            f"WARNING: API token loaded from {TOKEN_FILE_ENV}. It is not printed."
+        )
+    elif source == "env":
+        lines.append(
+            f"WARNING: API token loaded from {TOKEN_ENV}. It is not printed."
+        )
+    return "\n".join(lines)
+
+
+def resolve_web_bind(
+    host: str,
+    allow_lan: bool,
+    *,
+    allow_hosts: list[str] | None = None,
+    port: int = 8068,
+    environ: dict | None = None,
+    tty: bool = False,
+    token_factory=None,
+) -> WebBind:
     """Decide whether `lantern web` may bind `host`.
 
-    Loopback is always allowed and does not mint a token. Any other address
-    needs `--allow-lan` and a dashboard that can require the startup token
-    on API calls. This function does not open a socket.
+    Loopback is always allowed and does not mint a LAN token. Any other
+    address needs ``--allow-lan`` and one valid startup token. This function
+    does not open a socket and does not put the token in ``warning``.
     """
     if is_loopback_host(host):
         return WebBind()
@@ -217,21 +333,25 @@ def resolve_web_bind(host: str, allow_lan: bool, token_param: str | None,
             f"refusing to bind {host}. The dashboard listens on loopback "
             f"only (127.0.0.1, localhost, or ::1) unless you pass --allow-lan."
         ))
-    if not token_param:
-        return WebBind(error=(
-            f"binding to {host} requires S1 token support; refusing an "
-            f"unauthenticated LAN bind. --allow-lan stays off until the "
-            f"dashboard can require a startup token on every API call."
-        ))
-    token = (token_factory or new_api_token)()
-    warning = (
-        "WARNING: Lantern is binding beyond loopback.\n"
-        f"WARNING: listen address {host} is reachable from other machines.\n"
-        "WARNING: there is no login. API calls need the startup token below.\n"
-        "WARNING: do not expose this port to the internet or an untrusted LAN.\n"
-        f"API token (printed once): {token}"
+    env = os.environ if environ is None else environ
+    token, error, print_token, source = load_api_token(
+        env, tty=tty, token_factory=token_factory,
     )
-    return WebBind(warning=warning, token=token, token_param=token_param)
+    if error:
+        return WebBind(error=error)
+    from .webapp import build_lan_allowlist
+
+    try:
+        allowed = build_lan_allowlist(host, port, list(allow_hosts or []))
+    except ValueError as exc:
+        # Drop the token. A refused bind must not print it.
+        return WebBind(error=str(exc))
+    return WebBind(
+        warning=_lan_warning(host, allowed, source),
+        token=token,
+        lan_bound=True,
+        print_token=print_token,
+    )
 
 
 def _print_text_scan(scan: dict, diff: dict | None) -> None:
@@ -315,11 +435,22 @@ def main(argv=None) -> int:
     if args.command == "web":
         if not 1 <= args.port <= 65535:
             return _err("--port must be between 1 and 65535.")
-        # Refuse a LAN bind before creating the database or opening a socket.
+        # Refuse a bad Host allowlist or a LAN bind before creating the
+        # database or opening a socket.
+        from .webapp import parse_allow_host
+
+        try:
+            for item in args.allow_host:
+                parse_allow_host(item)
+        except ValueError as exc:
+            return _err(str(exc))
         web_bind = resolve_web_bind(
             args.host,
             bool(args.allow_lan),
-            token_param=webapp_token_param(_load_serve()),
+            allow_hosts=args.allow_host,
+            port=args.port,
+            environ=os.environ,
+            tty=_stderr_is_tty(),
         )
         if web_bind.error:
             return _err(web_bind.error)
@@ -346,21 +477,33 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             web_bind = resolve_web_bind(
                 args.host,
                 bool(getattr(args, "allow_lan", False)),
-                token_param=webapp_token_param(serve),
+                allow_hosts=getattr(args, "allow_host", None),
+                port=args.port,
+                environ=os.environ,
+                tty=_stderr_is_tty(),
             )
             if web_bind.error:
                 return _err(web_bind.error)
         conn.close()
         if web_bind.warning:
             print(web_bind.warning, file=sys.stderr, flush=True)
+        if web_bind.print_token and web_bind.token:
+            # Interactive console only. print_token is false when stderr is
+            # not a TTY, which is what `docker logs` captures.
+            print(
+                f"API token (printed once, not logged): {web_bind.token}",
+                file=sys.stderr,
+                flush=True,
+            )
         kwargs = {
             "host": args.host,
             "port": args.port,
             "debug": args.debug,
             "allow_hosts": args.allow_host,
+            "lan_bound": web_bind.lan_bound,
         }
-        if web_bind.token is not None and web_bind.token_param:
-            kwargs[web_bind.token_param] = web_bind.token
+        if web_bind.lan_bound:
+            kwargs["api_token"] = web_bind.token
         try:
             serve(db_path, **kwargs)
         except OSError as exc:

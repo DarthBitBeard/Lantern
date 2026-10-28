@@ -13,9 +13,10 @@ On Unix the database, that backup, and any directory Lantern creates for
 them are private to the owner (0600 and 0700). The mode is set when the
 file is created, so umask 022 and a permissive umask both leave it private.
 An existing file or directory is not chmod'd. A database or backup that is
-already group- or world-readable gets one warning on stderr. On Windows
-those bits are not set or checked; the user profile ACL is what keeps the
-file private.
+already group- or world-readable gets one warning on stderr. A data
+directory that already exists and is looser than 0700 (for example 0755)
+gets one warning too, and is left unchanged. On Windows those bits are
+not set or checked; the user profile ACL is what keeps the file private.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ Migration = Callable[[sqlite3.Connection], None]
 # on every request does not fill stderr. Each CLI run is a new process.
 # The dashboard serves requests on several threads, so the sets share a lock.
 _warned_loose: set[str] = set()
+_warned_loose_dirs: set[str] = set()
 _scanned_backup_dirs: set[str] = set()
 _permission_lock = threading.Lock()
 
@@ -147,6 +149,48 @@ def warn_loose_permissions(path: str | Path) -> None:
             f"Warning: {file_path} is readable by group or others (mode {bits:04o}). "
             "Lantern will not change an existing file. "
             "Other local accounts can read this inventory.",
+            file=sys.stderr,
+        )
+    except OSError:
+        return
+
+
+def warn_loose_directory(path: str | Path) -> None:
+    """Warn on stderr when an existing directory is looser than mode 0700.
+
+    Does not change the directory and does not raise. 0755 is the usual
+    case: group and others can enter it and read the names inside. Missing
+    paths, files, and unreadable stat results are ignored. On Windows this
+    returns without looking at mode bits.
+
+    The working directory (``.``) is not a dedicated data directory and is
+    not what callers pass here. ``connect`` warns about the database's
+    parent when that parent already existed.
+    """
+    if not _posix_modes():
+        return
+    dir_path = Path(path)
+    try:
+        mode = dir_path.stat().st_mode
+    except OSError:
+        return
+    if not stat.S_ISDIR(mode):
+        return
+    bits = stat.S_IMODE(mode)
+    if bits & 0o077 == 0:
+        return
+    try:
+        key = str(dir_path.resolve())
+    except OSError:
+        key = os.fspath(dir_path)
+    with _permission_lock:
+        if key in _warned_loose_dirs:
+            return
+        _warned_loose_dirs.add(key)
+    try:
+        print(
+            f"Warning: {dir_path} is accessible by group or others (mode {bits:04o}). "
+            "Lantern will not change an existing directory.",
             file=sys.stderr,
         )
     except OSError:
@@ -323,8 +367,14 @@ def _prepare_database_file(db_path: str | Path) -> None:
         return
     _refuse_database_symlink(persistent)
     parent = persistent.parent
+    # "." is the working directory, not a data directory Lantern owns.
+    # Any other parent that already exists keeps its mode. Warn when that
+    # mode is looser than 0700 so a 0755 ./data is visible and unchanged.
+    parent_existed = parent not in (Path(""), Path(".")) and parent.exists()
     if parent != Path("") and not parent.exists():
         _create_private_directory(parent)
+    elif parent_existed:
+        warn_loose_directory(parent)
     if persistent.exists():
         warn_loose_permissions(persistent)
     else:

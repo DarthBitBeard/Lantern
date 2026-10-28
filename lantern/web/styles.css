@@ -45,7 +45,7 @@ main { max-width: 1020px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
 .controls label { font-size: .85rem; color: var(--muted); display: block; }
 
 input, select, button, .controls-row a { font: inherit; font-size: .95rem; }
-input[type="text"], input[type="search"], select, .trust-row input {
+input[type="text"], input[type="search"], input[type="password"], select, .trust-row input {
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);

@@ -9,7 +9,13 @@ services:
     # and the dashboard must not be reachable from the LAN by default.
     #
     # Opting in to a LAN bind is not recommended. Prefer an SSH tunnel or
-    # Tailscale to 127.0.0.1. If you do opt in, replace the command with:
+    # Tailscale to 127.0.0.1. If you do opt in, mount a token file mode
+    # 0400 owned by uid 10001. Do not write the token into this file.
+    # Docker has no terminal, so Lantern will not print a token into
+    # `docker logs`. Without the file or LANTERN_API_TOKEN the command
+    # exits 2 and does not listen. --host 0.0.0.0 also needs --allow-host
+    # set to the LAN address clients will send. That address is the Host
+    # allowlist entry; 0.0.0.0 itself is not added.
     #   command:
     #     - lantern
     #     - web
@@ -20,9 +26,18 @@ services:
     #     - --db
     #     - /data/lantern.db
     #     - --allow-lan
-    # Until the dashboard can require a startup API token, that command
-    # exits with "requires S1 token support" and does not listen. When it
-    # does start, the token is printed once in the logs. Never expose 8068
+    #     - --allow-host
+    #     - 192.168.1.50
+    #   environment:
+    #     LANTERN_API_TOKEN_FILE: /run/secrets/lantern_token
+    #   secrets:
+    #     - lantern_token
+    # secrets:
+    #   lantern_token:
+    #     file: ./lantern_token
+    # Do not add a ports: key. Host networking does not publish ports that
+    # way. If you ever switch this service to a bridge network, publish
+    # loopback on the host only: "127.0.0.1:8068:8068". Never expose 8068
     # to the internet.
     network_mode: "host"
     user: "10001:10001"
