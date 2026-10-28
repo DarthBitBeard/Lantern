@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from lantern.report import to_html, to_json
+from lantern.report import multi_scope_html, to_html, to_json
 
 _PAYLOAD = "<script>alert(1)</script>"
 
@@ -50,3 +50,9 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertEqual(device["tag"], scan["devices"][0]["tag"])
         self.assertEqual(device["notes"], scan["devices"][0]["notes"])
         self.assertEqual(device["open_ports"][0]["banner"], _PAYLOAD + "banner")
+
+    def test_multi_scope_html_escapes_a_failed_scope_error(self):
+        page = multi_scope_html([], [("lab", _PAYLOAD)])
+        self.assertNotIn("<script>", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn("lab", page)

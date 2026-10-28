@@ -131,6 +131,16 @@ class LoadScopesTests(unittest.TestCase):
         self.assertIn("Unknown scope", str(ctx.exception))
         self.assertEqual(select_scope(scopes, "LAB").subnet, "10.1.0.0/24")
 
+    def test_select_scope_rejects_non_ascii_before_casefold(self):
+        self.write('[scopes.k]\nsubnet = "10.1.0.0/24"\n[scopes.ss]\nsubnet = "10.2.0.0/24"\n')
+        scopes = load_scopes(self.path)
+        for typed in ("\u212a", "\u00df"):
+            with self.assertRaises(ValueError, msg=typed) as ctx:
+                select_scope(scopes, typed)
+            self.assertIn("not allowed", str(ctx.exception), typed)
+            self.assertNotIn("10.1.0.0/24", str(ctx.exception))
+            self.assertNotIn("10.2.0.0/24", str(ctx.exception))
+
     def test_case_variant_scope_names_are_rejected(self):
         self.write(
             '[scopes.home]\nsubnet = "192.168.1.0/24"\n'

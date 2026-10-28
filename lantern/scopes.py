@@ -142,6 +142,9 @@ def select_scope(scopes: dict[str, Scope], name: str | None) -> Scope:
         choices = ", ".join(scopes)
         raise ValueError(f"Config defines more than one scope. Pass --scope. Choices: {choices}")
     if name not in scopes:
+        # Reject Kelvin sign, ß, and other non-ASCII before casefold.
+        # casefold() maps U+212A to "k" and U+00DF to "ss".
+        validate_scope_name(name)
         folded = name.casefold()
         matches = [scope for key, scope in scopes.items() if key.casefold() == folded]
         if len(matches) == 1:
