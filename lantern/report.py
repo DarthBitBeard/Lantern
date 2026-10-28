@@ -116,11 +116,11 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
     for device in scan["devices"]:
         name = device.get("label") or device.get("hostname") or device["ip"]
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
-        banners = [
-            str(port.get("banner"))
-            for port in device.get("open_ports") or []
-            if port.get("banner")
-        ]
+        banners = []
+        for port in device.get("open_ports") or []:
+            banner = strip_for_text(port.get("banner") or "")
+            if banner:
+                banners.append(banner)
         banner_html = ""
         if banners:
             banner_html = f"<p>Banner: {html.escape(' | '.join(banners))}</p>"

@@ -21,7 +21,7 @@ import unicodedata
 from pathlib import Path
 
 from . import __version__
-from .assets import CRITICALITIES, normalize_mac
+from .assets import CRITICALITIES, normalize_mac, strip_for_text
 from .ports import SEVERITY_RANK
 from .store import (
     diff_scans,
@@ -677,8 +677,9 @@ def _cell(value) -> str:
 def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
     ports = []
     for port in device["open_ports"]:
-        if port.get("banner"):
-            ports.append(f"{port['port']} {port['banner']}")
+        banner = strip_for_text(port.get("banner") or "")
+        if banner:
+            ports.append(f"{port['port']} {banner}")
         else:
             ports.append(str(port["port"]))
     values = {

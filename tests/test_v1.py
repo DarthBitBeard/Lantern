@@ -874,6 +874,28 @@ class CliExportTests(unittest.TestCase):
         self.assertIn("does not create", err.getvalue())
         self.assertEqual(out.getvalue(), "")
 
+    def test_csv_strips_bidi_from_the_banner_cell(self):
+        marks = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.10",
+                    "aa:bb:cc:dd:ee:10",
+                    ports=[{"port": 80, "banner": f"ok{marks}hidden"}],
+                )],
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("export", "--what", "devices", "--format", "csv")
+        self.assertEqual(code, 0, err)
+        self.assertIn("80 okhidden", out)
+        for char in marks:
+            self.assertNotIn(char, out)
+        self.assertNotIn(char, err)
+
     def test_export_stdout_writes_bytes(self):
         import contextlib
         import sys
