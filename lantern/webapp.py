@@ -80,11 +80,12 @@ REQUEST_TIMEOUT_SECONDS = 10
 # Total time allowed to read one request line, its headers, and its body.
 # A client that drips a byte just inside the per-read timeout cannot refresh this.
 HEADER_DEADLINE_SECONDS = 10
-# Response bodies are written in chunks. Each chunk may block this long
-# waiting for the client to take more bytes. Progress starts a new wait.
-# The whole response also stops at WRITE_DEADLINE_SECONDS.
+# Response bodies are written in chunks. Each chunk may block only for
+# the idle timeout or the time left on the overall deadline, whichever
+# is shorter. A reader that keeps accepting data may take longer than
+# one idle timeout. The whole response stops at WRITE_DEADLINE_SECONDS.
 WRITE_CHUNK_BYTES = 16 * 1024
-WRITE_DEADLINE_SECONDS = 120
+WRITE_DEADLINE_SECONDS = 60
 MAX_CONNECTIONS = 32
 MAX_CONNECTIONS_PER_IP = 8
 # A presented token that does not match waits this long. Guessing a
@@ -635,10 +636,11 @@ class LanternHandler(BaseHTTPRequestHandler):
 
         ``makefile('wb', 0)`` is unbuffered, and a single ``send`` of the
         whole buffer returns when the kernel buffer fills and drops the
-        rest. Each chunk gets ``write_timeout`` (an idle wait). A reader
-        that keeps accepting data may take longer than that in total.
-        ``write_deadline`` still drops a transfer that runs too long, and
-        a reader that stalls for one chunk's idle timeout is dropped.
+        rest. Each chunk waits at most ``write_timeout``, and never longer
+        than the time left on ``write_deadline``. A reader that keeps
+        accepting data may take longer than one idle timeout, up to that
+        deadline. A reader that stalls is dropped when the chunk's wait
+        runs out.
         """
         view = memoryview(data)
         chunk = int(self.write_chunk_bytes)
@@ -646,11 +648,12 @@ class LanternHandler(BaseHTTPRequestHandler):
             chunk = WRITE_CHUNK_BYTES
         deadline = time.monotonic() + float(self.write_deadline)
         while len(view):
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 self.close_connection = True
                 return
             try:
-                self.connection.settimeout(float(self.write_timeout))
+                self.connection.settimeout(min(float(self.write_timeout), remaining))
                 sent = self.connection.send(view[:chunk])
             except OSError:
                 self.close_connection = True
