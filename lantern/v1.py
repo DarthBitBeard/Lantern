@@ -713,7 +713,9 @@ def export_locked(build):
 
 
 def _reject_path_text(path: str) -> None:
-    if path is None or path == "" or "\x00" in path:
+    if path is None or path == "":
+        raise ValueError("Pass a file path to --output, or omit it to write to stdout.")
+    if "\x00" in path or len(path) > 4096 or path.count("/") + path.count("\\") > 40:
         raise ValueError("The export path is not allowed.")
     if path.endswith(("/", "\\")) or path.endswith(os.sep):
         raise ValueError("The export path must be a file.")

@@ -251,6 +251,8 @@ def _err(message: str) -> int:
 def _cmd_export(args, conn) -> int:
     from .v1 import V1Error, MESSAGES, render_export, write_export_file
 
+    if args.output is not None and not str(args.output):
+        return _err("Pass a file path to --output, or omit it to write to stdout.")
     try:
         scope = _one_scope_name(args)
     except ValueError as exc:

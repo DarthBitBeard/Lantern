@@ -529,6 +529,22 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(code, 2, err)
         code, _out, err = self.run_cli("export", "--what", "devices", "--scan-id", "99")
         self.assertEqual(code, 1, err)
+        code, out, err = self.run_cli("export", "--what", "devices", "--output", "")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(out, "")
+        self.assertIn("file path", err)
+        self.assertNotIn("Traceback", err)
+        deep = "nested/" * 50 + "out.json"
+        code, out, err = self.run_cli("export", "--what", "devices", "--output", deep)
+        self.assertEqual(code, 2, err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("nested/nested", err)
+        self.assertNotIn(deep[:20], out)
+        huge = "x" * 5000 + ".json"
+        code, out, err = self.run_cli("export", "--what", "devices", "--output", huge)
+        self.assertEqual(code, 2, err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("xxxx", err)
 
     def _finding_scan(self):
         conn = connect(self.db)
