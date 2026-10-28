@@ -20,7 +20,7 @@ from .ports import DEFAULT_PORTS, findings_for_ports
 from .report import describe_change, to_html, to_json
 from .scanner import scan_host
 from .scopes import DEFAULT_CONFIG_NAME, load_scopes, select_scope
-from .store import connect, list_scans, load_scan_with_diff, save_scan
+from .store import connect, list_scans, load_scan_with_diff, save_scan, write_private_file
 
 DEFAULT_DB = Path("data/lantern.db")
 PING_WORKERS = 50
@@ -375,7 +375,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         id2 = save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
         new, diff = load_scan_with_diff(conn, id2)
         html_path = db_path.parent / "demo-report.html"
-        html_path.write_text(to_html(new, diff), encoding="utf-8")
+        write_private_file(html_path, to_html(new, diff))
         print(f"Demo scan 1: {len(demo.demo_scan_1())} devices")
         print(f"Demo scan 2: {len(new['devices'])} devices")
         print(f"New devices: {[d['ip'] for d in diff['added']]}")

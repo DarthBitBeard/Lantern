@@ -69,10 +69,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("No scan with id 99", err)
 
     def test_demo_creates_private_data_dir_and_database(self):
-        """Under umask 022 the CLI used to leave data/ at 0755.
+        """Under umask 022 the CLI used to leave data/ at 0755 and the report at 0644.
 
         connect() has to create that directory at 0700 and the database at
-        0600, including when umask is 000.
+        0600, and the demo HTML report has to be 0600, including when umask is 000.
         """
         if os.name == "nt":
             self.skipTest("POSIX permission bits are not checked on Windows")
@@ -91,7 +91,10 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
                 self.assertEqual(stat.S_IMODE(db.parent.stat().st_mode), 0o700)
                 self.assertEqual(stat.S_IMODE(db.stat().st_mode), 0o600)
+                report = db.parent / "demo-report.html"
+                self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
                 self.assertIn("HTML report:", out.getvalue())
+                self.assertIn("192.168.1.99", report.read_text(encoding="utf-8"))
         finally:
             os.umask(previous)
 
