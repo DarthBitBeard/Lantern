@@ -31,6 +31,77 @@ def _device(ip, mac=None, hostname=None, findings=None, ports=None):
     }
 
 
+class ExportMemoryTests(unittest.TestCase):
+    """Peak Python allocations for a 100k-device JSON export.
+
+    The old encoder held the row dicts and more than one copy of the JSON,
+    which traced well above these caps. tracemalloc starts after the database
+    is built, so the insert itself is not the measurement.
+    """
+
+    def _database(self, hostname):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "many.db")
+        conn = connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name) "
+                "VALUES ('2020-01-01T00:00:00+00:00', '10.0.0.0/8', 0, NULL)"
+            )
+            scan_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            rows = [
+                (
+                    scan_id,
+                    f"10.{(index >> 16) & 255}.{(index >> 8) & 255}.{index & 255}",
+                    None,
+                    hostname,
+                    None,
+                    "[]",
+                    "[]",
+                )
+                for index in range(100_000)
+            ]
+            conn.executemany(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return db
+
+    def _peak(self, db):
+        import tracemalloc
+
+        conn = connect(db)
+        tracemalloc.start()
+        try:
+            try:
+                body, _fmt, _scan_id, _what, _fmt_name = v1.render_export(
+                    conn, {"what": ["devices"], "format": ["json"]}, private=False,
+                )
+            except v1.V1Error as exc:
+                return exc.status, exc.code, tracemalloc.get_traced_memory()[1]
+            return body, "ok", tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+            conn.close()
+
+    def test_successful_100k_export_peak_stays_under_250_mib(self):
+        body, kind, peak = self._peak(self._database(None))
+        self.assertEqual(kind, "ok")
+        self.assertLess(len(body), v1.MAX_V1_RESPONSE_BYTES)
+        self.assertGreater(len(body), 20 * 1024 * 1024)
+        self.assertLess(peak, 250 * 1024 * 1024, f"peak {peak} bytes")
+
+    def test_oversize_100k_export_is_refused_without_a_large_peak(self):
+        status, code, peak = self._peak(self._database("H" * 400))
+        self.assertEqual((status, code), (413, "too_large"))
+        self.assertLess(peak, 150 * 1024 * 1024, f"peak {peak} bytes")
+
+
 class HeaderTests(unittest.TestCase):
     def test_header_values_reject_line_breaks(self):
         with self.assertRaises(v1.V1Error) as caught:
@@ -685,6 +756,28 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(document["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["service"], "telnet")
+
+    def test_device_json_export_matches_json_dumps(self):
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [
+                    _device("192.168.50.10", "AA-BB-CC-DD-EE-10", hostname="host"),
+                    _device("192.168.50.2", None, hostname="a=b"),
+                ],
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("export", "--what", "devices", "--format", "json")
+        self.assertEqual(code, 0, err)
+        text = out.rstrip("\n")
+        self.assertEqual(text.encode("utf-8"), json.dumps(json.loads(text)).encode("utf-8"))
+        self.assertEqual(
+            [item["ip"] for item in json.loads(text)["items"]],
+            ["192.168.50.2", "192.168.50.10"],
+        )
 
     def test_findings_csv_defuses_titles_and_fixes(self):
         conn = connect(self.db)

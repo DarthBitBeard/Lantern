@@ -248,20 +248,40 @@ def _too_many(count: int) -> None:
 
 
 def _finish(payload: dict) -> bytes:
-    """Encode JSON and stop if the encoded bytes pass the cap.
+    """Encode one JSON value, stopping if the encoded bytes pass the cap."""
+    return _encode_capped(payload)
 
-    The row objects themselves are still bounded by ``MAX_V1_ROWS``. The
-    encoded body is not kept once it exceeds ``MAX_V1_RESPONSE_BYTES``.
+
+def _encode_capped(value) -> bytes:
+    """``json.dumps`` bytes, discarded if they cross the response cap."""
+    encoded = json.dumps(value).encode("utf-8")
+    if len(encoded) > MAX_V1_RESPONSE_BYTES:
+        raise V1Error(413, "too_large")
+    return encoded
+
+
+def _stream_json_items(scan_id: int, items) -> bytes:
+    """One JSON export document. Only the byte buffer and the current item are kept.
+
+    The text matches ``json.dumps`` of ``{api_version, scan_id, items, total}``.
     """
-    chunks: list[bytes] = []
-    size = 0
-    for piece in json.JSONEncoder().iterencode(payload):
-        data = piece.encode("utf-8")
-        size += len(data)
-        if size > MAX_V1_RESPONSE_BYTES:
+    buf = bytearray(f'{{"api_version": {API_VERSION}, "scan_id": {int(scan_id)}, "items": ['.encode())
+    count = 0
+    for item in items:
+        blob = json.dumps(item).encode("utf-8")
+        extra = len(blob) + (2 if count else 0)
+        # "], \"total\": " + up to 9 digits + "}"
+        if len(buf) + extra + 20 > MAX_V1_RESPONSE_BYTES:
             raise V1Error(413, "too_large")
-        chunks.append(data)
-    return b"".join(chunks)
+        if count:
+            buf += b", "
+        buf += blob
+        count += 1
+    suffix = f'], "total": {count}}}'.encode()
+    if len(buf) + len(suffix) > MAX_V1_RESPONSE_BYTES:
+        raise V1Error(413, "too_large")
+    buf += suffix
+    return bytes(buf)
 
 
 def _page(rows: list, limit: int, offset: int) -> list:
@@ -410,6 +430,68 @@ def _matches(device: dict, tags: list[str], criticality: str | None) -> bool:
 
 def _sort_devices(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda row: (ip_sort_key(row["ip"]), row.get("mac") or ""))
+
+
+def _device_blob_stats(conn, scan_id: int) -> tuple[int, int]:
+    """Row count and the stored byte size of the device columns."""
+    count, raw = conn.execute(
+        """
+        SELECT COUNT(*),
+               COALESCE(SUM(
+                   LENGTH(ip) + LENGTH(IFNULL(mac, '')) + LENGTH(IFNULL(hostname, ''))
+                   + LENGTH(IFNULL(label, '')) + LENGTH(open_ports) + LENGTH(findings)
+               ), 0)
+        FROM devices WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+    return int(count), int(raw)
+
+
+def _overlay_trust(device: dict, trusted: dict) -> None:
+    """Same label and trust flag as ``apply_trust``."""
+    mac = (device.get("mac") or "").lower()
+    info = trusted.get(mac) if mac else None
+    device["trusted"] = bool(info and info["trusted"])
+    if info and info.get("label"):
+        device["label"] = info["label"]
+
+
+def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], criticality: str | None):
+    """Yield API device dicts one at a time, in export sort order."""
+    started_at, subnet, demo, scope_name = conn.execute(
+        "SELECT started_at, subnet, demo, scope_name FROM scans WHERE id = ?",
+        (scan_id,),
+    ).fetchone()
+    scan = {
+        "id": scan_id,
+        "started_at": started_at,
+        "subnet": subnet,
+        "demo": bool(demo),
+        "scope_name": scope_name,
+    }
+    assets = _assets(conn)
+    seen = _seen_bounds(conn)
+    trusted = get_trusted(conn)
+    fetched = conn.execute(
+        "SELECT ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
+        (scan_id,),
+    ).fetchall()
+    fetched.sort(key=lambda row: (ip_sort_key(row[0]), normalize_mac(row[1]) or ""))
+    for ip, mac, hostname, label, ports_json, findings_json in fetched:
+        findings = json.loads(findings_json or "[]")
+        device = {
+            "ip": ip,
+            "mac": mac,
+            "hostname": hostname,
+            "label": label,
+            "open_ports": json.loads(ports_json or "[]"),
+            "findings": findings if isinstance(findings, list) else [],
+        }
+        _overlay_trust(device, trusted)
+        shown = _device_dict(device, scan, assets, seen, private=private)
+        if _matches(shown, tags, criticality):
+            yield shown
 
 
 def device_rows(conn, query: dict, *, private: bool) -> tuple[dict, list[dict]]:
@@ -679,16 +761,23 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
             body = _csv_body(headers, _project_rows(headers, items))
         return body, fmt, scan_id, what, fmt
     if what == "devices":
-        scan, rows = device_rows(conn, query, private=private)
-        scan_id = scan["id"]
+        scan_id = _resolve_scan_id(conn, query)
+        count, raw = _device_blob_stats(conn, scan_id)
+        if count > MAX_V1_ROWS or raw > MAX_V1_RESPONSE_BYTES:
+            raise V1Error(413, "too_large")
         if fmt == "json":
-            body = _finish({
-                "api_version": API_VERSION,
-                "scan_id": scan_id,
-                "items": rows,
-                "total": len(rows),
-            })
+            body = _stream_json_items(
+                scan_id,
+                _iter_export_devices(
+                    conn,
+                    scan_id,
+                    private=private,
+                    tags=_tags(query),
+                    criticality=_criticality(query),
+                ),
+            )
         else:
+            _scan, rows = device_rows(conn, query, private=private)
             headers, table = device_csv_table(scan_id, rows, private=private)
             body = _csv_body(headers, table)
         return body, fmt, scan_id, what, fmt
