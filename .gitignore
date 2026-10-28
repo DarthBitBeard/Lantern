@@ -222,3 +222,6 @@ __marimo__/
 # Lantern local data (scan results, never commit)
 data/
 .DS_Store
+
+# Copy written beside a database before a schema upgrade (<file>.v0.bak)
+*.v*.bak

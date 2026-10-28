@@ -140,6 +140,30 @@ class CliTests(unittest.TestCase):
             cli.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
 
+    def test_newer_database_is_a_clear_error(self):
+        import sqlite3
+
+        raw = sqlite3.connect(self.db)
+        raw.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        raw.execute("INSERT INTO schema_version VALUES (99, 'future')")
+        raw.execute(
+            "CREATE TABLE scans (id INTEGER PRIMARY KEY, started_at TEXT, subnet TEXT, demo INTEGER)"
+        )
+        raw.execute("INSERT INTO scans VALUES (7, 't', '10.1.0.0/24', 0)")
+        raw.commit()
+        raw.close()
+
+        code, _, err = self.run_cli("history")
+        self.assertEqual(code, 2)
+        self.assertIn("newer", err)
+        raw = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(raw.execute("SELECT id FROM scans").fetchone()[0], 7)
+        finally:
+            raw.close()
+
 
 if __name__ == "__main__":
     unittest.main()

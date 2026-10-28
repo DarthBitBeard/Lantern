@@ -137,7 +137,7 @@ def main(argv=None) -> int:
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = connect(db_path)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, ValueError) as exc:
         return _err(f"Cannot open database {db_path}: {exc}")
 
     try:

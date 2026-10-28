@@ -41,3 +41,5 @@ CI (`.github/workflows/ci.yml`) runs the suite on Linux, macOS, and Windows for 
 ## Code style
 
 Plain, readable Python. Short functions, explicit names, no clever tricks. Follow the existing file layout: discovery and scanning in their own modules, risk rules in `lantern/ports.py`, storage in `lantern/store.py`, the dashboard API in `lantern/webapp.py`, and the UI in `lantern/web/`.
+
+A change to the SQLite tables is a new numbered function in the migration list in `lantern/store.py`. Do not edit a migration that has already shipped, and do not commit from inside a migration. Add a test that an older database file still loads, including one shaped like 0.3.0 (no `schema_version` table).
