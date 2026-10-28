@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import ipaddress
 import json
+import secrets
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+from typing import NamedTuple
 
 from . import __version__, demo
 from .discovery import arp_table, guess_subnet, ping_host, reverse_hostname, validate_subnet
@@ -100,7 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
     _add_db_arg(web_p)
-    web_p.add_argument("--host", default="127.0.0.1", help="Bind address, default 127.0.0.1 (local only).")
+    web_p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address. Default 127.0.0.1. Any non-loopback address also needs --allow-lan.",
+    )
     web_p.add_argument("--port", type=int, default=8068, help="Port, default 8068.")
     web_p.add_argument(
         "--allow-host",
@@ -111,12 +118,120 @@ def build_parser() -> argparse.ArgumentParser:
              "on the bound port. Repeatable. A value with no port uses the bound port.",
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
+    web_p.add_argument(
+        "--allow-lan",
+        action="store_true",
+        help=(
+            "Allow a non-loopback bind. Refused until the dashboard can require "
+            "a startup API token. When that exists, the token is printed once."
+        ),
+    )
     return parser
 
 
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
     return 2
+
+
+# Keyword names S1 may add to webapp.serve() for the startup API token.
+# The first one present is the one the CLI fills in. A **kwargs catch-all
+# does not count: passing a token the server ignores would still be an
+# unauthenticated LAN bind.
+_TOKEN_PARAM_NAMES = ("api_token", "token", "startup_token")
+
+
+class WebBind(NamedTuple):
+    """Decision for `lantern web` before the server is constructed."""
+
+    error: str | None = None
+    warning: str | None = None
+    token: str | None = None
+    token_param: str | None = None
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when `host` cannot be reached from another machine.
+
+    localhost (any case), ::1, and any address ipaddress treats as loopback
+    (the whole 127.0.0.0/8, plus IPv4-mapped loopback). 0.0.0.0, ::, LAN
+    addresses, and any other name are not loopback.
+    """
+    if not isinstance(host, str) or not host or host != host.strip():
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return bool(mapped is not None and mapped.is_loopback)
+
+
+def new_api_token() -> str:
+    """One startup token. Printed once; never written to the database."""
+    return secrets.token_urlsafe(32)
+
+
+def webapp_token_param(serve_fn) -> str | None:
+    """Keyword `serve()` accepts for a startup API token, or None.
+
+    None means S1's token check is not in this process. Callers must not
+    listen on a non-loopback address in that case.
+    """
+    try:
+        params = inspect.signature(serve_fn).parameters
+    except (TypeError, ValueError):
+        return None
+    allowed = (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+    for name in _TOKEN_PARAM_NAMES:
+        param = params.get(name)
+        if param is not None and param.kind in allowed:
+            return name
+    return None
+
+
+def _load_serve():
+    from .webapp import serve
+    return serve
+
+
+def resolve_web_bind(host: str, allow_lan: bool, token_param: str | None,
+                      token_factory=None) -> WebBind:
+    """Decide whether `lantern web` may bind `host`.
+
+    Loopback is always allowed and does not mint a token. Any other address
+    needs `--allow-lan` and a dashboard that can require the startup token
+    on API calls. This function does not open a socket.
+    """
+    if is_loopback_host(host):
+        return WebBind()
+    if not allow_lan:
+        return WebBind(error=(
+            f"refusing to bind {host}. The dashboard listens on loopback "
+            f"only (127.0.0.1, localhost, or ::1) unless you pass --allow-lan."
+        ))
+    if not token_param:
+        return WebBind(error=(
+            f"binding to {host} requires S1 token support; refusing an "
+            f"unauthenticated LAN bind. --allow-lan stays off until the "
+            f"dashboard can require a startup token on every API call."
+        ))
+    token = (token_factory or new_api_token)()
+    warning = (
+        "WARNING: Lantern is binding beyond loopback.\n"
+        f"WARNING: listen address {host} is reachable from other machines.\n"
+        "WARNING: there is no login. API calls need the startup token below.\n"
+        "WARNING: do not expose this port to the internet or an untrusted LAN.\n"
+        f"API token (printed once): {token}"
+    )
+    return WebBind(warning=warning, token=token, token_param=token_param)
 
 
 def _print_text_scan(scan: dict, diff: dict | None) -> None:
@@ -196,9 +311,18 @@ def main(argv=None) -> int:
         return _cmd_scopes(args)
     db_path = Path(getattr(args, "db", str(DEFAULT_DB)))
 
+    web_bind = None
     if args.command == "web":
         if not 1 <= args.port <= 65535:
             return _err("--port must be between 1 and 65535.")
+        # Refuse a LAN bind before creating the database or opening a socket.
+        web_bind = resolve_web_bind(
+            args.host,
+            bool(args.allow_lan),
+            token_param=webapp_token_param(_load_serve()),
+        )
+        if web_bind.error:
+            return _err(web_bind.error)
 
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,26 +331,37 @@ def main(argv=None) -> int:
         return _err(f"Cannot open database {db_path}: {exc}")
 
     try:
-        return _dispatch(args, conn, db_path)
+        return _dispatch(args, conn, db_path, web_bind)
     except sqlite3.Error as exc:
         return _err(f"Database error ({db_path}): {exc}")
     finally:
         conn.close()
 
 
-def _dispatch(args, conn, db_path: Path) -> int:
+def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int:
     if args.command == "web":
-        from .webapp import serve
-
-        conn.close()
-        try:
-            serve(
-                db_path,
-                host=args.host,
-                port=args.port,
-                debug=args.debug,
-                allow_hosts=args.allow_host,
+        serve = _load_serve()
+        if web_bind is None:
+            web_bind = resolve_web_bind(
+                args.host,
+                bool(getattr(args, "allow_lan", False)),
+                token_param=webapp_token_param(serve),
             )
+            if web_bind.error:
+                return _err(web_bind.error)
+        conn.close()
+        if web_bind.warning:
+            print(web_bind.warning, file=sys.stderr, flush=True)
+        kwargs = {
+            "host": args.host,
+            "port": args.port,
+            "debug": args.debug,
+            "allow_hosts": args.allow_host,
+        }
+        if web_bind.token is not None and web_bind.token_param:
+            kwargs[web_bind.token_param] = web_bind.token
+        try:
+            serve(db_path, **kwargs)
         except OSError as exc:
             return _err(f"Cannot bind {args.host}:{args.port} ({exc.strerror or exc}). "
                         "Is another Lantern running? Try --port 8069.")

@@ -7,10 +7,12 @@ on:
 permissions:
   contents: read
 
-# Build the image and run an offline smoke test.
-# Do not start the default command: the Dockerfile binds the dashboard
-# on 0.0.0.0, and this job must not listen or scan. Container networking
-# is disabled so the smoke test cannot reach a network.
+# Build the image and smoke-test it with container networking disabled.
+# --network none leaves only loopback, so the job cannot reach a LAN or
+# the internet. The default command binds 127.0.0.1. A non-loopback bind
+# without --allow-lan must be refused before it listens. This job does
+# not log in, push, tag, or publish an image, and it does not scan.
+
 jobs:
   image:
     name: build and offline smoke
@@ -23,14 +25,42 @@ jobs:
       - name: Smoke test with no network
         run: |
           set -euo pipefail
-          version=$(docker run --rm --network none lantern:ci lantern --version)
+
+          runtime=(--network none --read-only --cap-drop ALL --security-opt no-new-privileges)
+
+          user=$(docker run --rm "${runtime[@]}" --entrypoint id lantern:ci -u)
+          echo "uid=$user"
+          if [[ "$user" == "0" ]]; then
+            echo "container runs as root" >&2
+            exit 1
+          fi
+
+          image_user=$(docker inspect --format '{{.Config.User}}' lantern:ci)
+          echo "image_user=$image_user"
+          if [[ -z "$image_user" || "$image_user" == "root" || "$image_user" == "0" || "$image_user" == "0:0" ]]; then
+            echo "image USER is root or empty: '$image_user'" >&2
+            exit 1
+          fi
+
+          cmd=$(docker inspect --format '{{json .Config.Cmd}}' lantern:ci)
+          echo "cmd=$cmd"
+          case "$cmd" in
+            *'"--host"'*'"127.0.0.1"'*) ;;
+            *) echo "default command does not bind 127.0.0.1: $cmd" >&2; exit 1 ;;
+          esac
+          case "$cmd" in
+            *0.0.0.0*) echo "default command contains 0.0.0.0: $cmd" >&2; exit 1 ;;
+          esac
+
+          version=$(docker run --rm "${runtime[@]}" lantern:ci lantern --version)
           echo "$version"
           case "$version" in
             lantern\ *) ;;
             *) echo "unexpected version output: $version" >&2; exit 1 ;;
           esac
 
-          demo=$(docker run --rm --network none lantern:ci lantern demo --db /tmp/lantern-ci.db)
+          demo=$(docker run --rm "${runtime[@]}" --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            lantern:ci lantern demo --db /tmp/lantern-ci.db)
           echo "$demo"
           case "$demo" in
             *192.168.1.99*) ;;
@@ -40,8 +70,108 @@ jobs:
           # Unsafe subnets are refused in-process, before any probe.
           # A zero exit would mean the safety check did not run.
           for subnet in 127.0.0.1/32 8.8.8.0/24; do
-            if docker run --rm --network none lantern:ci lantern scan --subnet "$subnet"; then
+            if docker run --rm "${runtime[@]}" lantern:ci lantern scan --subnet "$subnet"; then
               echo "unsafe subnet $subnet was not refused" >&2
               exit 1
             fi
           done
+
+          # A LAN bind without --allow-lan is refused before any listen and
+          # before creating the database. Read-only root and no tmpfs make
+          # a late database create fail with a different error, so the
+          # message itself is the check.
+          set +e
+          lan_out=$(docker run --rm "${runtime[@]}" lantern:ci \
+            lantern web --host 0.0.0.0 --port 8068 --db /tmp/lantern-lan.db 2>&1)
+          lan_code=$?
+          set -e
+          echo "$lan_out"
+          if [[ "$lan_code" -eq 0 ]]; then
+            echo "LAN bind without --allow-lan was not refused" >&2
+            exit 1
+          fi
+          case "$lan_out" in
+            *"refusing to bind"*) ;;
+            *) echo "LAN bind refusal message missing" >&2; exit 1 ;;
+          esac
+          case "$lan_out" in
+            *"Lantern dashboard:"*) echo "dashboard started on a LAN bind" >&2; exit 1 ;;
+          esac
+
+          # --allow-lan must not start an unauthenticated listener either.
+          set +e
+          allow_out=$(docker run --rm "${runtime[@]}" lantern:ci \
+            lantern web --host 0.0.0.0 --allow-lan --port 8068 --db /tmp/lantern-lan.db 2>&1)
+          allow_code=$?
+          set -e
+          echo "$allow_out"
+          if [[ "$allow_code" -eq 0 ]]; then
+            echo "--allow-lan started without a token gate" >&2
+            exit 1
+          fi
+          case "$allow_out" in
+            *"requires S1 token support"*) ;;
+            *) echo "expected S1 token gate, got: $allow_out" >&2; exit 1 ;;
+          esac
+          case "$allow_out" in
+            *"Lantern dashboard:"*) echo "dashboard started via --allow-lan" >&2; exit 1 ;;
+          esac
+          case "$allow_out" in
+            *"API token"*) echo "--allow-lan printed a token it cannot enforce" >&2; exit 1 ;;
+          esac
+
+          # Default command: prove the listening socket is 127.0.0.1:8068
+          # (0x1F84). The startup line rewrites 0.0.0.0 to 127.0.0.1 in the
+          # URL text, so the log line alone is not the check.
+          cid=$(docker run -d "${runtime[@]}" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --tmpfs /data:rw,nosuid,nodev,size=64m \
+            lantern:ci)
+          cleanup() {
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=""
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            logs=$(docker logs "$cid" 2>&1 || true)
+            if [[ "$logs" == *"Lantern dashboard:"* ]]; then
+              ready=$logs
+              break
+            fi
+            sleep 1
+          done
+          echo "$logs"
+          if [[ -z "$ready" ]]; then
+            echo "dashboard did not start on loopback" >&2
+            exit 1
+          fi
+          case "$ready" in
+            *"http://127.0.0.1:"*) ;;
+            *) echo "startup line is not loopback" >&2; exit 1 ;;
+          esac
+          case "$ready" in
+            *0.0.0.0*) echo "startup advertised 0.0.0.0" >&2; exit 1 ;;
+          esac
+
+          proc_user=$(docker exec "$cid" id -u)
+          echo "proc_uid=$proc_user"
+          if [[ "$proc_user" == "0" ]]; then
+            echo "running process is root" >&2
+            exit 1
+          fi
+
+          listeners=$(docker exec "$cid" python -c 'import pathlib; chunks=[pathlib.Path(n).read_text() for n in ("/proc/net/tcp","/proc/net/tcp6") if pathlib.Path(n).is_file()]; print("".join(chunks), end="")')
+          echo "$listeners"
+          # Port 8068 is hex 1F84. /proc/net/tcp stores the IPv4 address
+          # little-endian, so 127.0.0.1 is 0100007F on GitHub-hosted x86_64.
+          # State 0A is LISTEN. Any other listener on this port fails the job.
+          found=$(printf '%s\n' "$listeners" | awk 'toupper($4)=="0A" && toupper($2) ~ /:1F84$/ { print toupper($2) }')
+          echo "listeners_on_8068=${found:-<none>}"
+          if [[ "$found" != "0100007F:1F84" ]]; then
+            echo "expected only 127.0.0.1:8068 listening, got: ${found:-<none>}" >&2
+            exit 1
+          fi
+
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+          trap - EXIT

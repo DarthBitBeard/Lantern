@@ -43,7 +43,7 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Web dashboard | `python3 -m lantern web` then open http://127.0.0.1:8068/ |
 | Dashboard with request logs | `python3 -m lantern web --debug` |
 | Custom DB path | `python3 -m lantern web --db /tmp/lantern.db` |
-| Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` |
+| Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` (loopback only) |
 | Extra dashboard Host | `python3 -m lantern web --allow-host dashboard.home` (repeat the flag for another host) |
 | Real scan | `python3 -m lantern scan --subnet 192.168.1.0/24` |
 | List named scopes | `python3 -m lantern scopes --config lantern.toml` |
@@ -106,7 +106,7 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 - At most 1024 addresses per scan (a /22), normally a /24.
 - A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected.
 - No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
-- Stdlib only. No Nmap, no Scapy, no root needed.
+- Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
 
 Only scan networks you own or have explicit permission to scan. See [SECURITY.md](SECURITY.md).
 
@@ -156,17 +156,23 @@ POST bodies must be JSON with `Content-Type: application/json` and under 64 KiB 
 
 `--allow-host` is repeatable. `python3 -m lantern web --allow-host dashboard.home` also accepts `Host: dashboard.home:<port>`. `python3 -m lantern web --allow-host dashboard.home:8443` accepts that exact host and port. Bracket an IPv6 address (`--allow-host '[2001:db8::5]'`). The default allowlist is only `127.0.0.1`, `localhost`, and `[::1]` on the bound port.
 
-The dashboard binds to localhost by default and has no login, by design for local use. Keep it there, or behind Tailscale. Never expose it to the internet.
+The dashboard binds to loopback by default (`127.0.0.1`) and has no login, by design for local use. Any other address, including `0.0.0.0`, is refused unless you also pass `--allow-lan`. That flag does not open the port by itself. Until the dashboard can require a startup API token, Lantern exits with `requires S1 token support` and does not listen. When that token parameter exists on the server, `--allow-lan` generates a token with `secrets.token_urlsafe`, prints it once on stderr, and prints a loud warning that the bind is reachable beyond this machine. Prefer an SSH tunnel or Tailscale to `127.0.0.1`. Never expose port 8068 to the internet.
 
 Docker, for a homelab host:
 
 ```bash
+mkdir -p data && sudo chown 10001:10001 data && chmod 700 data
 docker compose up -d
+# on the host: http://127.0.0.1:8068/
 ```
 
-The compose file uses host networking, because a scan from inside a normal container only sees the container network. See `docker-compose.yml` for the warning. The image's default command is unchanged.
+The compose file uses host networking so a scan can see the host LAN (the ARP cache and neighbor hosts). The dashboard itself binds `127.0.0.1`. With host networking that is the host's loopback, not the LAN. Compose does not publish port 8068.
 
-CI (`.github/workflows/docker.yml`) builds the image and, with container networking disabled, runs `lantern --version`, `lantern demo`, and a check that loopback and public subnets are refused. That job does not start the dashboard and does not scan a network. The demo uses the built-in fake devices.
+The container runs as uid 10001, not root. Compose drops every capability (`--cap-drop ALL`), makes the root filesystem read-only, mounts a tmpfs on `/tmp`, keeps the SQLite file on the `/data` volume, and sets `no-new-privileges`. ICMP ping needs `CAP_NET_RAW` and a ping binary. This image adds neither. TCP connect scans and the host ARP cache work with all capabilities dropped. A setuid or file-capability ping would not help: `no-new-privileges` ignores both. The comments in `Dockerfile` and `docker-compose.yml` record the same flags.
+
+To opt in to a LAN bind, override the command with `--host 0.0.0.0` and `--allow-lan` (the compose file has the snippet). Until API token support lands, that command refuses to start. When it does start, read the one-time token from the logs. Prefer Tailscale or an SSH tunnel instead.
+
+CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command's listening socket is `127.0.0.1:8068`, a non-loopback bind without `--allow-lan` is refused, and `--allow-lan` does not start an unauthenticated listener. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
 
 ## What it scans
 

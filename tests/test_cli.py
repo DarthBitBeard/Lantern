@@ -266,5 +266,183 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run_scan.call_args.args[0], "10.8.8.0/24")
 
 
+class WebBindTests(unittest.TestCase):
+    """Bind policy only. No socket is opened and no scan is started."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "lantern.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--db", self.db, *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_loopback_hosts(self):
+        for host in ("127.0.0.1", "localhost", "LocalHost", "::1", "127.0.0.2",
+                     "::ffff:127.0.0.1"):
+            self.assertTrue(cli.is_loopback_host(host), host)
+        for host in ("0.0.0.0", "::", "192.168.1.10", "10.0.0.1", "lan.example",
+                     "", " 127.0.0.1", "127.0.0.1 ", "::ffff:192.168.1.1", "[::1]"):
+            self.assertFalse(cli.is_loopback_host(host), host)
+
+    def test_loopback_needs_no_token(self):
+        def fail_mint():
+            raise AssertionError("minted")
+
+        for allow in (False, True):
+            decision = cli.resolve_web_bind(
+                "127.0.0.1", allow, token_param="api_token", token_factory=fail_mint,
+            )
+            self.assertIsNone(decision.error)
+            self.assertIsNone(decision.warning)
+            self.assertIsNone(decision.token)
+
+    def test_non_loopback_without_flag_is_refused(self):
+        decision = cli.resolve_web_bind("0.0.0.0", False, token_param="api_token")
+        self.assertIn("refusing to bind 0.0.0.0", decision.error)
+        self.assertIsNone(decision.token)
+        self.assertIsNone(decision.warning)
+
+    def test_allow_lan_without_token_support_is_refused(self):
+        with mock.patch.object(cli.secrets, "token_urlsafe", side_effect=AssertionError("minted")):
+            decision = cli.resolve_web_bind("192.168.1.9", True, token_param=None)
+        self.assertIn("requires S1 token support", decision.error)
+        self.assertIsNone(decision.token)
+        self.assertNotIn("API token", decision.error)
+
+    def test_allow_lan_with_token_support_mints_one_token(self):
+        decision = cli.resolve_web_bind(
+            "0.0.0.0", True, token_param="api_token", token_factory=lambda: "once-token",
+        )
+        self.assertIsNone(decision.error)
+        self.assertEqual(decision.token, "once-token")
+        self.assertEqual(decision.token_param, "api_token")
+        self.assertEqual(decision.warning.count("once-token"), 1)
+        self.assertIn("WARNING", decision.warning)
+        self.assertIn("0.0.0.0", decision.warning)
+
+    def test_new_api_token_is_urlsafe(self):
+        token = cli.new_api_token()
+        self.assertGreaterEqual(len(token), 32)
+        self.assertRegex(token, r"^[A-Za-z0-9_-]+$")
+
+    def test_token_param_detector(self):
+        def plain(db_path, host="127.0.0.1", port=8068, debug=False):
+            pass
+
+        def with_api_token(db_path, host="127.0.0.1", api_token=None):
+            pass
+
+        def with_both(db_path, token=None, api_token=None):
+            pass
+
+        def kwargs_only(db_path, **kwargs):
+            pass
+
+        def positional_only(db_path, token, /):
+            pass
+
+        self.assertIsNone(cli.webapp_token_param(plain))
+        self.assertEqual(cli.webapp_token_param(with_api_token), "api_token")
+        self.assertEqual(cli.webapp_token_param(with_both), "api_token")
+        self.assertIsNone(cli.webapp_token_param(kwargs_only))
+        self.assertIsNone(cli.webapp_token_param(positional_only))
+        self.assertIsNone(cli.webapp_token_param(object()))
+
+    def test_shipped_dashboard_has_no_token_parameter(self):
+        # S1 owns webapp.py. Until serve() accepts a token keyword, the CLI
+        # must refuse --allow-lan rather than listen on the LAN.
+        from lantern.webapp import serve
+        self.assertIsNone(cli.webapp_token_param(serve))
+
+    def test_cli_refuses_lan_bind_without_opening_db(self):
+        for host in ("0.0.0.0", "::", "192.168.1.10", "10.0.0.1"):
+            with mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve called")):
+                code, out, err = self.run_cli("web", "--host", host)
+            self.assertEqual(code, 2, host)
+            self.assertIn(f"refusing to bind {host}", err)
+            self.assertNotIn("requires S1 token support", err)
+            self.assertEqual(out, "")
+            self.assertFalse(Path(self.db).exists(), host)
+
+    def test_cli_allow_lan_refused_until_s1(self):
+        with mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve called")):
+            code, out, err = self.run_cli("web", "--host", "0.0.0.0", "--allow-lan")
+        self.assertEqual(code, 2)
+        self.assertIn("requires S1 token support", err)
+        self.assertNotIn("API token", err)
+        self.assertEqual(out, "")
+        self.assertFalse(Path(self.db).exists())
+
+    def test_cli_loopback_does_not_warn(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            with mock.patch("lantern.webapp.serve") as serve:
+                code, _, err = self.run_cli("web", "--host", host, "--port", "9")
+            self.assertEqual(code, 0, (host, err))
+            self.assertNotIn("WARNING", err)
+            self.assertEqual(serve.call_args.kwargs["host"], host)
+            self.assertNotIn("api_token", serve.call_args.kwargs)
+            self.assertNotIn("token", serve.call_args.kwargs)
+
+    def test_cli_allow_lan_on_loopback_does_not_mint(self):
+        with mock.patch.object(cli, "webapp_token_param", return_value="api_token"), \
+                mock.patch.object(cli, "new_api_token", side_effect=AssertionError("minted")), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, _, err = self.run_cli("web", "--allow-lan", "--port", "9")
+        self.assertEqual(code, 0)
+        self.assertNotIn("WARNING", err)
+        self.assertEqual(serve.call_args.kwargs["host"], "127.0.0.1")
+        self.assertNotIn("api_token", serve.call_args.kwargs)
+
+    def test_cli_passes_token_when_s1_present(self):
+        with mock.patch.object(cli, "webapp_token_param", return_value="api_token"), \
+                mock.patch.object(cli, "new_api_token", return_value="once-token"), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli("web", "--host", "0.0.0.0", "--allow-lan", "--port", "9")
+        self.assertEqual(code, 0)
+        self.assertNotIn("once-token", out)
+        self.assertEqual(err.count("once-token"), 1)
+        self.assertGreaterEqual(err.count("WARNING"), 4)
+        self.assertEqual(serve.call_args.kwargs["host"], "0.0.0.0")
+        self.assertEqual(serve.call_args.kwargs["api_token"], "once-token")
+
+    def test_process_refuses_lan_bind_without_listening(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "lantern", "--db", self.db, "web",
+             "--host", "0.0.0.0", "--port", "8068"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refusing to bind", proc.stderr)
+        self.assertNotIn("Lantern dashboard", proc.stdout)
+        self.assertNotIn("API token", proc.stderr)
+        self.assertFalse(Path(self.db).exists())
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "lantern", "--db", self.db, "web",
+             "--host", "0.0.0.0", "--allow-lan", "--port", "8068"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("requires S1 token support", proc.stderr)
+        self.assertNotIn("Lantern dashboard", proc.stdout)
+        self.assertNotIn("API token", proc.stderr)
+        self.assertFalse(Path(self.db).exists())
+
+    def test_web_help_mentions_allow_lan(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.main(["web", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("--allow-lan", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
