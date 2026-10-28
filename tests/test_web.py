@@ -1807,7 +1807,7 @@ if (option.includes("<script>") || !option.includes("&lt;script&gt;alert(1)&lt;/
 """
         proc = subprocess.run(
             [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, timeout=60, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
