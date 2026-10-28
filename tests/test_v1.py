@@ -79,6 +79,24 @@ class CsvTests(unittest.TestCase):
             if line:
                 self.assertTrue(line.startswith('"'), line)
 
+    def test_format_and_unicode_space_do_not_hide_a_formula(self):
+        hidden = (
+            "\u00a0",  # no-break space
+            "\u3000",  # ideographic space
+            "\u200b",  # zero-width space
+            "\ufeff",  # BOM, format
+            "\u2060",  # word joiner
+            " \u00a0\u200b",
+        )
+        for prefix in hidden:
+            for trigger in ("=", "+", "-", "@", "\t", "\r"):
+                cell = v1.defuse_cell(f"{prefix}{trigger}1")
+                self.assertTrue(cell.startswith("'"), repr(prefix + trigger))
+        self.assertTrue(v1.defuse_cell("\t").startswith("'"))
+        self.assertTrue(v1.defuse_cell("\r").startswith("'"))
+        self.assertEqual(v1.defuse_cell("a=b"), "a=b")
+        self.assertEqual(v1.defuse_cell("\u00a0safe"), "\u00a0safe")
+
 
 class PathTests(unittest.TestCase):
     def setUp(self):

@@ -16,6 +16,7 @@ import re
 import stat
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 
 from . import __version__
@@ -40,7 +41,6 @@ MAX_LIMIT = 1000
 _NUM_RE = re.compile(r"^[0-9]{1,9}$")
 _DDE_RE = re.compile(r"""(?i)^\s*["']*\s*[=+\-@].*\|""")
 _FORMULA_FIRST = set("=+-@\t\r\n|") | {"\uff1d", "\uff0b", "\uff0d", "\uff20"}
-_LEADING = set(" \t\r\n\"'")
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 _EXPORT_WHAT = ("devices", "findings", "history")
 _PRIVATE = ("owner", "location", "notes")
@@ -104,11 +104,19 @@ def export_filename(what: str, scan_id: int, fmt: str) -> str:
     )
 
 
+def _skippable_prefix(char: str) -> bool:
+    """Whitespace and format characters that must not hide a formula."""
+    if char in "\"'":
+        return True
+    category = unicodedata.category(char)
+    return category.startswith("Z") or category == "Cf"
+
+
 def defuse_cell(value) -> str:
     """Quote-prefix a spreadsheet formula. Every caller still quotes the cell."""
     text = "" if value is None else str(value).replace("\x00", "")
     index = 0
-    while index < len(text) and text[index] in _LEADING:
+    while index < len(text) and _skippable_prefix(text[index]):
         index += 1
     first = text[index] if index < len(text) else ""
     lowered = text.lower()
