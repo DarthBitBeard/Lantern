@@ -1445,7 +1445,7 @@ class LanMethodTests(unittest.TestCase):
 
 
 class StrictAuthTests(unittest.TestCase):
-    """Opt-in strict auth. Loopback only. The default server is a separate test."""
+    """Strict auth on loopback. This is the default. The server is built with strict_auth=True."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
