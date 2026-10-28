@@ -169,6 +169,21 @@ class PathTests(unittest.TestCase):
                 v1.write_export_file(str(dest), b"pwned", force=False)
         self.assertEqual(secret.read_text(encoding="utf-8"), "keep")
 
+    def test_create_does_not_truncate_an_existing_file(self):
+        dest = self.root / "keep.json"
+        dest.write_bytes(b"keep")
+        real = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == dest:
+                raise FileNotFoundError(path)
+            return real(path, *args, **kwargs)
+
+        with mock.patch("lantern.v1.os.lstat", lstat):
+            with self.assertRaises(ValueError):
+                v1.write_export_file(str(dest), b"truncated", force=False)
+        self.assertEqual(dest.read_bytes(), b"keep")
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -279,6 +294,15 @@ class ApiTests(unittest.TestCase):
         status, body, _ = self._request("/api/status")
         self.assertEqual(status, 200, body)
         self.assertNotIn("api_version", json.loads(body))
+        for legacy in ("/api/scans", "/api/diff", "/api/scans/latest"):
+            status, body, _ = self._request(legacy)
+            self.assertEqual(status, 200, body)
+            self.assertNotIn("api_version", json.loads(body))
+        status, body, _ = self._request("/api/v1/scans/123456789", token=self.token)
+        self.assertEqual(status, 404, body)
+        status, body, _ = self._request("/api/v1/scans/1234567890", token=self.token)
+        self.assertEqual(status, 400, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "bad_request")
         status, body, headers = self._request("/api/v1/status", method="POST", token=self.token)
         self.assertEqual(status, 405, body)
         self.assertEqual(json.loads(body)["error"]["code"], "method_not_allowed")
@@ -502,7 +526,10 @@ class CliExportTests(unittest.TestCase):
         try:
             save_scan(conn, "192.168.50.0/24", [_device("192.168.50.10", "aa:bb:cc:dd:ee:10")])
             from lantern.assets import set_asset
-            set_asset(conn, "mac:aa:bb:cc:dd:ee:10", "mac", owner="Ada", notes="secret")
+            set_asset(
+                conn, "mac:aa:bb:cc:dd:ee:10", "mac",
+                owner="OwnerSecretValue", notes="NotesSecretValue",
+            )
         finally:
             conn.close()
         code, out, err = self.run_cli("export", "--what", "devices", "--format", "json")
@@ -510,10 +537,12 @@ class CliExportTests(unittest.TestCase):
         item = json.loads(out)["items"][0]
         self.assertNotIn("owner", item)
         self.assertNotIn("notes", item)
+        self.assertNotIn("OwnerSecretValue", out)
+        self.assertNotIn("NotesSecretValue", out)
         code, out, err = self.run_cli(
             "export", "--what", "devices", "--format", "json", "--include-private-fields",
         )
-        self.assertEqual(json.loads(out)["items"][0]["owner"], "Ada")
+        self.assertEqual(json.loads(out)["items"][0]["owner"], "OwnerSecretValue")
         dest = self.root / "devices.csv"
         code, _out, err = self.run_cli(
             "export", "--what", "devices", "--format", "csv", "--output", str(dest),
@@ -521,8 +550,15 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"Wrote {dest}", err)
         text = dest.read_text(encoding="utf-8")
-        self.assertNotIn("Ada", text)
-        self.assertNotIn("owner", text.split("\r\n", 1)[0])
+        header, *rest = [line for line in text.split("\r\n") if line]
+        self.assertNotIn("owner", header)
+        self.assertNotIn("location", header)
+        self.assertNotIn("notes", header)
+        self.assertNotIn("OwnerSecretValue", text)
+        self.assertNotIn("NotesSecretValue", text)
+        parsed = list(csv.reader(io.StringIO(text, newline="")))
+        self.assertTrue(parsed)
+        self.assertTrue(all(len(row) == len(parsed[0]) for row in parsed[1:]))
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(dest.stat().st_mode) & 0o777, 0o600)
         code, _out, err = self.run_cli("export", "--what", "history", "--tag", "web")
