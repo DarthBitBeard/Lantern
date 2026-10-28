@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `lantern asset` records owner, location, tags, criticality, and notes for a device that already appears in a saved scan. The record is kept across scans, keyed by MAC, or by IP when the device has no MAC. `report` and `diff` include the fields. The trust label is unchanged. Schema 3 adds the table; opening an older database copies it to `.vN.bak` first.
 - `history`, `diff`, and `report --scope` use the spelling stored in the scope file. `scan --scope LAB-2` and `history --scope lab-2` refer to the same scope when the file names it `Lab-2`. A typed name is checked against the scope-name rules before case folding, so a Kelvin sign or `ß` is rejected instead of being folded.
 - A diff compares a scan only to the previous scan of the same scope, including `lantern diff` and `lantern report` with no `--scope`, and the dashboard. Unscoped scans compare only to earlier unscoped scans.
 - Scan targets must lie fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`. `0.0.0.0/8`, `240.0.0.0/4`, `192.0.0.0/24`, the TEST-NET blocks, and `198.18.0.0/15` are refused. Scope names that differ only by case are the same name.

@@ -34,10 +34,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
-# plus this version table. Schema 2 adds scans.scope_name. The package
-# version stays put until a release; the schema version moves only when
-# the tables change.
-SCHEMA_VERSION = 2
+# plus this version table. Schema 2 adds scans.scope_name. Schema 3 adds
+# the asset table, which is not tied to a scan id. The package version
+# stays put until a release; the schema version moves only when the tables change.
+SCHEMA_VERSION = 3
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -493,9 +493,29 @@ def _migration_2_scope_name(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE scans ADD COLUMN scope_name TEXT")
 
 
+def _migration_3_assets(conn: sqlite3.Connection) -> None:
+    """Schema 3: inventory fields that persist across scans.
+
+    The table is independent of scan ids. Older scans are not rewritten.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS assets (
+               asset_key TEXT PRIMARY KEY,
+               key_kind TEXT NOT NULL,
+               owner TEXT,
+               location TEXT,
+               tags TEXT NOT NULL DEFAULT '[]',
+               criticality TEXT,
+               notes TEXT,
+               updated_at TEXT NOT NULL
+           )"""
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
+    3: _migration_3_assets,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 

@@ -22,7 +22,9 @@ def _scan():
                 "hostname": _PAYLOAD + "hostname",
                 "label": _PAYLOAD + "label",
                 "owner": _PAYLOAD + "owner",
-                "tag": _PAYLOAD + "tag",
+                "location": _PAYLOAD + "location",
+                "tags": [_PAYLOAD + "tag"],
+                "criticality": _PAYLOAD + "criticality",
                 "notes": _PAYLOAD + "notes",
                 "open_ports": [{"port": 80, "open": True, "banner": _PAYLOAD + "banner"}],
                 "findings": [],
@@ -35,7 +37,7 @@ class ReportEscapeTests(unittest.TestCase):
     def test_html_escapes_scope_and_device_fields(self):
         page = to_html(_scan())
         self.assertNotIn("<script>", page)
-        for field in ("scope", "hostname", "label", "owner", "tag", "notes", "banner"):
+        for field in ("scope", "hostname", "label", "owner", "location", "tag", "criticality", "notes", "banner"):
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;" + field, page)
 
     def test_json_round_trips_the_same_fields(self):
@@ -47,9 +49,36 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertEqual(device["hostname"], scan["devices"][0]["hostname"])
         self.assertEqual(device["label"], scan["devices"][0]["label"])
         self.assertEqual(device["owner"], scan["devices"][0]["owner"])
-        self.assertEqual(device["tag"], scan["devices"][0]["tag"])
+        self.assertEqual(device["location"], scan["devices"][0]["location"])
+        self.assertEqual(device["tags"], scan["devices"][0]["tags"])
+        self.assertEqual(device["criticality"], scan["devices"][0]["criticality"])
         self.assertEqual(device["notes"], scan["devices"][0]["notes"])
         self.assertEqual(device["open_ports"][0]["banner"], _PAYLOAD + "banner")
+
+    def test_inventory_fields_escape_markup_and_bidi(self):
+        payloads = ("<img src=x onerror=alert(1)>", '"><script>alert(1)</script>', "safe\u202ehidden")
+        for payload in payloads:
+            scan = _scan()
+            device = scan["devices"][0]
+            device["owner"] = payload
+            device["location"] = payload
+            device["tags"] = [payload]
+            device["criticality"] = payload
+            device["notes"] = payload
+            page = to_html(scan, {"added": [device], "removed": [device], "changed": []})
+            self.assertNotIn("<img", page)
+            self.assertNotIn("<script>", page)
+            self.assertNotIn("\u202e", page)
+            if payload.startswith("<"):
+                self.assertIn("&lt;img", page)
+            if payload.startswith('"'):
+                self.assertIn("&quot;&gt;&lt;script&gt;", page)
+            text = to_json(scan, {"added": [device], "removed": [], "changed": []})
+            parsed = json.loads(text)
+            self.assertNotIn("\u202e", text)
+            expected = "safehidden" if "\u202e" in payload else payload
+            self.assertEqual(parsed["devices"][0]["owner"], expected)
+            self.assertEqual(parsed["diff"]["added"][0]["owner"], expected)
 
     def test_multi_scope_html_escapes_a_failed_scope_error(self):
         page = multi_scope_html([], [("lab", _PAYLOAD)])

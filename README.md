@@ -124,6 +124,19 @@ From the dashboard you can also run a real scan or a demo scan, see the diff ban
 
 Run scans from a machine on your home network. A scan from inside a normal Docker container only sees the container network.
 
+## Device inventory
+
+Inventory fields stay with the device across scans. They are not a second copy of the trust label.
+
+```bash
+python3 -m lantern asset set aa:bb:cc:dd:ee:ff --owner Ada --location "Rack A" --tag web --criticality high --notes "Patched last week"
+python3 -m lantern asset show aa:bb:cc:dd:ee:ff
+python3 -m lantern asset list --tag web --criticality high
+python3 -m lantern asset clear aa:bb:cc:dd:ee:ff --field notes
+```
+
+`set` only accepts a MAC or IPv4 address that already appears in a saved scan. A device with a MAC is stored by that MAC (lowercase, colon form), so a later scan with a new IP keeps the same record. A device with no MAC is stored by IP. Owner and location are at most 80 characters, notes at most 500. Tags are at most 10, each 1 to 32 characters from `a-z`, `0-9`, `.`, `_`, or `-`. Criticality is `low`, `medium`, `high`, or `critical`. Control characters and bidirectional overrides are rejected. `report` and `diff` include the fields. HTML output escapes them.
+
 ## Safety rules, enforced in code
 
 - Private RFC1918 subnets only (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and the scope must sit fully inside one of them. Public addresses, loopback, link-local, `0.0.0.0/8`, `240.0.0.0/4`, `192.0.0.0/24`, the TEST-NET blocks, and `198.18.0.0/15` are refused.
