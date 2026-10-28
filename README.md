@@ -44,6 +44,7 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Dashboard with request logs | `python3 -m lantern web --debug` |
 | Custom DB path | `python3 -m lantern web --db /tmp/lantern.db` |
 | Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` |
+| Extra dashboard Host | `python3 -m lantern web --allow-host dashboard.home` (repeat the flag for another host) |
 | Real scan | `python3 -m lantern scan --subnet 192.168.1.0/24` |
 | List named scopes | `python3 -m lantern scopes --config lantern.toml` |
 | Scan one named scope | `python3 -m lantern scan --config lantern.toml --scope home` |
@@ -63,7 +64,15 @@ Opening a database applies any pending schema upgrade. Lantern only migrates for
 - Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --debug --db data/lantern.db`.
 - `--debug` prints each HTTP request to stderr; leave it off for normal use.
 - Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`.
-- API smoke check: `curl -s http://127.0.0.1:8068/api/status` and `curl -s -X POST http://127.0.0.1:8068/api/demo -H 'Content-Type: application/json' -d '{}'`.
+- API smoke check: `curl -s http://127.0.0.1:8068/api/status`. A POST also needs the per-process token from the page (it is not printed):
+
+  ```bash
+  token=$(curl -s http://127.0.0.1:8068/ | sed -n 's/.*name="lantern-token" content="\([^"]*\)".*/\1/p')
+  curl -s -X POST http://127.0.0.1:8068/api/demo \
+    -H 'Content-Type: application/json' \
+    -H "X-Lantern-Token: $token" \
+    -d '{}'
+  ```
 - If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
 - Subnet auto-detect uses the machine's outbound private IPv4, then its hostname. A hostname lookup that takes more than half a second is skipped, so a slow DNS answer cannot stall the dashboard. If Lantern still cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
 
@@ -101,6 +110,24 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 
 Only scan networks you own or have explicit permission to scan. See [SECURITY.md](SECURITY.md).
 
+## Threat model
+
+Lantern is a local admin tool. The dashboard has no login. The checks below are there to stop another website in the same browser, not to keep out a person who can already open the page.
+
+What it resists:
+
+- Another site triggering a scan or reading the inventory (cross-site requests, and DNS rebinding where a public name starts pointing at `127.0.0.1`).
+- A scan of a network that is not a small private range.
+
+What it does not resist:
+
+- Anyone who can open an allowed Host can read the page, and the page contains the API token. That person can call the API. `--allow-host` does not add a login, and binding to something other than loopback (`--host`) is still an explicit choice with the same warning as before.
+- A person at the keyboard, or another local user who can read the SQLite file.
+
+Every request, including `GET` and the index, must send a `Host` of `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, or a host you named with `--allow-host`. Nothing else is accepted. A name you did not list is refused even when it resolves to loopback, which is the rebinding case. State-changing `POST /api/*` calls also require `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe`, embeds it in the dashboard page, and compares it with `hmac.compare_digest`. It is not written to the log. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` (curl, or another non-browser client) is accepted only when the token is valid.
+
+Scanning is unchanged: private RFC1918 ranges only, at most 1024 addresses, no loopback or link-local targets. The Host allowlist does not widen that.
+
 ## Web dashboard
 
 No pip install needed. The dashboard is stdlib only, plain HTML, CSS, and JavaScript, with a JSON API.
@@ -110,7 +137,7 @@ python3 -m lantern web
 # open http://127.0.0.1:8068/
 ```
 
-API, same origin only:
+API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` is loopback on this port or a host passed with `--allow-host`.
 
 | Route | Returns |
 | --- | --- |
@@ -123,7 +150,11 @@ API, same origin only:
 | `POST /api/demo` `{}` | saves the two demo scans |
 | `POST /api/trust` `{"mac": "...", "label": "...", "trusted": true}` | labels a device by MAC |
 
-POST bodies must be JSON with `Content-Type: application/json` and under 64 KiB. A browser POST whose `Origin` is not this dashboard is refused (403), so another web page cannot trigger a scan. Scan results include trusted labels and `trusted`/`known` flags per device.
+`GET` needs an allowed `Host` and does not need the token. `POST /api/*` also needs the header `X-Lantern-Token`. The dashboard reads that value from `<meta name="lantern-token">` in the page and sends it on every POST. A new token is generated each time the process starts. It is not printed and it is not written to the request log.
+
+POST bodies must be JSON with `Content-Type: application/json` and under 64 KiB (415 or 413 otherwise). If a POST includes `Origin`, that origin's host and port must be on the same allowlist (`http` or `https` only). A POST with no `Origin` is accepted only when the token is valid. A bad Host, a missing or wrong token, or a disallowed Origin is a generic 403. Scan results include trusted labels and `trusted`/`known` flags per device.
+
+`--allow-host` is repeatable. `python3 -m lantern web --allow-host dashboard.home` also accepts `Host: dashboard.home:<port>`. `python3 -m lantern web --allow-host dashboard.home:8443` accepts that exact host and port. Bracket an IPv6 address (`--allow-host '[2001:db8::5]'`). The default allowlist is only `127.0.0.1`, `localhost`, and `[::1]` on the bound port.
 
 The dashboard binds to localhost by default and has no login, by design for local use. Keep it there, or behind Tailscale. Never expose it to the internet.
 
@@ -147,7 +178,7 @@ CI (`.github/workflows/docker.yml`) builds the image and, with container network
 python3 tests/run_tests.py
 ```
 
-This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guardrails, subnet and ARP parsing, TCP probes against a local listener, SQLite history and diff, the CLI, and the web API (routes, validation, request hygiene, static path safety) against temporary databases. It ends with a CLI demo smoke test in a fresh process. Nothing touches a real network.
+This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guardrails, subnet and ARP parsing, TCP probes against a local listener, SQLite history and diff, the CLI, and the web API (routes, validation, request hygiene, Host allowlist, API token, static path safety) against temporary databases. It ends with a CLI demo smoke test in a fresh process. Nothing touches a real network. The web tests use a localhost listener and fake data only.
 
 GitHub Actions runs that same suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13. A second job builds an sdist and a wheel, installs the wheel in a clean directory (so it is not importing the checkout), and runs `lantern demo`. The demo uses fake data; CI does not scan a network.
 

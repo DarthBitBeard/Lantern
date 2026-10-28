@@ -7,7 +7,7 @@ Thanks for considering a contribution. Lantern is deliberately small, so please 
 1. Defensive only. No brute force, no exploits, no password guessing, no scanning of public networks. If a feature needs to touch another machine, it must be a plain connect or read, with the user's explicit action.
 2. Stdlib only. Do not add a third-party dependency without opening an issue first and making the case. The zero-install story is a feature.
 3. Plain English. Every new finding needs a severity, a title a non-security person understands, and a fix step.
-4. Local only. No cloud calls, no tracking, no accounts. Data stays in the local SQLite file unless the user exports a report.
+4. Local only. No cloud calls, no tracking, no accounts. Data stays in the local SQLite file unless the user exports a report. A new state-changing dashboard route must use the same Host allowlist, Origin check, and `X-Lantern-Token` check as the existing `POST /api/*` handlers in `lantern/webapp.py`. Do not log that token.
 5. No real network data in tests, examples, or screenshots. Use the demo network in `lantern/demo.py`, or clearly fake addresses and MACs.
 
 ## How to run it
