@@ -101,6 +101,10 @@ class CsvTests(unittest.TestCase):
         self.assertTrue(v1.defuse_cell("\r").startswith("'"))
         self.assertEqual(v1.defuse_cell("a=b"), "a=b")
         self.assertEqual(v1.defuse_cell("\u00a0safe"), "\u00a0safe")
+        for trigger in ("\uff1d", "\uff0b", "\uff0d", "\uff20", "\ufe63", "\uff5c"):
+            self.assertTrue(v1.defuse_cell(trigger + "1").startswith("'"), trigger)
+        self.assertTrue(v1.defuse_cell("\u0300=1").startswith("'"))
+        self.assertIn("=1", v1.defuse_cell("\u0300=1"))
 
 
 class PathTests(unittest.TestCase):

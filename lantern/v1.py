@@ -40,7 +40,14 @@ DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
 _NUM_RE = re.compile(r"^[0-9]{1,9}$")
 _DDE_RE = re.compile(r"""(?i)^\s*["']*\s*[=+\-@].*\|""")
-_FORMULA_FIRST = set("=+-@\t\r\n|") | {"\uff1d", "\uff0b", "\uff0d", "\uff20"}
+_FORMULA_FIRST = set("=+-@\t\r\n|") | {
+    "\uff1d",  # fullwidth equals
+    "\uff0b",  # fullwidth plus
+    "\uff0d",  # fullwidth hyphen
+    "\uff20",  # fullwidth commercial at
+    "\ufe63",  # small hyphen-minus
+    "\uff5c",  # fullwidth vertical line
+}
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 _EXPORT_WHAT = ("devices", "findings", "history")
 _PRIVATE = ("owner", "location", "notes")
@@ -117,7 +124,10 @@ def _skippable_prefix(char: str) -> bool:
         return False
     if char.isspace():
         return True
-    return unicodedata.category(char) == "Cf"
+    category = unicodedata.category(char)
+    # Cf hides bidi and zero-width marks. Mn/Me/Mc are combining marks such
+    # as U+0300, which must not sit in front of a trigger unnoticed.
+    return category == "Cf" or category in {"Mn", "Me", "Mc"}
 
 
 def defuse_cell(value) -> str:
