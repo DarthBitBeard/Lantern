@@ -1,5 +1,6 @@
 """Subnet validation, neighbor-cache parsing, and ping flags. Offline."""
 
+import time
 import unittest
 from unittest import mock
 
@@ -94,6 +95,24 @@ class GuessSubnetTests(unittest.TestCase):
     def test_none_when_nothing_private(self):
         with mock.patch.object(discovery, "_local_ipv4_candidates", return_value=["127.0.0.1", "garbage"]):
             self.assertIsNone(guess_subnet())
+
+    def test_hostname_fallback_when_udp_route_fails(self):
+        with mock.patch.object(discovery.socket, "socket", side_effect=OSError("no route")), \
+                mock.patch.object(discovery.socket, "gethostbyname", return_value="10.4.5.6"), \
+                mock.patch.object(discovery.socket, "gethostname", return_value="lantern-test"):
+            self.assertEqual(guess_subnet(), "10.4.5.0/24")
+
+    def test_slow_hostname_lookup_does_not_stall(self):
+        def hang(_name):
+            time.sleep(5)
+            return "10.9.9.9"
+
+        started = time.monotonic()
+        with mock.patch.object(discovery.socket, "socket", side_effect=OSError("no route")), \
+                mock.patch.object(discovery.socket, "gethostbyname", side_effect=hang), \
+                mock.patch.object(discovery.socket, "gethostname", return_value="lantern-test"):
+            self.assertIsNone(guess_subnet())
+        self.assertLess(time.monotonic() - started, 2.0)
 
 
 if __name__ == "__main__":

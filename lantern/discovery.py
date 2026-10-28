@@ -16,6 +16,7 @@ import platform
 import re
 import socket
 import subprocess
+import threading
 from pathlib import Path
 
 MAC_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
@@ -26,6 +27,10 @@ MAX_SCAN_HOSTS = 1024
 MIN_PREFIXLEN = 32 - (MAX_SCAN_HOSTS.bit_length() - 1)  # 22
 
 _EMPTY_MAC = "00:00:00:00:00:00"
+# Resolving this machine's hostname can wait on DNS for a long time on macOS.
+# Auto-detect must not stall a scan or the dashboard on that lookup.
+_HOSTNAME_LOOKUP_TIMEOUT = 0.5
+_hostname_lock = threading.Lock()
 
 
 def validate_subnet(text: str) -> ipaddress.IPv4Network:
@@ -51,6 +56,36 @@ def validate_subnet(text: str) -> ipaddress.IPv4Network:
     return network
 
 
+def _hostname_ipv4() -> str | None:
+    """This machine's hostname as an IPv4 address, or None if it is slow or fails.
+
+    The lookup runs in a daemon thread and is abandoned after
+    `_HOSTNAME_LOOKUP_TIMEOUT` seconds. A second call while one is still
+    in flight returns None instead of starting another, so a stuck DNS
+    lookup cannot pile up threads when the dashboard polls status.
+    """
+    if not _hostname_lock.acquire(blocking=False):
+        return None
+    found: list[str] = []
+
+    def lookup() -> None:
+        try:
+            found.append(socket.gethostbyname(socket.gethostname()))
+        except Exception:
+            pass
+        finally:
+            _hostname_lock.release()
+
+    worker = threading.Thread(target=lookup, name="lantern-hostname", daemon=True)
+    try:
+        worker.start()
+    except Exception:
+        _hostname_lock.release()
+        return None
+    worker.join(_HOSTNAME_LOOKUP_TIMEOUT)
+    return found[0] if found else None
+
+
 def _local_ipv4_candidates() -> list[str]:
     """Best-effort list of this machine's IPv4 addresses, outbound first.
 
@@ -65,10 +100,9 @@ def _local_ipv4_candidates() -> list[str]:
             candidates.append(sock.getsockname()[0])
     except Exception:
         pass
-    try:
-        candidates.append(socket.gethostbyname(socket.gethostname()))
-    except Exception:
-        pass
+    host_ip = _hostname_ipv4()
+    if host_ip:
+        candidates.append(host_ip)
     return list(dict.fromkeys(candidates))
 
 

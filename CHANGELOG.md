@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- CI runs the test suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13.
+- CI builds an sdist and a wheel, installs the wheel outside the source tree, and runs an offline `lantern demo` on Linux, macOS, and Windows.
+- Guessing the local subnet gives up on a slow hostname lookup after half a second, so a stuck DNS answer cannot stall the CLI or the dashboard. The UDP route check is unchanged and still does not send a packet.
+
 ## 0.3.0 - 2026-10-27
 
 Review pass across every layer. No new dependencies.

@@ -61,7 +61,7 @@ Default database file: `data/lantern.db` (created automatically; gitignored).
 - Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`.
 - API smoke check: `curl -s http://127.0.0.1:8068/api/status` and `curl -s -X POST http://127.0.0.1:8068/api/demo -H 'Content-Type: application/json' -d '{}'`.
 - If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
-- Subnet auto-detect uses the machine's outbound private IPv4. If it cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
+- Subnet auto-detect uses the machine's outbound private IPv4, then its hostname. A hostname lookup that takes more than half a second is skipped, so a slow DNS answer cannot stall the dashboard. If Lantern still cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
 
 ## Scan your own network
 
@@ -132,6 +132,8 @@ python3 tests/run_tests.py
 ```
 
 This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guardrails, subnet and ARP parsing, TCP probes against a local listener, SQLite history and diff, the CLI, and the web API (routes, validation, request hygiene, static path safety) against temporary databases. It ends with a CLI demo smoke test in a fresh process. Nothing touches a real network.
+
+GitHub Actions runs that same suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13. A second job builds an sdist and a wheel, installs the wheel in a clean directory (so it is not importing the checkout), and runs `lantern demo`. The demo uses fake data; CI does not scan a network.
 
 ## Contributing
 
