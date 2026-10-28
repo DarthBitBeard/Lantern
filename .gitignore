@@ -225,3 +225,6 @@ data/
 
 # Copy written beside a database before a schema upgrade (<file>.v0.bak)
 *.v*.bak
+
+# Local scope file. The documented sample is examples/lantern.toml.
+/lantern.toml

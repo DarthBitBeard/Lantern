@@ -45,6 +45,8 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Custom DB path | `python3 -m lantern web --db /tmp/lantern.db` |
 | Custom bind/port | `python3 -m lantern web --host 127.0.0.1 --port 8068` |
 | Real scan | `python3 -m lantern scan --subnet 192.168.1.0/24` |
+| List named scopes | `python3 -m lantern scopes --config lantern.toml` |
+| Scan one named scope | `python3 -m lantern scan --config lantern.toml --scope home` |
 | Diff last two scans | `python3 -m lantern diff` |
 | List saved scans | `python3 -m lantern history` |
 | HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` for an older scan) |
@@ -74,6 +76,15 @@ python3 -m lantern history
 python3 -m lantern report --format html > report.html
 ```
 
+To keep a few networks on file, copy [`examples/lantern.toml`](examples/lantern.toml) to `lantern.toml` and edit the subnets to networks you are allowed to scan. Then:
+
+```bash
+python3 -m lantern scopes --config lantern.toml
+python3 -m lantern scan --config lantern.toml --scope home
+```
+
+Each scope is one private subnet (`subnet`) plus an optional `description`. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. If it defines several, `--scope` is required. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config` or `--scope` is an error. The dashboard does not read `lantern.toml`; its subnet field is unchanged.
+
 A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then TCP-connects to the 25 risk ports on each live host, 8 hosts at a time. Expect roughly 10 to 30 seconds for a /24. Hosts that block ping and are not in the ARP cache are missed; run the scan twice if your router has just rebooted.
 
 From the dashboard you can also run a real scan or a demo scan, see the diff banner, search and filter devices, label a device and mark it trusted or unknown, browse scan history, and open the HTML report. Trust is stored by MAC address in the same SQLite file, so a trusted label survives later scans.
@@ -84,6 +95,7 @@ Run scans from a machine on your home network. A scan from inside a normal Docke
 
 - Private RFC1918 subnets only. Public, loopback, and link-local addresses are refused.
 - At most 1024 addresses per scan (a /22), normally a /24.
+- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected.
 - No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
 - Stdlib only. No Nmap, no Scapy, no root needed.
 

@@ -164,6 +164,90 @@ class CliTests(unittest.TestCase):
         finally:
             raw.close()
 
+    def _write_scopes(self, text, name="lantern.toml"):
+        path = Path(self.tmp.name) / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_scopes_command_lists_without_creating_a_database_or_scanning(self):
+        path = self._write_scopes(
+            '[scopes.home]\nsubnet = "192.168.1.50/24"\ndescription = "House"\n'
+            '[scopes.lab]\nsubnet = "10.2.0.0/24"\n'
+        )
+        code, out, err = self.run_cli("scopes", "--config", str(path))
+        self.assertEqual(code, 0, err)
+        self.assertIn("home", out)
+        self.assertIn("192.168.1.0/24", out)
+        self.assertIn("House", out)
+        self.assertFalse(Path(self.db).exists())
+
+        code, out, _ = self.run_cli("scopes", "--config", str(path), "--format", "json")
+        payload = json.loads(out)
+        self.assertEqual(payload["scopes"][0]["subnet"], "192.168.1.0/24")
+        self.assertIsNone(payload["scopes"][1]["description"])
+
+    def test_scan_scope_uses_config_and_does_not_probe(self):
+        path = self._write_scopes('[scopes.lab]\nsubnet = "10.9.9.8/24"\ndescription = "bench"\n')
+        with mock.patch.object(cli, "guess_subnet", side_effect=AssertionError("should not guess")), \
+                mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+            code, out, err = self.run_cli("scan", "--config", str(path), "--format", "json")
+        self.assertEqual(code, 0, err)
+        scan = json.loads(out)
+        self.assertEqual(scan["subnet"], "10.9.9.0/24")
+        self.assertEqual(scan["devices"], [])
+        self.assertEqual(run_scan.call_args.args[0], "10.9.9.0/24")
+        self.assertFalse(run_scan.call_args.kwargs["demo_mode"])
+
+    def test_scan_scope_refuses_unsafe_config_before_probing(self):
+        path = self._write_scopes('[scopes.bad]\nsubnet = "8.8.8.0/24"\n')
+        with mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+            code, _, err = self.run_cli("scan", "--config", str(path), "--scope", "bad")
+        self.assertEqual(code, 2)
+        self.assertIn("private", err)
+
+    def test_named_scope_and_conflicts(self):
+        path = self._write_scopes(
+            '[scopes.home]\nsubnet = "192.168.4.0/24"\n'
+            '[scopes.lab]\nsubnet = "10.4.0.0/24"\n'
+        )
+        with mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "lab", "--format", "json",
+            )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["subnet"], "10.4.0.0/24")
+        self.assertEqual(run_scan.call_args.args[0], "10.4.0.0/24")
+
+        with mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+            code, _, err = self.run_cli("scan", "--config", str(path))
+            self.assertEqual(code, 2)
+            self.assertIn("--scope", err)
+
+            code, _, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "lab", "--subnet", "10.4.0.0/24",
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("not both", err)
+
+            code, _, err = self.run_cli("scan", "--demo", "--config", str(path))
+            self.assertEqual(code, 2)
+            self.assertIn("--demo", err)
+
+    def test_scope_flag_reads_lantern_toml_from_the_working_directory(self):
+        import os
+
+        self._write_scopes('[scopes.lab]\nsubnet = "10.8.8.0/24"\n')
+        previous = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            with mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+                code, out, err = self.run_cli("scan", "--scope", "lab", "--format", "json")
+        finally:
+            os.chdir(previous)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["subnet"], "10.8.8.0/24")
+        self.assertEqual(run_scan.call_args.args[0], "10.8.8.0/24")
+
 
 if __name__ == "__main__":
     unittest.main()
