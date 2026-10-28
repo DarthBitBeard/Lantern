@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from lantern.report import defuse_csv_cell, to_html, to_json
+from lantern.report import to_html, to_json
 
 _PAYLOAD = "<script>alert(1)</script>"
 
@@ -50,12 +50,3 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertEqual(device["tag"], scan["devices"][0]["tag"])
         self.assertEqual(device["notes"], scan["devices"][0]["notes"])
         self.assertEqual(device["open_ports"][0]["banner"], _PAYLOAD + "banner")
-        self.assertIn('\\"', json.dumps({"q": 'say "hi"'}))
-
-    def test_csv_formula_cells_are_prefixed(self):
-        for raw in ("=1+1", "+1", "-1", "@sum", "\tcmd", "\rline"):
-            self.assertTrue(defuse_csv_cell(raw).startswith("'"), raw)
-            self.assertEqual(defuse_csv_cell(raw)[1:], raw)
-        self.assertEqual(defuse_csv_cell("router"), "router")
-        self.assertEqual(defuse_csv_cell(None), "")
-        self.assertEqual(defuse_csv_cell("=cmd")[0], "'")

@@ -6,18 +6,6 @@ import html
 import json
 
 
-def defuse_csv_cell(value) -> str:
-    """Stop a cell from being read as a spreadsheet formula.
-
-    A leading ``=``, ``+``, ``-``, ``@``, tab, or carriage return is prefixed
-    with a single quote. The quote is the cell text, not a file mode.
-    """
-    text = "" if value is None else str(value)
-    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + text
-    return text
-
-
 def scan_to_dict(scan: dict, diff: dict | None = None) -> dict:
     return {
         "id": scan["id"],

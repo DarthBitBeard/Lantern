@@ -330,22 +330,25 @@ class CliTests(unittest.TestCase):
             ],
         }
 
-        def fake(subnet, ports=None, demo_mode=False):
-            self.assertFalse(demo_mode)
-            return queues[subnet].pop(0)
+        def fake(hosts, ports=None):
+            self.assertTrue(hosts)
+            key = "192.168.50.0/24" if hosts[0].startswith("192.168.50.") else "10.50.0.0/24"
+            return queues[key].pop(0)
 
-        with mock.patch.object(cli, "run_scan", side_effect=fake) as run_scan:
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli("scan", "--config", str(path), "--all", "--format", "json")
         self.assertEqual(code, 0, err)
         summary = json.loads(out)
         self.assertEqual(summary["ran"], ["home", "lab"])
         self.assertEqual(summary["failed"], [])
         self.assertEqual(
-            [call.args[0] for call in run_scan.call_args_list],
-            ["192.168.50.0/24", "10.50.0.0/24"],
+            [call.args[0][0].rsplit(".", 1)[0] for call in scan_hosts.call_args_list],
+            ["192.168.50", "10.50.0"],
         )
+        probed = [ip for call in scan_hosts.call_args_list for ip in call.args[0]]
+        self.assertEqual(len(probed), len(set(probed)))
 
-        with mock.patch.object(cli, "run_scan", side_effect=fake) as run_scan:
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "lab", "--scope", "home",
             )
@@ -353,8 +356,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("Scopes ran: lab, home", out)
         self.assertIn("Scopes failed: (none)", out)
         self.assertEqual(
-            [call.args[0] for call in run_scan.call_args_list],
-            ["10.50.0.0/24", "192.168.50.0/24"],
+            [call.args[0][0].rsplit(".", 1)[0] for call in scan_hosts.call_args_list],
+            ["10.50.0", "192.168.50"],
         )
 
         code, out, err = self.run_cli("history", "--format", "json")
@@ -405,12 +408,12 @@ class CliTests(unittest.TestCase):
     def test_one_scope_failing_still_keeps_the_others(self):
         path = self._two_scopes()
 
-        def fake(subnet, ports=None, demo_mode=False):
-            if subnet.startswith("10."):
+        def fake(hosts, ports=None):
+            if hosts and hosts[0].startswith("10."):
                 raise RuntimeError("lab unreachable")
             return [self._device("192.168.50.10")]
 
-        with mock.patch.object(cli, "run_scan", side_effect=fake) as run_scan:
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "lab", "--scope", "home",
             )
@@ -420,8 +423,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("Scopes failed: lab", out)
         self.assertIn("lab unreachable", out)
         self.assertEqual(
-            [call.args[0] for call in run_scan.call_args_list],
-            ["10.50.0.0/24", "192.168.50.0/24"],
+            [call.args[0][0].rsplit(".", 1)[0] for call in scan_hosts.call_args_list],
+            ["10.50.0", "192.168.50"],
         )
         code, out, err = self.run_cli("history", "--format", "json")
         scans = json.loads(out)["scans"]
@@ -453,6 +456,114 @@ class CliTests(unittest.TestCase):
                 code, _, err = self.run_cli(command, "--scope", "<script>")
                 self.assertEqual(code, 2, command)
                 self.assertIn("not allowed", err)
+
+    def test_run_refuses_before_probe_when_unique_addresses_exceed_1024(self):
+        parts = []
+        for i in range(40):
+            base = i * 4
+            parts.append(
+                f'[scopes.n{i}]\nsubnet = "10.{base // 256}.{base % 256}.0/22"\n'
+            )
+        many = self._write_scopes("".join(parts), name="many.toml")
+        # inner sits inside wide, so a per-scope sum would double-count it.
+        # extra is disjoint. The merged total is 1024 + 256.
+        overlap = self._write_scopes(
+            '[scopes.wide]\nsubnet = "10.0.0.0/22"\n'
+            '[scopes.inner]\nsubnet = "10.0.1.0/24"\n'
+            '[scopes.extra]\nsubnet = "10.8.0.0/24"\n',
+            name="overlap.toml",
+        )
+        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+            code, _, err = self.run_cli("scan", "--config", str(many), "--all")
+            self.assertEqual(code, 2, err)
+            self.assertIn("40960 unique addresses", err)
+            self.assertIn("1024", err)
+
+            code, _, err = self.run_cli("scan", "--config", str(overlap), "--all")
+            self.assertEqual(code, 2, err)
+            self.assertIn("1280 unique addresses", err)
+            scan_hosts.assert_not_called()
+            run_scan.assert_not_called()
+
+    def test_repeated_scope_is_scanned_once(self):
+        path = self._two_scopes()
+        calls = []
+
+        def fake(hosts, ports=None):
+            calls.append(list(hosts))
+            return [self._device("192.168.50.10")]
+
+        args = ["scan", "--config", str(path)]
+        args.extend(["--scope", "home"] * 20)
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+            code, out, err = self.run_cli(*args)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Scopes ran: home", out)
+        self.assertEqual(scan_hosts.call_count, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0]), 254)
+        code, out, err = self.run_cli("history", "--format", "json")
+        scans = json.loads(out)["scans"]
+        self.assertEqual([row["scope_name"] for row in scans], ["home"])
+
+    def test_overlapping_scopes_probe_each_address_once(self):
+        path = self._write_scopes(
+            '[scopes.wide]\nsubnet = "10.2.0.0/22"\n'
+            '[scopes.inner]\nsubnet = "10.2.0.0/23"\n'
+        )
+        calls = []
+
+        def fake(hosts, ports=None):
+            calls.append(list(hosts))
+            if "10.2.1.10" in hosts:
+                return [self._device("10.2.1.10")]
+            return []
+
+        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts, \
+                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+            code, out, err = self.run_cli("scan", "--config", str(path), "--all")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(scan_hosts.call_count, 1)
+        self.assertEqual(len(calls[0]), 1022)
+        self.assertEqual(len(set(calls[0])), 1022)
+        self.assertIn("Scopes ran: wide, inner", out)
+        code, out, err = self.run_cli("history", "--format", "json")
+        scans = json.loads(out)["scans"]
+        self.assertEqual([row["scope_name"] for row in scans], ["inner", "wide"])
+        self.assertEqual([row["device_count"] for row in scans], [1, 1])
+
+    def test_single_scope_scan_diffs_against_the_same_scope(self):
+        path = self._two_scopes()
+        home_rounds = [
+            [self._device("192.168.50.10")],
+            [self._device("192.168.50.10"), self._device("192.168.50.11")],
+        ]
+
+        def fake(subnet, ports=None, demo_mode=False):
+            if subnet.startswith("192.168.50."):
+                return home_rounds.pop(0)
+            return [self._device("10.50.0.10")]
+
+        with mock.patch.object(cli, "run_scan", side_effect=fake):
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "home", "--format", "json",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIsNone(json.loads(out)["diff"])
+            code, _, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "lab", "--format", "json",
+            )
+            self.assertEqual(code, 0, err)
+            code, out, err = self.run_cli(
+                "scan", "--config", str(path), "--scope", "home", "--format", "json",
+            )
+        self.assertEqual(code, 0, err)
+        diff = json.loads(out)["diff"]
+        self.assertEqual([d["ip"] for d in diff["added"]], ["192.168.50.11"])
+        self.assertEqual(diff["removed"], [])
+        self.assertFalse(any(d["ip"].startswith("10.50.") for d in diff["added"]))
 
 
 class WebBindTests(unittest.TestCase):

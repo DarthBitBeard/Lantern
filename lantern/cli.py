@@ -18,7 +18,15 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from . import __version__, demo
-from .discovery import arp_table, guess_subnet, ping_host, reverse_hostname, validate_subnet
+from .discovery import (
+    MAX_SCAN_HOSTS,
+    arp_table,
+    guess_subnet,
+    merged_address_count,
+    ping_host,
+    reverse_hostname,
+    validate_subnet,
+)
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .report import describe_change, to_html, to_json
 from .scanner import scan_host
@@ -42,16 +50,10 @@ def _scan_one(ip: str, macs: dict[str, str], ports) -> dict:
     }
 
 
-def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
-    """Discover live hosts on one private subnet and port-scan each.
-
-    Raises ValueError for an invalid or unsafe subnet. Never touches the
-    network in demo mode.
-    """
-    if demo_mode:
-        return demo.demo_scan_1()
-    network = validate_subnet(subnet_text)
-    hosts = [str(ip) for ip in network.hosts()]
+def _scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
+    """Ping and port-scan these addresses. An empty list does not touch the network."""
+    if not hosts:
+        return []
     macs = arp_table()
 
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
@@ -64,6 +66,18 @@ def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> 
     ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
         return list(pool.map(lambda ip: _scan_one(ip, macs, ports), ordered))
+
+
+def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
+    """Discover live hosts on one private subnet and port-scan each.
+
+    Raises ValueError for an invalid or unsafe subnet. Never touches the
+    network in demo mode.
+    """
+    if demo_mode:
+        return demo.demo_scan_1()
+    network = validate_subnet(subnet_text)
+    return _scan_hosts([str(ip) for ip in network.hosts()], ports)
 
 
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
@@ -82,11 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--config", help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml.")
     scan_p.add_argument(
         "--scope", action="append",
-        help="Scope name in --config. Repeat to scan several, in the order given.",
+        help="Scope name in --config. Repeat to scan several, in the order given. "
+             "A repeated name is scanned once.",
     )
     scan_p.add_argument(
         "--all", action="store_true",
-        help="Scan every named scope in --config, in file order.",
+        help="Scan every named scope in --config, in file order. "
+             "One run is capped at 1024 unique addresses.",
     )
     scan_p.add_argument("--demo", action="store_true", help="Use fake demo data, no network scan.")
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
@@ -678,8 +694,25 @@ def _resolve_scan_subnet(args) -> tuple[str, str | None]:
     return guessed, None
 
 
+def _dedupe_scopes(scopes):
+    """First occurrence of each scope name, in that order."""
+    seen: set[str] = set()
+    chosen = []
+    for scope in scopes:
+        if scope.name in seen:
+            continue
+        seen.add(scope.name)
+        chosen.append(scope)
+    return chosen
+
+
 def _scopes_to_scan(args):
-    """Every scope for this invocation, already validated. Raises ValueError."""
+    """Every scope for this invocation, already validated. Raises ValueError.
+
+    Repeated names are dropped. Overlapping ranges count once. The unique
+    addresses across the whole run must be at most 1024, or this raises
+    before any probe.
+    """
     names = _scope_names(args)
     if args.all and names:
         raise ValueError("Pass either --all or --scope, not both.")
@@ -692,9 +725,17 @@ def _scopes_to_scan(args):
         chosen = list(loaded.values())
     else:
         chosen = [select_scope(loaded, name) for name in names]
+    chosen = _dedupe_scopes(chosen)
+    networks = []
     for scope in chosen:
         validate_scope_name(scope.name)
-        validate_subnet(scope.subnet)
+        networks.append(validate_subnet(scope.subnet))
+    total = merged_address_count(networks)
+    if total > MAX_SCAN_HOSTS:
+        raise ValueError(
+            f"These scopes cover {total} unique addresses. "
+            f"Lantern scans at most {MAX_SCAN_HOSTS} unique addresses in one run."
+        )
     return chosen
 
 
@@ -881,17 +922,25 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(str(exc))
             ran: list[str] = []
             failed: list[tuple[str, str]] = []
+            seen_hosts: set[str] = set()
+            found: dict[str, dict] = {}
             for scope in chosen:
                 try:
                     network = validate_subnet(scope.subnet)
                     subnet = str(network)
+                    scope_hosts = [str(ip) for ip in network.hosts()]
+                    fresh = [ip for ip in scope_hosts if ip not in seen_hosts]
                     if args.format == "text":
                         print(
                             f"Scanning {scope.name} {subnet} "
                             f"({network.num_addresses} addresses)...",
                             file=sys.stderr,
                         )
-                    devices = run_scan(subnet, DEFAULT_PORTS, demo_mode=False)
+                    if fresh:
+                        for device in _scan_hosts(fresh, DEFAULT_PORTS):
+                            found[device["ip"]] = device
+                        seen_hosts.update(fresh)
+                    devices = [found[ip] for ip in scope_hosts if ip in found]
                     save_scan(conn, subnet, devices, demo=False, scope_name=scope.name)
                     ran.append(scope.name)
                 except Exception as exc:
@@ -908,7 +957,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         except ValueError as exc:
             return _err(str(exc))
         scan_id = save_scan(conn, subnet, devices, demo=args.demo, scope_name=scope_name)
-        scan, diff = load_scan_with_diff(conn, scan_id)
+        scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope_name)
         if args.format == "json":
             print(to_json(scan, diff))
         elif args.format == "html":
