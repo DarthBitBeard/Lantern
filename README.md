@@ -64,6 +64,7 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Diff last two scans | `python3 -m lantern diff` (add `--scope home` to stay inside one scope) |
 | List saved scans | `python3 -m lantern history` (add `--scope home` to list one scope) |
 | HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` or `--scope home`) |
+| Export devices, findings, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
 | Tests | `python3 tests/run_tests.py` |
 
 Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <command> --help`. Errors go to stderr with exit code 2.
@@ -137,7 +138,31 @@ python3 -m lantern asset clear aa:bb:cc:dd:ee:ff --field notes
 
 `set` only accepts a MAC or IPv4 address that already appears in a saved scan. A device with a MAC is stored by that MAC (lowercase, colon form), so a later scan with a new IP keeps the same record. A device with no MAC is stored by IP. Owner and location are at most 80 characters, notes at most 500. A blank or whitespace-only value is rejected; use `asset clear` to remove a field. Tags are at most 10 after duplicates are removed, each 1 to 32 characters from `a-z`, `0-9`, `.`, `_`, or `-` after ASCII lowercase only. A character that would change under case folding or NFKC normalization is rejected. Criticality is `low`, `medium`, `high`, or `critical`. Control, format, and separator characters are rejected, including bidirectional overrides, zero-width characters, and line separators. Lantern stores at most 10000 inventory records. Adding a new device past that limit is refused; updating a record that is already stored still works. `asset list --scope` can still match a scope name that has been removed from the config file when one spelling is stored on a scan. An exact stored spelling is used when more than one case variant is stored. `history`, `diff`, and `report` instead keep the typed name when the file does not contain it or cannot be read.
 
-These fields appear in the CLI, in `report`, and in `diff`. The dashboard does not show them yet; that view arrives in M4. Owner, location, and notes are personal data. They are stored only in the local database, which is created mode 0600, they are not served by the dashboard or the API, and they are included in reports and diffs you may share. HTML output escapes them.
+These fields appear in the CLI, in `report`, and in `diff`. The dashboard does not show them yet; that view arrives in M4. Owner, location, and notes are personal data. They are stored only in the local database, which is created mode 0600. The dashboard page does not include them. `/api/v1/devices` and `/api/v1/diffs` return them to a caller with the token. `lantern export` and `/api/v1/export` leave them out unless you ask. They are included in reports and diffs you may share. HTML output escapes them.
+
+## Export and `/api/v1`
+
+`lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
+
+When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every other path, including stdout and `.json`, is JSON. The suffix match ignores case. If `--format` is set and the path ends in `.csv` or `.json` and that suffix does not match, the command exits 2 and does not write the file. A different suffix, such as `.txt`, keeps the format you named.
+
+Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields when the caller has the token. The diff uses the same device shape as `/api/v1/devices`.
+
+```bash
+TOKEN=the-token-from-the-page-or-startup-link
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/status
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/devices
+curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/diffs
+curl -s -H "X-Lantern-Token: $TOKEN" "http://127.0.0.1:8068/api/v1/export?what=devices&format=csv"
+```
+
+With `--no-strict-auth`, `/api/v1` still requires a token, and that token is only the one embedded in the page for that process. Loopback without strict auth does not load `LANTERN_API_TOKEN_FILE`, so a token from that file gets 403. Strict auth and `--allow-lan` do use the file.
+
+CSV quotes every cell and prefixes a cell with `'` when it could be a spreadsheet formula (`=`, `+`, `-`, `@`, tab, a line break, `|`, the full-width forms of those signs, or a `cmd|` / `DDE(` payload), including when Unicode spaces or format characters sit in front of the trigger. Values such as `-5` and `+1` get that prefix too, so a spreadsheet opens them as text rather than as numbers or formulas. Spreadsheet behaviour varies; the prefix is a best-effort mitigation, not a promise about how Excel, LibreOffice, or Google Sheets will display the cell. The file is UTF-8 with no byte-order mark.
+
+An `--output` file is created mode 0600 on macOS and Linux. On Windows those mode bits are not applied; the user profile ACL keeps the file private, the same way it does for the database. The directory must already exist. Lantern refuses a missing directory, a symlinked directory, a symlink at the final path (including with `--force`), and a hard link when replacing a file. A path that already exists needs `--force`. The file is the same bytes as stdout, including the trailing newline. If the write is interrupted, a `.lantern-export-*` temp file and a partial new file are removed. With `--force`, the previous file stays until the replacement finishes. The API never writes a file; `/api/v1/export` is a download.
+
+`/api/v1` is read-only. Every route, including on loopback with strict auth turned off, requires `X-Lantern-Token`. A bad token is 403, not 401. `GET /api/v1/status` reports `api_version` 1 and `role` `admin`. Other `/api/v1` JSON bodies also carry `api_version`. There are no CORS headers. Paths such as `/api/v1x` are not part of this API. A response is limited to 100000 rows. If the stored device text for a scan is already over 32 MiB, a device export refuses before loading those rows. Device JSON is encoded one device at a time into one buffer. Device CSV still loads every matching row into memory, then writes the CSV. Crossing 32 MiB discards that buffer and nothing partial is sent. The HTTP response is that finished body with `Content-Length`. It is not streamed to the client as it is generated. A second export while one is running is 429. Numeric parameters are 1 to 9 digits.
 
 ## Safety rules, enforced in code
 

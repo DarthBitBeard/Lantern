@@ -86,6 +86,26 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertIn("lab", page)
 
+    def test_html_strips_bidi_from_banners(self):
+        marks = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+        scan = _scan()
+        scan["devices"][0]["open_ports"] = [{"port": 80, "banner": f"ok{marks}hidden"}]
+        page = to_html(scan)
+        self.assertIn("okhidden", page)
+        for char in marks:
+            self.assertNotIn(char, page)
+
+    def test_html_uses_a_dash_when_the_scope_name_strips_away(self):
+        planted = "\x1b\u202e\x07\u200b"
+        scan = _scan()
+        scan["scope_name"] = planted
+        scan["devices"] = []
+        page = to_html(scan)
+        self.assertIn("scope -", page)
+        self.assertNotIn("scope  |", page)
+        for char in planted:
+            self.assertNotIn(char, page)
+
     def test_multi_scope_html_strips_a_planted_scope_name(self):
         planted = "lab\x1b\u202e\x07\u200bhome"
         scan = _scan()

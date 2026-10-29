@@ -171,6 +171,23 @@ def build_parser() -> argparse.ArgumentParser:
     asset_clear.add_argument("key", help="MAC address, or an IPv4 address when the device has no MAC.")
     asset_clear.add_argument("--field", help="One of owner, location, tags, criticality, notes. Omit to remove the whole record.")
 
+    export_p = sub.add_parser("export", help="Write devices, findings, or scan history as JSON or CSV.")
+    _add_db_arg(export_p)
+    export_p.add_argument("--what", required=True, choices=["devices", "findings", "history"])
+    export_p.add_argument(
+        "--format",
+        choices=["json", "csv"],
+        help="json or csv. When omitted, a .csv --output path is CSV and every other path is JSON.",
+    )
+    export_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    export_p.add_argument("--scope", help="Limit the export to this scope. Matched the same way as history --scope.")
+    export_p.add_argument("--scan-id", type=int, help="Scan to export. Default: latest of --scope, or the latest scan.")
+    export_p.add_argument("--tag", action="append", help="Only devices with this tag. Repeat to require every tag. Not valid for history.")
+    export_p.add_argument("--criticality", choices=["low", "medium", "high", "critical"], help="Only devices with this criticality. Not valid for history.")
+    export_p.add_argument("--include-private-fields", action="store_true", help="Include owner, location, and notes. They are omitted by default.")
+    export_p.add_argument("--output", help="Write this file instead of stdout. The directory must already exist.")
+    export_p.add_argument("--force", action="store_true", help="Replace an existing regular file. Refuses a symlink or a hard link.")
+
     web_p = sub.add_parser("web", help="Start the local web dashboard. No pip install needed.")
     _add_db_arg(web_p)
     web_p.add_argument(
@@ -230,9 +247,96 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_EXPORT_FORMAT_MISMATCH = (
+    "The --output suffix does not match --format. "
+    "Use .csv with csv, or .json with json."
+)
+
+_EXPORT_VALUE_ERRORS = frozenset({
+    "Pass a file path to --output, or omit it to write to stdout.",
+    _EXPORT_FORMAT_MISMATCH,
+    "The export path is not allowed.",
+    "The export directory must already exist.",
+    "The export directory must not be a symlink.",
+    "The export path must not be a symlink.",
+    "The export path must be a regular file.",
+    "The export file already exists. Pass --force to replace it.",
+    "The export path must not be a hard link.",
+    "The export path must be a file.",
+    "The export path must not use ~.",
+    "The export could not be written.",
+})
+
+
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
     return 2
+
+
+def _export_format(output: str | None, chosen: str | None) -> str:
+    """Pick JSON or CSV. A .csv or .json suffix must agree with --format."""
+    suffix = Path(output).suffix.casefold() if output else ""
+    if chosen is None:
+        return "csv" if suffix == ".csv" else "json"
+    if suffix in {".csv", ".json"} and suffix != f".{chosen}":
+        raise ValueError(_EXPORT_FORMAT_MISMATCH)
+    return chosen
+
+
+def _cmd_export(args, conn) -> int:
+    from .v1 import V1Error, MESSAGES, render_export, write_export_file
+
+    if args.output is not None and not str(args.output):
+        return _err("Pass a file path to --output, or omit it to write to stdout.")
+    try:
+        fmt = _export_format(args.output, args.format)
+    except ValueError as exc:
+        return _err(str(exc))
+    try:
+        scope = _one_scope_name(args)
+    except ValueError as exc:
+        return _err(str(exc))
+    query = {
+        "what": [args.what],
+        "format": [fmt],
+    }
+    if scope:
+        query["scope"] = [scope]
+    if args.scan_id is not None:
+        query["scan_id"] = [str(args.scan_id)]
+    if args.tag:
+        query["tag"] = list(args.tag)
+    if args.criticality:
+        query["criticality"] = [args.criticality]
+    try:
+        payload, _fmt, _scan_id, _what, _fmt_name = render_export(
+            conn, query, private=bool(args.include_private_fields),
+        )
+        if not payload.endswith(b"\n"):
+            payload += b"\n"
+        if args.output:
+            written = write_export_file(args.output, payload, force=bool(args.force))
+    except V1Error as exc:
+        if exc.status == 404:
+            print(f"lantern: {MESSAGES['not_found']}", file=sys.stderr)
+            return 1
+        return _err(MESSAGES[exc.code])
+    except ValueError as exc:
+        text = str(exc)
+        if text not in _EXPORT_VALUE_ERRORS:
+            return _err("The export could not be written.")
+        return _err(text)
+    except Exception:
+        return _err(MESSAGES["server_error"])
+    if args.output:
+        print(f"Wrote {written}", file=sys.stderr)
+        return 0
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(payload)
+    else:
+        sys.stdout.write(payload.decode("utf-8"))
+    return 0
 
 
 TOKEN_FILE_ENV = "LANTERN_API_TOKEN_FILE"
@@ -1031,6 +1135,9 @@ def main(argv=None) -> int:
         if web_bind.error:
             return _err(web_bind.error)
 
+    if args.command == "export" and not db_path.is_file():
+        return _err("No database file to export. This command does not create one.")
+
     try:
         # connect() creates a missing parent at mode 0700. A mkdir here
         # would leave that directory at 0755 under umask 022.
@@ -1226,6 +1333,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             return 0
         print(to_json(scan, diff) if args.format == "json" else to_html(scan, diff))
         return 0
+
+    if args.command == "export":
+        return _cmd_export(args, conn)
 
     if args.command == "history":
         try:
