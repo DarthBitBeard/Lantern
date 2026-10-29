@@ -1781,6 +1781,7 @@ const html = context.renderDevice({
   findings: [],
 });
 if (html.includes("<script>")) process.exit(2);
+if (!html.includes("self-reported banner, not verified")) process.exit(6);
 for (const field of ["hostname", "label", "owner", "tag", "notes", "banner"]) {
   if (!html.includes("&lt;script&gt;alert(1)&lt;/script&gt;" + field)) {
     console.error("missing " + field);

@@ -237,7 +237,7 @@ function renderDevice(device) {
     fingerprintText = "not fingerprinted";
   }
   const extra = [
-    fingerprintText ? `<p>Fingerprint: ${esc(fingerprintText)}</p>` : "",
+    fingerprintText ? `<p>Fingerprint: ${esc(fingerprintText)} (self-reported banner, not verified)</p>` : "",
     device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
     device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
     Array.isArray(device.tags) && device.tags.length

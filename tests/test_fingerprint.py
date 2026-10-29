@@ -91,6 +91,27 @@ class FixtureTests(unittest.TestCase):
         self.assertIsNone(fingerprint_for_storage("ssh", b""))
         self.assertIsNone(fingerprint_for_storage(None, b"SSH-2.0-OpenSSH_9.6\r\n"))
 
+    def test_unsafe_product_is_rejected_and_not_stored(self):
+        nul_openssh = b"SSH-2.0-\x00\x00\x00\x00OpenSSH_9.6\r\n"
+        parsed = parse_banner("ssh", nul_openssh)
+        self.assertFalse(parsed["accepted"])
+        self.assertNotEqual(parsed.get("parse_status"), "ok")
+        self.assertNotIn("????OpenSSH", json.dumps(parsed))
+        stored = fingerprint_for_storage("ssh", nul_openssh)
+        self.assertEqual(stored["parse_status"], "rejected")
+        self.assertIsNone(stored["product"])
+        self.assertIsNone(stored["version"])
+
+        formula = b"HTTP/1.0 200 OK\r\nServer: @SUM(1)/2\r\n\r\n"
+        parsed = parse_banner("http", formula)
+        self.assertFalse(parsed["accepted"])
+        self.assertNotEqual(parsed.get("product"), "@SUM(1)")
+        self.assertNotEqual(parsed.get("parse_status"), "ok")
+        stored = fingerprint_for_storage("http", formula)
+        self.assertEqual(stored["parse_status"], "rejected")
+        self.assertIsNone(stored["product"])
+        self.assertIsNone(stored["version"])
+
     def test_rejected_banner_is_stored_without_a_product(self):
         row = fingerprint_for_storage("ssh", b"\x00\xffbinary")
         self.assertEqual(row["parse_status"], "rejected")
@@ -150,6 +171,7 @@ class OutputTests(unittest.TestCase):
         self.assertIn("&lt;img", page)
         self.assertIn("hostname", page)
         self.assertIn("version unknown", page)
+        self.assertIn("self-reported banner, not verified", page)
         for char in marks:
             self.assertNotIn(char, page)
             self.assertNotIn(char, body)

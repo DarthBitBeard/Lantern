@@ -109,13 +109,10 @@
    "protocol": "ssh",
    "raw": "SSH-2.0-Open\u0000SSH_9.6\u001b[31m",
    "expect": {
-    "accepted": true,
-    "service": "ssh",
-    "product": "Open?SSH",
-    "version": null,
-    "parse_status": "unknown"
+    "accepted": false,
+    "reason": "unsafe product"
    },
-   "notes": "NUL/ESC -> '?'; version '9.6?[31m' fails charset."
+   "notes": "NUL/ESC become '?'. A product with '?' is rejected and not stored."
   },
   {
    "id": "fx08-http-nginx",
@@ -148,13 +145,10 @@
    "protocol": "http",
    "raw": "HTTP/1.0 200 OK\r\nServer: <img src=x onerror=alert(1)>\r\n\r\n",
    "expect": {
-    "accepted": true,
-    "service": "http",
-    "product": "<img",
-    "version": null,
-    "parse_status": "unknown"
+    "accepted": false,
+    "reason": "unsafe product"
    },
-   "notes": "Stored as inert text; html.escape/textContent at render."
+   "notes": "'<' is not a product character. Rejected and stored without product or version."
   },
   {
    "id": "fx11-http-dup-server",

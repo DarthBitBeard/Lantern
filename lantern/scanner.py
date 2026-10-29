@@ -21,6 +21,7 @@ BANNER_MAX_CHARS = 120
 DEFAULT_TIMEOUT = 0.6
 MAX_PORT_WORKERS = 50
 # Header block on the existing HEAD request. Server is not on the first line.
+# The 0.6 s greeting read runs first. This second wait is 1.0 s, about 1.6 s total.
 HTTP_READ_BYTES = 2048
 HTTP_READ_SECONDS = 1.0
 
@@ -59,7 +60,9 @@ def _recv_some(sock: socket.socket, limit: int) -> bytes:
 def read_http_headers(sock: socket.socket) -> bytes:
     """Read the HEAD response until the header break, 2048 bytes, or 1.0 s.
 
-    Nothing is sent here. The caller already sent the single HEAD line.
+    This clock starts after HEAD is sent. The 0.6 s greeting read already
+    ran, so a silent HTTP port takes about 1.6 s total. Nothing is sent
+    here. The caller already sent the single HEAD line.
     """
     data = bytearray()
     deadline = time.monotonic() + HTTP_READ_SECONDS

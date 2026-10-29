@@ -15,6 +15,8 @@ PRODUCT_CAP = 40
 VERSION_CAP = 64
 RAW_CAP = 120
 _VERSION_CHARS = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._+~-")
+# Letters, digits, and a few separators. A name must start with a letter or digit.
+_PRODUCT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-+/")
 _PRODUCT_TABLE = {"ftp": ("vsFTPd", "ProFTPD"), "smtp": ("Postfix", "Exim")}
 _STATUSES = ("ok", "unknown", "rejected")
 
@@ -50,8 +52,24 @@ def _version(value: str | None) -> str | None:
     return value
 
 
+def _screen_product(value: str | None) -> tuple[str | None, str | None]:
+    """Return ``(name, None)`` or ``(None, reason)``.
+
+    A missing name is incomplete, not rejected. A name that is present but
+    uses any other character is rejected, including characters that would
+    otherwise be cut off by the length cap.
+    """
+    if not value:
+        return None, None
+    if not value[0].isalnum() or any(char not in _PRODUCT_CHARS for char in value):
+        return None, "unsafe product"
+    return value[:PRODUCT_CAP], None
+
+
 def _accepted(service: str, product: str | None, version: str | None, raw: str) -> dict:
-    product = product[:PRODUCT_CAP] if product else None
+    product, reject_reason = _screen_product(product)
+    if reject_reason:
+        return _rejected(reject_reason)
     version = _version(version) if product else None
     status = "ok" if product and version else "unknown"
     return {

@@ -183,7 +183,10 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
         fingerprint = summary_line(
             device.get("fingerprints"), has_ports=bool(device.get("open_ports")),
         )
-        fingerprint_html = f"<p>Fingerprint: {_html_text(fingerprint)}</p>" if fingerprint else ""
+        fingerprint_html = (
+            f"<p>Fingerprint: {_html_text(fingerprint)} "
+            "(self-reported banner, not verified)</p>"
+        ) if fingerprint else ""
         trust = ""
         if device.get("trusted"):
             trust = " <small>(trusted)</small>"
