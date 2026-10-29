@@ -21,13 +21,15 @@ import unicodedata
 from pathlib import Path
 
 from . import __version__
-from .assets import CRITICALITIES, normalize_mac, strip_for_text
+from .assets import CRITICALITIES, normalize_mac, present_text, strip_for_text
+from .fingerprint import summary_line
 from .ports import SEVERITY_RANK
 from .store import (
     diff_scans,
     get_trusted,
     apply_trust,
     ip_sort_key,
+    fingerprints_by_device,
     latest_scan_id,
     list_scans,
     load_scan,
@@ -64,7 +66,7 @@ _PRIVATE = ("owner", "location", "notes")
 _DEVICE_COLUMNS = (
     "scan_id", "key", "key_type", "ip", "mac", "hostname", "label", "trusted",
     "owner", "location", "tags", "criticality", "notes", "updated_at",
-    "first_seen", "last_seen", "open_ports", "finding_count",
+    "first_seen", "last_seen", "open_ports", "fingerprints", "finding_count",
 )
 _FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
@@ -360,12 +362,25 @@ def _assets(conn) -> dict[str, dict]:
 def _ports(device: dict) -> list[dict]:
     ports = []
     for port in device.get("open_ports") or []:
-        banner = port.get("banner")
+        banner = present_text(port.get("banner"))
         ports.append({
             "port": int(port["port"]),
-            "banner": banner if banner else None,
+            "banner": banner,
         })
     return ports
+
+
+def _fingerprint_dict(row: dict) -> dict:
+    collected = present_text(row.get("collected_at"))
+    return {
+        "port": row.get("port"),
+        "service": present_text(row.get("service")),
+        "product": present_text(row.get("product")),
+        "version": present_text(row.get("version")),
+        "raw_banner": present_text(row.get("raw_banner")),
+        "parse_status": present_text(row.get("parse_status")),
+        "collected_at": as_z(collected) if collected else None,
+    }
 
 
 def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private: bool) -> dict:
@@ -377,8 +392,8 @@ def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private:
         "key_type": key_type,
         "ip": device["ip"],
         "mac": key if key_type == "mac" else None,
-        "hostname": device.get("hostname"),
-        "label": device.get("label"),
+        "hostname": present_text(device.get("hostname")),
+        "label": present_text(device.get("label")),
         "trusted": bool(device.get("trusted")),
         "tags": list(asset["tags"]) if asset else [],
         "criticality": asset["criticality"] if asset else None,
@@ -388,6 +403,9 @@ def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private:
         "open_ports": _ports(device),
         "finding_count": len(device.get("findings") or []),
     }
+    fingerprints = device.get("fingerprints") or []
+    if fingerprints:
+        body["fingerprints"] = [_fingerprint_dict(row) for row in fingerprints]
     if private:
         body["owner"] = asset["owner"] if asset else None
         body["location"] = asset["location"] if asset else None
@@ -474,12 +492,13 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
     assets = _assets(conn)
     seen = _seen_bounds(conn)
     trusted = get_trusted(conn)
+    fingerprint_rows = fingerprints_by_device(conn, scan_id)
     fetched = conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
+        "SELECT id, ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
         (scan_id,),
     ).fetchall()
-    fetched.sort(key=lambda row: (ip_sort_key(row[0]), normalize_mac(row[1]) or ""))
-    for ip, mac, hostname, label, ports_json, findings_json in fetched:
+    fetched.sort(key=lambda row: (ip_sort_key(row[1]), normalize_mac(row[2]) or ""))
+    for device_id, ip, mac, hostname, label, ports_json, findings_json in fetched:
         findings = json.loads(findings_json or "[]")
         device = {
             "ip": ip,
@@ -488,6 +507,7 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
             "label": label,
             "open_ports": json.loads(ports_json or "[]"),
             "findings": findings if isinstance(findings, list) else [],
+            "fingerprints": fingerprint_rows.get(device_id, []),
         }
         _overlay_trust(device, trusted)
         shown = _device_dict(device, scan, assets, seen, private=private)
@@ -696,8 +716,8 @@ def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
         "key_type": device["key_type"],
         "ip": device["ip"],
         "mac": device["mac"],
-        "hostname": device["hostname"],
-        "label": device["label"],
+        "hostname": present_text(device.get("hostname")) or "",
+        "label": present_text(device.get("label")) or "",
         "trusted": device["trusted"],
         "owner": device.get("owner"),
         "location": device.get("location"),
@@ -708,6 +728,9 @@ def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
         "first_seen": device["first_seen"],
         "last_seen": device["last_seen"],
         "open_ports": ";".join(ports),
+        "fingerprints": summary_line(
+            device.get("fingerprints"), has_ports=bool(device.get("open_ports")),
+        ),
         "finding_count": device["finding_count"],
     }
     columns = [name for name in _DEVICE_COLUMNS if private or name not in _PRIVATE]

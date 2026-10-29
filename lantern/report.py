@@ -5,11 +5,67 @@ from __future__ import annotations
 import html
 import json
 
-from .assets import device_asset_fields, strip_for_text
+from .assets import device_asset_fields, present_text, strip_for_text
+from .fingerprint import summary_line
+
+
+def _present_port(port: dict) -> dict:
+    shown = {key: value for key, value in port.items() if key != "fingerprint"}
+    if "banner" in shown:
+        shown["banner"] = present_text(shown.get("banner")) or ""
+    return shown
+
+
+def _present_fingerprint(row: dict) -> dict:
+    return {
+        "port": row.get("port"),
+        "service": present_text(row.get("service")),
+        "product": present_text(row.get("product")),
+        "version": present_text(row.get("version")),
+        "raw_banner": present_text(row.get("raw_banner")),
+        "parse_status": present_text(row.get("parse_status")),
+        "collected_at": present_text(row.get("collected_at")),
+    }
+
+
+def present_device(device: dict) -> dict:
+    """Copy a device with hostname, label, banner, and fingerprint text stripped."""
+    shown = dict(device)
+    shown["hostname"] = present_text(device.get("hostname"))
+    shown["label"] = present_text(device.get("label"))
+    shown["open_ports"] = [_present_port(port) for port in device.get("open_ports") or [] if isinstance(port, dict)]
+    shown["fingerprints"] = [
+        _present_fingerprint(row) for row in device.get("fingerprints") or [] if isinstance(row, dict)
+    ]
+    return shown
+
+
+def present_scan(scan: dict | None) -> dict | None:
+    if scan is None:
+        return None
+    shown = dict(scan)
+    shown["devices"] = [present_device(device) for device in scan.get("devices") or []]
+    return shown
+
+
+def present_diff(diff: dict | None) -> dict | None:
+    if diff is None:
+        return None
+    changed = []
+    for change in diff.get("changed") or []:
+        copied = dict(change)
+        if change.get("device"):
+            copied["device"] = present_device(change["device"])
+        changed.append(copied)
+    return {
+        "added": [present_device(device) for device in diff.get("added") or []],
+        "removed": [present_device(device) for device in diff.get("removed") or []],
+        "changed": changed,
+    }
 
 
 def _device_for_report(device: dict) -> dict:
-    shown = dict(device)
+    shown = present_device(device)
     shown.update(device_asset_fields(device))
     return shown
 
@@ -59,7 +115,7 @@ def describe_change(change: dict) -> str:
 
 
 def _html_text(value) -> str:
-    return html.escape(str(value), quote=True)
+    return html.escape(strip_for_text(value), quote=True)
 
 
 def _device_extra(device: dict) -> str:
@@ -114,7 +170,7 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
     """Escaped HTML for one scan, without the document wrapper."""
     devices_html = ""
     for device in scan["devices"]:
-        name = device.get("label") or device.get("hostname") or device["ip"]
+        name = strip_for_text(device.get("label") or device.get("hostname") or "") or device["ip"]
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
         banners = []
         for port in device.get("open_ports") or []:
@@ -123,7 +179,11 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
                 banners.append(banner)
         banner_html = ""
         if banners:
-            banner_html = f"<p>Banner: {html.escape(' | '.join(banners))}</p>"
+            banner_html = f"<p>Banner: {_html_text(' | '.join(banners))}</p>"
+        fingerprint = summary_line(
+            device.get("fingerprints"), has_ports=bool(device.get("open_ports")),
+        )
+        fingerprint_html = f"<p>Fingerprint: {_html_text(fingerprint)}</p>" if fingerprint else ""
         trust = ""
         if device.get("trusted"):
             trust = " <small>(trusted)</small>"
@@ -133,6 +193,7 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
           <p>MAC: {html.escape(device.get('mac') or 'unknown')} | Open ports: {html.escape(ports)}</p>
           {_device_extra(device)}
           {banner_html}
+          {fingerprint_html}
           <table><tr><th>Port</th><th>Service</th><th>Risk</th><th>What it means</th></tr>
           {_finding_rows(device)}
           </table>

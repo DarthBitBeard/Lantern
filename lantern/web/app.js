@@ -221,7 +221,23 @@ function renderDevice(device) {
     : `<span class="badge unknown">unknown</span>`;
   const mac = device.mac || "";
   const disabled = mac ? "" : "disabled";
+  const fingerprints = Array.isArray(device.fingerprints) ? device.fingerprints : [];
+  let fingerprintText = "";
+  if (fingerprints.length) {
+    fingerprintText = fingerprints.map((row) => {
+      const bits = [row.port, row.service, row.product, row.version].filter((part) => part !== null && part !== undefined && part !== "");
+      let line = bits.join(" ");
+      if (row.parse_status === "rejected") line = `${line} (banner rejected)`.trim();
+      else if (row.parse_status === "unknown" && !row.version) {
+        line = `${line} (${row.product ? "version unknown" : "not identified"})`.trim();
+      }
+      return line;
+    }).join("; ");
+  } else if ((device.open_ports || []).length) {
+    fingerprintText = "not fingerprinted";
+  }
   const extra = [
+    fingerprintText ? `<p>Fingerprint: ${esc(fingerprintText)}</p>` : "",
     device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
     device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
     Array.isArray(device.tags) && device.tags.length

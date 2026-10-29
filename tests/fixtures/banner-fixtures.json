@@ -1,0 +1,306 @@
+{
+ "readme": "Lantern M6/M7 banner-parser fixtures. ALL strings are inert test data: never execute, eval, format-with, or render them unescaped.",
+ "schema": {
+  "id": "str",
+  "protocol": "ssh|http|ftp|smtp",
+  "raw": "str (JSON escapes for hostile bytes; encoded with 'encoding', default latin-1) OR generator {'repeat':{'unit':str,'count':int}} OR {'concat':[raw,...]}",
+  "encoding": "optional, 'latin-1' (default) or 'utf-8'",
+  "expect": "{accepted:true, service, product, version, parse_status} or {accepted:false, reason}",
+  "notes": "str"
+ },
+ "fixtures": [
+  {
+   "id": "fx01-ssh-openssh",
+   "protocol": "ssh",
+   "raw": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "OpenSSH",
+    "version": "9.6p1",
+    "parse_status": "ok"
+   },
+   "notes": "Normal OpenSSH; distro comment ignored."
+  },
+  {
+   "id": "fx02-ssh-dropbear",
+   "protocol": "ssh",
+   "raw": "SSH-2.0-dropbear_2022.83\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "dropbear",
+    "version": "2022.83",
+    "parse_status": "ok"
+   },
+   "notes": "Normal dropbear."
+  },
+  {
+   "id": "fx03-ssh-no-underscore",
+   "protocol": "ssh",
+   "raw": "SSH-1.99-Cisco-1.25\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "Cisco-1.25",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "No '_' so no version."
+  },
+  {
+   "id": "fx04-ssh-huge-product",
+   "protocol": "ssh",
+   "raw": {
+    "concat": [
+     "SSH-2.0-",
+     {
+      "repeat": {
+       "unit": "A",
+       "count": 100000
+      }
+     }
+    ]
+   },
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "Cut to 256 B before decode; product capped 40."
+  },
+  {
+   "id": "fx05-ssh-huge-version",
+   "protocol": "ssh",
+   "raw": {
+    "concat": [
+     "SSH-2.0-OpenSSH_",
+     {
+      "repeat": {
+       "unit": "9.",
+       "count": 5000
+      }
+     }
+    ]
+   },
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "OpenSSH",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "Version > 64 chars -> None."
+  },
+  {
+   "id": "fx06-ssh-binary",
+   "protocol": "ssh",
+   "raw": "\u0000\u00ff\u00fe\u0001binary",
+   "expect": {
+    "accepted": false,
+    "reason": "no SSH- prefix"
+   },
+   "notes": "Binary garbage rejected."
+  },
+  {
+   "id": "fx07-ssh-nul-ansi",
+   "protocol": "ssh",
+   "raw": "SSH-2.0-Open\u0000SSH_9.6\u001b[31m",
+   "expect": {
+    "accepted": true,
+    "service": "ssh",
+    "product": "Open?SSH",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "NUL/ESC -> '?'; version '9.6?[31m' fails charset."
+  },
+  {
+   "id": "fx08-http-nginx",
+   "protocol": "http",
+   "raw": "HTTP/1.0 200 OK\r\nServer: nginx/1.24.0\r\n\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": "nginx",
+    "version": "1.24.0",
+    "parse_status": "ok"
+   },
+   "notes": "Normal nginx."
+  },
+  {
+   "id": "fx09-http-apache",
+   "protocol": "http",
+   "raw": "HTTP/1.1 200 OK\r\nServer: Apache/2.4.58 (Debian)\r\n\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": "Apache",
+    "version": "2.4.58",
+    "parse_status": "ok"
+   },
+   "notes": "Comment token ignored."
+  },
+  {
+   "id": "fx10-http-xss",
+   "protocol": "http",
+   "raw": "HTTP/1.0 200 OK\r\nServer: <img src=x onerror=alert(1)>\r\n\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": "<img",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "Stored as inert text; html.escape/textContent at render."
+  },
+  {
+   "id": "fx11-http-dup-server",
+   "protocol": "http",
+   "raw": "HTTP/1.0 200 OK\r\nServer: lighttpd\r\nSet-Cookie: x\r\nServer: evil/6.6\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": "lighttpd",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "First Server header wins."
+  },
+  {
+   "id": "fx12-http-header-flood",
+   "protocol": "http",
+   "raw": {
+    "concat": [
+     "HTTP/1.0 200 OK\r\n",
+     {
+      "repeat": {
+       "unit": "X: y\r\n",
+       "count": 5000
+      }
+     }
+    ]
+   },
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": null,
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "2 KiB cap; no Server -> unknown."
+  },
+  {
+   "id": "fx13-http-space-flood",
+   "protocol": "http",
+   "raw": {
+    "concat": [
+     "HTTP/1.0 200 OK\r\nServer: ",
+     {
+      "repeat": {
+       "unit": " ",
+       "count": 50000
+      }
+     },
+     "a/1"
+    ]
+   },
+   "expect": {
+    "accepted": true,
+    "service": "http",
+    "product": null,
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "Cap cuts before 'a/1'; bounded split; unknown."
+  },
+  {
+   "id": "fx14-ftp-vsftpd",
+   "protocol": "ftp",
+   "raw": "220 (vsFTPd 3.0.5)\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "ftp",
+    "product": "vsFTPd",
+    "version": "3.0.5",
+    "parse_status": "ok"
+   },
+   "notes": "Parens stripped."
+  },
+  {
+   "id": "fx15-ftp-format-string",
+   "protocol": "ftp",
+   "raw": "220 ProFTPD Server (%s%n%x) ready\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "ftp",
+    "product": "ProFTPD",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "'%s%n' kept literal; 'Server' is not a version (must start with digit)."
+  },
+  {
+   "id": "fx16-ftp-not-220",
+   "protocol": "ftp",
+   "raw": "530 go away\r\n",
+   "expect": {
+    "accepted": false,
+    "reason": "not 220 greeting"
+   },
+   "notes": "Rejected."
+  },
+  {
+   "id": "fx17-smtp-postfix",
+   "protocol": "smtp",
+   "raw": "220 mail.example.lan ESMTP Postfix (Debian/GNU)\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "smtp",
+    "product": "Postfix",
+    "version": null,
+    "parse_status": "unknown"
+   },
+   "notes": "Product only."
+  },
+  {
+   "id": "fx18-smtp-exim-injected-line",
+   "protocol": "smtp",
+   "raw": "220 mx ESMTP Exim 4.97 \r\nInjected: 1\r\n",
+   "expect": {
+    "accepted": true,
+    "service": "smtp",
+    "product": "Exim",
+    "version": "4.97",
+    "parse_status": "ok"
+   },
+   "notes": "Second line ignored."
+  },
+  {
+   "id": "fx19-smtp-non-ascii-rlo",
+   "protocol": "smtp",
+   "raw": "220 m\u00fcll ESMTP \u202eExim 4.9",
+   "expect": {
+    "accepted": true,
+    "service": "smtp",
+    "product": "Exim",
+    "version": "4.9",
+    "parse_status": "ok"
+   },
+   "notes": "UTF-8 encoded; non-ASCII/RLO -> '?', stripped from token ends.",
+   "encoding": "utf-8"
+  },
+  {
+   "id": "fx20-empty-or-timeout",
+   "protocol": "ssh",
+   "raw": "",
+   "expect": {
+    "accepted": false,
+    "reason": "empty"
+   },
+   "notes": "Empty read or timeout (any protocol): None, nothing stored."
+  }
+ ]
+}

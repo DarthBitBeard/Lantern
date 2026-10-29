@@ -121,6 +121,8 @@ Each scope is one private subnet (`subnet`) plus an optional `description`. A sc
 
 A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then TCP-connects to the 25 risk ports on each live host, 8 hosts at a time. Expect roughly 10 to 30 seconds for a /24. Hosts that block ping and are not in the ARP cache are missed; run the scan twice if your router has just rebooted.
 
+On ports Lantern already connects to, it keeps a passive fingerprint of the banner the service sends first: SSH on 22, FTP on 21, SMTP on 25, and the `Server` header from the existing `HEAD / HTTP/1.0` on the HTTP ports. That HTTP read stops at the end of the headers, 2048 bytes, or one second, whichever comes first. Nothing else is sent. There is no login, no password guess, and no TLS certificate probe. A clear banner stores a product and version. An incomplete banner is marked unknown, and a banner that is not the expected greeting is marked rejected. A scan saved before this was added, or a port with no banner, is shown as not fingerprinted. Hostname, label, and banner text from the network is untrusted: control characters and bidirectional marks are removed in the text view, CSV, HTML, JSON, export, and API, and HTML escapes what remains. The fingerprint is not a vulnerability verdict.
+
 From the dashboard you can also run a real scan or a demo scan, see the diff banner, search and filter devices, label a device and mark it trusted or unknown, browse scan history, and open the HTML report. Trust is stored by MAC address in the same SQLite file, so a trusted label survives later scans.
 
 Run scans from a machine on your home network. A scan from inside a normal Docker container only sees the container network.

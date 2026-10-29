@@ -60,7 +60,7 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 from . import __version__, demo
 from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .ports import DEFAULT_PORTS
-from .report import to_html, to_json
+from .report import present_diff, present_scan, to_html, to_json
 from .store import connect, list_scans, load_scan_with_diff, save_scan, set_trusted
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -1121,7 +1121,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                 return
             if path in ("/api/scans/latest", "/api/diff"):
                 scan, diff = load_scan_with_diff(conn)
-                self._send_json(200, {"scan": scan, "diff": diff})
+                self._send_json(200, {"scan": present_scan(scan), "diff": present_diff(diff)})
                 return
             if path.startswith("/api/scans/"):
                 scan_id = self._int_param(path[len("/api/scans/"):], "Scan id")
@@ -1129,7 +1129,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                 if scan is None:
                     self._send_json(404, {"error": "Scan not found."})
                 else:
-                    self._send_json(200, {"scan": scan, "diff": diff})
+                    self._send_json(200, {"scan": present_scan(scan), "diff": present_diff(diff)})
                 return
             if path == "/api/report":
                 scan_id = query.get("scan_id", [None])[0]
@@ -1210,7 +1210,7 @@ class LanternHandler(BaseHTTPRequestHandler):
             save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True)
             save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
             scan, diff = load_scan_with_diff(conn)
-            self._send_json(200, {"scan_id": scan["id"], "scan": scan, "diff": diff})
+            self._send_json(200, {"scan_id": scan["id"], "scan": present_scan(scan), "diff": present_diff(diff)})
         finally:
             conn.close()
 
@@ -1242,7 +1242,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                 conn.close()
         finally:
             _scan_lock.release()
-        self._send_json(200, {"scan_id": scan_id, "scan": scan, "diff": diff})
+        self._send_json(200, {"scan_id": scan_id, "scan": present_scan(scan), "diff": present_diff(diff)})
 
     def _handle_trust(self, body: dict) -> None:
         mac = str(body.get("mac") or "").strip().lower()

@@ -35,9 +35,10 @@ from pathlib import Path
 
 # Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
 # plus this version table. Schema 2 adds scans.scope_name. Schema 3 adds
-# the asset table, which is not tied to a scan id. The package version
+# the asset table, which is not tied to a scan id. Schema 4 adds
+# service_fingerprints, one row per read banner. The package version
 # stays put until a release; the schema version moves only when the tables change.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -517,10 +518,35 @@ def _migration_3_assets(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_4_fingerprints(conn: sqlite3.Connection) -> None:
+    """Schema 4: one fingerprint row per banner read on a device.
+
+    Older scans have no rows. Reports show those devices as not
+    fingerprinted. This migration does not rewrite device JSON.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS service_fingerprints (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               device_id INTEGER NOT NULL REFERENCES devices(id),
+               port INTEGER NOT NULL,
+               service TEXT,
+               product TEXT,
+               version TEXT,
+               raw_banner TEXT,
+               parse_status TEXT,
+               collected_at TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS fp_device ON service_fingerprints (device_id)"
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
     3: _migration_3_assets,
+    4: _migration_4_fingerprints,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -592,6 +618,72 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+_FP_STATUSES = frozenset({"ok", "unknown", "rejected"})
+_FP_PRODUCT_CAP = 40
+_FP_VERSION_CAP = 64
+_FP_TEXT_CAP = 120
+_FP_PER_DEVICE = 64
+
+
+def _capped_fp_text(value, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)[:limit]
+    return text or None
+
+
+def _fingerprint_values(port, fingerprint: dict) -> tuple | None:
+    """Columns for one fingerprint, or None when the port is not usable.
+
+    A version longer than 64 characters is dropped instead of being cut
+    down into a different version. ``ok`` then becomes ``unknown``.
+    """
+    if not isinstance(fingerprint, dict):
+        return None
+    try:
+        port_num = int(port)
+    except (TypeError, ValueError):
+        return None
+    if port_num < 1 or port_num > 65535:
+        return None
+    status = str(fingerprint.get("parse_status") or "")
+    if status not in _FP_STATUSES:
+        status = "rejected"
+    version = fingerprint.get("version")
+    if version is not None and len(str(version)) > _FP_VERSION_CAP:
+        version = None
+        if status == "ok":
+            status = "unknown"
+    else:
+        version = _capped_fp_text(version, _FP_VERSION_CAP)
+    return (
+        port_num,
+        _capped_fp_text(fingerprint.get("service"), _FP_TEXT_CAP),
+        _capped_fp_text(fingerprint.get("product"), _FP_PRODUCT_CAP),
+        version,
+        _capped_fp_text(fingerprint.get("raw_banner"), _FP_TEXT_CAP),
+        status,
+    )
+
+
+def _ports_and_fingerprints(device: dict) -> tuple[list, list[tuple]]:
+    """Port JSON without the fingerprint object, plus rows to insert."""
+    stored = []
+    rows = []
+    for port in device.get("open_ports") or []:
+        if not isinstance(port, dict):
+            stored.append(port)
+            continue
+        fingerprint = port.get("fingerprint")
+        stored.append({key: value for key, value in port.items() if key != "fingerprint"})
+        if fingerprint is None or len(rows) >= _FP_PER_DEVICE:
+            continue
+        values = _fingerprint_values(port.get("port"), fingerprint)
+        if values is not None:
+            rows.append(values)
+    return stored, rows
+
+
 def save_scan(
     conn: sqlite3.Connection,
     subnet: str,
@@ -602,30 +694,38 @@ def save_scan(
     """Store one scan snapshot and return its id. All-or-nothing.
 
     ``scope_name`` is the named scope that produced the scan, or None for
-    ``--subnet``, auto-detect, and demo scans.
+    ``--subnet``, auto-detect, and demo scans. A ``fingerprint`` object on
+    an open port is stored in ``service_fingerprints``, not in the port JSON.
     """
+    collected_at = _now()
     with conn:
         cur = conn.execute(
             "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
-            (_now(), subnet, 1 if demo else 0, scope_name),
+            (collected_at, subnet, 1 if demo else 0, scope_name),
         )
         scan_id = cur.lastrowid
-        conn.executemany(
-            "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
+        for device in devices:
+            ports, fingerprints = _ports_and_fingerprints(device)
+            cur = conn.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     device["ip"],
                     device.get("mac"),
                     device.get("hostname"),
                     device.get("label"),
-                    json.dumps(device.get("open_ports", [])),
+                    json.dumps(ports),
                     json.dumps(device.get("findings", [])),
-                )
-                for device in devices
-            ],
-        )
+                ),
+            )
+            device_id = cur.lastrowid
+            conn.executemany(
+                "INSERT INTO service_fingerprints ("
+                " device_id, port, service, product, version, raw_banner, parse_status, collected_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(device_id, *row, collected_at) for row in fingerprints],
+            )
     return scan_id
 
 
@@ -637,16 +737,48 @@ def ip_sort_key(ip: str):
         return (1, ip)
 
 
+def fingerprints_by_device(conn: sqlite3.Connection, scan_id: int) -> dict[int, list[dict]]:
+    """Fingerprint rows for one scan, keyed by device id, ordered by port."""
+    found: dict[int, list[dict]] = {}
+    rows = conn.execute(
+        """
+        SELECT fp.device_id, fp.port, fp.service, fp.product, fp.version,
+               fp.raw_banner, fp.parse_status, fp.collected_at
+        FROM service_fingerprints AS fp
+        JOIN devices AS d ON d.id = fp.device_id
+        WHERE d.scan_id = ?
+        ORDER BY fp.port, fp.id
+        """,
+        (scan_id,),
+    )
+    for device_id, port, service, product, version, raw_banner, status, collected_at in rows:
+        found.setdefault(device_id, []).append({
+            "port": port,
+            "service": service,
+            "product": product,
+            "version": version,
+            "raw_banner": raw_banner,
+            "parse_status": status,
+            "collected_at": collected_at,
+        })
+    return found
+
+
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
-    """Load one scan with its devices, or None if the id is unknown."""
+    """Load one scan with its devices, or None if the id is unknown.
+
+    ``fingerprints`` is an empty list when this scan was stored before
+    schema 4, or when no banner was kept.
+    """
     row = conn.execute(
         "SELECT started_at, subnet, demo, scope_name FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()
     if not row:
         return None
+    fingerprints = fingerprints_by_device(conn, scan_id)
     devices = []
-    for ip, mac, hostname, label, open_ports, findings in conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
+    for device_id, ip, mac, hostname, label, open_ports, findings in conn.execute(
+        "SELECT id, ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
         (scan_id,),
     ):
         devices.append(
@@ -657,6 +789,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
                 "label": label,
                 "open_ports": json.loads(open_ports),
                 "findings": json.loads(findings),
+                "fingerprints": fingerprints.get(device_id, []),
             }
         )
     devices.sort(key=lambda d: ip_sort_key(d["ip"]))

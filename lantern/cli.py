@@ -27,6 +27,7 @@ from .discovery import (
     reverse_hostname,
     validate_subnet,
 )
+from .fingerprint import summary_line
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .report import describe_change, diff_to_json, multi_scope_html, to_html, to_json
 from .scanner import scan_host
@@ -771,10 +772,17 @@ def _print_text_scan(scan: dict, diff: dict | None) -> None:
     print(f"Scan {scan['id']}: {len(devices)} devices on {scan['subnet']}"
           f"{' (demo data)' if scan['demo'] else ''}")
     for device in devices:
-        name = device.get("label") or device.get("hostname") or ""
-        ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
+        name = assetlib.strip_for_text(device.get("label") or device.get("hostname") or "")
+        ports = []
+        for port in device["open_ports"]:
+            banner = assetlib.strip_for_text(port.get("banner") or "")
+            ports.append(f"{port['port']} {banner}".strip() if banner else str(port["port"]))
+        port_text = ", ".join(ports) or "none"
         worst = device["findings"][0]["severity"] if device["findings"] else "none"
-        print(f"  {device['ip']:<15} {name:<24} ports: {ports}  worst: {worst}")
+        print(f"  {device['ip']:<15} {name:<24} ports: {port_text}  worst: {worst}")
+        note = summary_line(device.get("fingerprints"), has_ports=bool(device.get("open_ports")))
+        if note:
+            print(f"    {note}")
     if diff:
         _print_text_diff(diff)
 
