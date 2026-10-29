@@ -144,6 +144,8 @@ These fields appear in the CLI, in `report`, and in `diff`. The dashboard does n
 
 `lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
 
+When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every other path, including stdout and `.json`, is JSON. The suffix match ignores case. If `--format` is set and the path ends in `.csv` or `.json` and that suffix does not match, the command exits 2 and does not write the file. A different suffix, such as `.txt`, keeps the format you named.
+
 Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields when the caller has the token. The diff uses the same device shape as `/api/v1/devices`.
 
 ```bash

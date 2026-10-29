@@ -938,6 +938,71 @@ class CliExportTests(unittest.TestCase):
             self.assertNotIn(char, out)
         self.assertNotIn(char, err)
 
+    def test_output_suffix_selects_or_checks_the_format(self):
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device("192.168.50.10", "aa:bb:cc:dd:ee:10", hostname="host")],
+            )
+        finally:
+            conn.close()
+        csv_dest = self.root / "devices.CSV"
+        code, out, err = self.run_cli("export", "--what", "devices", "--output", str(csv_dest))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "")
+        self.assertTrue(csv_dest.read_bytes().startswith(b'"'))
+        parsed = list(csv.reader(io.StringIO(csv_dest.read_text(encoding="utf-8"), newline="")))
+        self.assertIn("hostname", parsed[0])
+
+        json_dest = self.root / "devices.json"
+        code, _out, err = self.run_cli("export", "--what", "devices", "--output", str(json_dest))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(json_dest.read_text(encoding="utf-8"))["api_version"], 1)
+
+        code, out, err = self.run_cli("export", "--what", "devices")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["api_version"], 1)
+
+        other = self.root / "devices.txt"
+        code, _out, err = self.run_cli("export", "--what", "devices", "--output", str(other))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8"))["api_version"], 1)
+
+        kept = self.root / "keep.csv"
+        kept.write_bytes(b"keep")
+        code, out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "json", "--output", str(kept),
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("does not match", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(out, "")
+        self.assertEqual(kept.read_bytes(), b"keep")
+
+        code, out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "csv",
+            "--output", str(self.root / "bad.JSON"),
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("does not match", err)
+        self.assertFalse((self.root / "bad.JSON").exists())
+
+        text_dest = self.root / "explicit.txt"
+        code, _out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "csv", "--output", str(text_dest),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(text_dest.read_bytes().startswith(b'"'))
+
+        matched = self.root / "ok.CSV"
+        code, _out, err = self.run_cli(
+            "export", "--what", "devices", "--format", "csv", "--output", str(matched),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(matched.read_bytes().startswith(b'"'))
+
     def test_output_file_matches_stdout_bytes(self):
         conn = connect(self.db)
         try:

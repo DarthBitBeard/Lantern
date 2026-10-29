@@ -174,7 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     export_p = sub.add_parser("export", help="Write devices, findings, or scan history as JSON or CSV.")
     _add_db_arg(export_p)
     export_p.add_argument("--what", required=True, choices=["devices", "findings", "history"])
-    export_p.add_argument("--format", choices=["json", "csv"], default="json")
+    export_p.add_argument(
+        "--format",
+        choices=["json", "csv"],
+        help="json or csv. When omitted, a .csv --output path is CSV and every other path is JSON.",
+    )
     export_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
     export_p.add_argument("--scope", help="Limit the export to this scope. Matched the same way as history --scope.")
     export_p.add_argument("--scan-id", type=int, help="Scan to export. Default: latest of --scope, or the latest scan.")
@@ -243,8 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_EXPORT_FORMAT_MISMATCH = (
+    "The --output suffix does not match --format. "
+    "Use .csv with csv, or .json with json."
+)
+
 _EXPORT_VALUE_ERRORS = frozenset({
     "Pass a file path to --output, or omit it to write to stdout.",
+    _EXPORT_FORMAT_MISMATCH,
     "The export path is not allowed.",
     "The export directory must already exist.",
     "The export directory must not be a symlink.",
@@ -263,18 +273,32 @@ def _err(message: str) -> int:
     return 2
 
 
+def _export_format(output: str | None, chosen: str | None) -> str:
+    """Pick JSON or CSV. A .csv or .json suffix must agree with --format."""
+    suffix = Path(output).suffix.casefold() if output else ""
+    if chosen is None:
+        return "csv" if suffix == ".csv" else "json"
+    if suffix in {".csv", ".json"} and suffix != f".{chosen}":
+        raise ValueError(_EXPORT_FORMAT_MISMATCH)
+    return chosen
+
+
 def _cmd_export(args, conn) -> int:
     from .v1 import V1Error, MESSAGES, render_export, write_export_file
 
     if args.output is not None and not str(args.output):
         return _err("Pass a file path to --output, or omit it to write to stdout.")
     try:
+        fmt = _export_format(args.output, args.format)
+    except ValueError as exc:
+        return _err(str(exc))
+    try:
         scope = _one_scope_name(args)
     except ValueError as exc:
         return _err(str(exc))
     query = {
         "what": [args.what],
-        "format": [args.format],
+        "format": [fmt],
     }
     if scope:
         query["scope"] = [scope]
