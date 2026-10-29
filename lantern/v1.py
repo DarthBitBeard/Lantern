@@ -866,11 +866,28 @@ def _write_fd(fd: int, payload: bytes) -> None:
         os.fchmod(fd, 0o600)
 
 
+def _unlink_quiet(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
-    """Write ``payload`` to ``path`` at mode 0600. Return the absolute path."""
+    """Write ``payload`` to ``path`` at mode 0600. Return the absolute path.
+
+    A failure, including KeyboardInterrupt, removes a ``.lantern-export-*``
+    temp file and a partial file created without ``force``. An existing file
+    replaced with ``force`` is left as it was when the replace did not finish.
+    """
     destination = prepare_export_path(path, force)
     parent = destination.parent
     directory = None
+    temporary_path = None
+    partial = None
+    success = False
     try:
         if os.open in getattr(os, "supports_dir_fd", ()):
             flags = os.O_RDONLY
@@ -889,34 +906,29 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
             else:
                 fd = os.open(destination, flags, 0o600)
+            partial = destination
             try:
-                try:
-                    _write_fd(fd, payload)
-                except Exception:
-                    os.close(fd)
-                    fd = -1
-                    destination.unlink(missing_ok=True)
-                    raise
+                _write_fd(fd, payload)
             finally:
-                if fd >= 0:
-                    os.close(fd)
+                os.close(fd)
         else:
             fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
             temporary_path = Path(temporary)
             try:
-                try:
-                    _write_fd(fd, payload)
-                finally:
-                    os.close(fd)
-                os.replace(temporary_path, destination)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
+                _write_fd(fd, payload)
+            finally:
+                os.close(fd)
+            os.replace(temporary_path, destination)
+            temporary_path = None
+        success = True
     except OSError as exc:
         if exc.errno in _PATH_ERRNOS:
             raise ValueError("The export path is not allowed.") from exc
         raise ValueError("The export could not be written.") from exc
     finally:
+        if not success:
+            _unlink_quiet(temporary_path)
+            _unlink_quiet(partial)
         if directory is not None:
             os.close(directory)
     return os.path.abspath(destination)

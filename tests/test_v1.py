@@ -294,6 +294,30 @@ class PathTests(unittest.TestCase):
         self.assertEqual(dest.read_bytes(), b"keep")
         self.assertEqual(list(self.root.glob(".lantern-export-*")), [])
 
+    def test_interrupt_removes_temp_and_partial_files(self):
+        calls = {
+            "write": "lantern.v1.os.write",
+            "fsync": "lantern.v1.os.fsync",
+            "replace": "lantern.v1.os.replace",
+        }
+        for name, target in calls.items():
+            for force in (False, True):
+                if name == "replace" and not force:
+                    continue
+                dest = self.root / f"{name}-{int(force)}.json"
+                if force:
+                    dest.write_bytes(b"keep")
+                elif dest.exists():
+                    dest.unlink()
+                with mock.patch(target, side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        v1.write_export_file(str(dest), b"new-bytes", force=force)
+                self.assertEqual(list(self.root.glob(".lantern-export-*")), [])
+                if force:
+                    self.assertEqual(dest.read_bytes(), b"keep")
+                else:
+                    self.assertFalse(dest.exists(), name)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
