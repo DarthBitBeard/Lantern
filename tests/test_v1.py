@@ -938,6 +938,26 @@ class CliExportTests(unittest.TestCase):
             self.assertNotIn(char, out)
         self.assertNotIn(char, err)
 
+    def test_output_file_matches_stdout_bytes(self):
+        conn = connect(self.db)
+        try:
+            save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device("192.168.50.10", "aa:bb:cc:dd:ee:10", hostname="host")],
+            )
+        finally:
+            conn.close()
+        for fmt, name in (("json", "out.json"), ("csv", "out.csv")):
+            code, out, err = self.run_cli("export", "--what", "devices", "--format", fmt)
+            self.assertEqual(code, 0, err)
+            dest = self.root / name
+            code, _file_out, err = self.run_cli(
+                "export", "--what", "devices", "--format", fmt, "--output", str(dest),
+            )
+            self.assertEqual(code, 0, err)
+            self.assertEqual(dest.read_bytes(), out.encode("utf-8"))
+
     def test_export_stdout_writes_bytes(self):
         import contextlib
         import sys

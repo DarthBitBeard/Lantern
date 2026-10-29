@@ -288,6 +288,8 @@ def _cmd_export(args, conn) -> int:
         payload, _fmt, _scan_id, _what, _fmt_name = render_export(
             conn, query, private=bool(args.include_private_fields),
         )
+        if not payload.endswith(b"\n"):
+            payload += b"\n"
         if args.output:
             written = write_export_file(args.output, payload, force=bool(args.force))
     except V1Error as exc:
@@ -305,8 +307,6 @@ def _cmd_export(args, conn) -> int:
     if args.output:
         print(f"Wrote {written}", file=sys.stderr)
         return 0
-    if not payload.endswith(b"\n"):
-        payload += b"\n"
     buffer = getattr(sys.stdout, "buffer", None)
     if buffer is not None:
         buffer.write(payload)
