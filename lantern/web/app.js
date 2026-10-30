@@ -343,18 +343,31 @@ async function loadStatus() {
   const data = await api("/api/status");
   if (data.guessed_subnet && !$("subnet").value) $("subnet").value = data.guessed_subnet;
   if (data.version) $("version").textContent = `Lantern v${data.version}`;
-  if (data.scan_running) setMessage("A scan started elsewhere is still running.");
   return data;
 }
 
-$("scan-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
+// A scan runs on the server in the background. Poll until it stops running.
+const SCAN_POLL_MS = 2000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForScan() {
+  for (;;) {
+    const job = await api("/api/scan");
+    if (job.state !== "running") return job;
+    await sleep(SCAN_POLL_MS);
+  }
+}
+
+async function watchScan() {
   setBusy(true);
   setMessage("Scanning. This can take a minute on a /24.");
   try {
-    const data = await postJson("/api/scan", { subnet: $("subnet").value.trim() || undefined });
-    viewingId = null;
-    showScan(data.scan, data.diff);
+    const job = await waitForScan();
+    if (job.state === "error") throw new Error(job.error || "The scan failed.");
+    const data = await loadLatest();
     await loadHistory();
     setMessage(`Scan done: ${data.scan.devices.length} devices.`);
   } catch (err) {
@@ -362,6 +375,19 @@ $("scan-form").addEventListener("submit", async (event) => {
   } finally {
     setBusy(false);
   }
+}
+
+$("scan-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setBusy(true);
+  try {
+    await postJson("/api/scan", { subnet: $("subnet").value.trim() || undefined });
+  } catch (err) {
+    setMessage(err.message, true);
+    setBusy(false);
+    return;
+  }
+  await watchScan();
 });
 
 $("demo-btn").addEventListener("click", async () => {
@@ -425,9 +451,11 @@ $("history").addEventListener("change", async (event) => {
 
 async function startDashboard() {
   try {
-    await loadStatus();
+    const status = await loadStatus();
     await loadLatest();
     await loadHistory();
+    // A scan started from another tab or before a reload is still running.
+    if (status.scan_running) watchScan();
   } catch (err) {
     $("status").textContent = "Could not reach the Lantern server.";
     setMessage(err.message, true);
