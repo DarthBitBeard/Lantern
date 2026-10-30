@@ -813,36 +813,68 @@ def load_scan_with_diff(
     return scan, diff
 
 
+def _pair_by_key(old_devices: list[dict], new_devices: list[dict]):
+    """Match the devices that share one key. Returns (pairs, added, removed).
+
+    Several devices can carry one MAC: a proxy-ARP router, a host with more
+    than one address, a VM bridge. Same-IP devices are matched first. What is
+    left on both sides is matched in IP order, which is a move, and anything
+    still unmatched is added or removed. One device on each side is always a
+    pair, so a MAC that kept its identity but changed IP still reads as moved.
+    """
+    old_left = list(old_devices)
+    pairs, new_left = [], []
+    for device in new_devices:
+        match = next((o for o in old_left if o["ip"] == device["ip"]), None)
+        if match is None:
+            new_left.append(device)
+        else:
+            old_left.remove(match)
+            pairs.append((match, device))
+    old_left.sort(key=lambda d: ip_sort_key(d["ip"]))
+    new_left.sort(key=lambda d: ip_sort_key(d["ip"]))
+    count = min(len(old_left), len(new_left))
+    pairs.extend(zip(old_left[:count], new_left[:count]))
+    return pairs, new_left[count:], old_left[count:]
+
+
 def diff_scans(old: dict, new: dict) -> dict:
     """Compare two scan dicts. Key devices by MAC when known, else IP.
 
     A device counts as changed when a port opened or closed, or when it
     kept its MAC but moved to a new IP (old_ip then differs from device.ip).
+    Devices that share a MAC are matched one by one, never merged.
     """
     def key(device):
         return (device.get("mac") or "").lower() or device["ip"]
 
-    old_map = {key(d): d for d in old["devices"]}
-    new_map = {key(d): d for d in new["devices"]}
+    def group(devices):
+        grouped: dict[str, list[dict]] = {}
+        for device in devices:
+            grouped.setdefault(key(device), []).append(device)
+        return grouped
+
+    old_groups = group(old["devices"])
+    new_groups = group(new["devices"])
 
     added, removed, changed = [], [], []
-    for k, device in new_map.items():
-        if k not in old_map:
-            added.append(device)
-            continue
-        old_device = old_map[k]
-        old_ports = {p["port"] for p in old_device["open_ports"]}
-        new_ports = {p["port"] for p in device["open_ports"]}
-        opened = sorted(new_ports - old_ports)
-        closed = sorted(old_ports - new_ports)
-        if opened or closed or device["ip"] != old_device["ip"]:
-            changed.append(
-                {"device": device, "opened": opened, "closed": closed,
-                 "old_ip": old_device["ip"]}
-            )
-    for k, device in old_map.items():
-        if k not in new_map:
-            removed.append(device)
+    for k, new_devices in new_groups.items():
+        pairs, only_new, only_old = _pair_by_key(old_groups.get(k, []), new_devices)
+        added.extend(only_new)
+        removed.extend(only_old)
+        for old_device, device in pairs:
+            old_ports = {p["port"] for p in old_device["open_ports"]}
+            new_ports = {p["port"] for p in device["open_ports"]}
+            opened = sorted(new_ports - old_ports)
+            closed = sorted(old_ports - new_ports)
+            if opened or closed or device["ip"] != old_device["ip"]:
+                changed.append(
+                    {"device": device, "opened": opened, "closed": closed,
+                     "old_ip": old_device["ip"]}
+                )
+    for k, old_devices in old_groups.items():
+        if k not in new_groups:
+            removed.extend(old_devices)
     added.sort(key=lambda d: ip_sort_key(d["ip"]))
     removed.sort(key=lambda d: ip_sort_key(d["ip"]))
     changed.sort(key=lambda c: ip_sort_key(c["device"]["ip"]))

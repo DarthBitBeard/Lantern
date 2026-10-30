@@ -195,6 +195,39 @@ class DiffTests(unittest.TestCase):
         scan = {"devices": [_dev("10.0.0.5", "aa:aa:aa:aa:aa:01", [22])]}
         self.assertEqual(diff_scans(scan, scan), {"added": [], "removed": [], "changed": []})
 
+    def test_devices_sharing_a_mac_are_not_merged(self):
+        """A proxy-ARP router or VM bridge reports one MAC for several IPs."""
+        mac = "aa:aa:aa:aa:aa:01"
+        scan = {"devices": [_dev("10.0.0.5", mac, [22]), _dev("10.0.0.6", mac, [80])]}
+        self.assertEqual(diff_scans(scan, scan), {"added": [], "removed": [], "changed": []})
+
+        old = scan
+        new = {"devices": [
+            _dev("10.0.0.5", mac, [22]),
+            _dev("10.0.0.6", mac, [80, 443]),
+            _dev("10.0.0.7", mac, []),
+        ]}
+        diff = diff_scans(old, new)
+        self.assertEqual([d["ip"] for d in diff["added"]], ["10.0.0.7"])
+        self.assertEqual(diff["removed"], [])
+        self.assertEqual(len(diff["changed"]), 1)
+        self.assertEqual(diff["changed"][0]["device"]["ip"], "10.0.0.6")
+        self.assertEqual(diff["changed"][0]["opened"], [443])
+
+        gone = diff_scans(new, old)
+        self.assertEqual([d["ip"] for d in gone["removed"]], ["10.0.0.7"])
+        self.assertEqual(gone["added"], [])
+
+    def test_shared_mac_leftovers_pair_as_a_move(self):
+        mac = "aa:aa:aa:aa:aa:01"
+        old = {"devices": [_dev("10.0.0.5", mac, [22]), _dev("10.0.0.6", mac, [])]}
+        new = {"devices": [_dev("10.0.0.5", mac, [22]), _dev("10.0.0.9", mac, [])]}
+        diff = diff_scans(old, new)
+        self.assertEqual((diff["added"], diff["removed"]), ([], []))
+        self.assertEqual(len(diff["changed"]), 1)
+        self.assertEqual(diff["changed"][0]["old_ip"], "10.0.0.6")
+        self.assertEqual(diff["changed"][0]["device"]["ip"], "10.0.0.9")
+
 
 def _write_v030(path: Path) -> None:
     """Create a database exactly as Lantern 0.3.0 left it, with rows in it."""

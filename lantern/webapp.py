@@ -57,7 +57,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from . import __version__, demo
+from . import __version__, assets as assetlib, demo
 from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .ports import DEFAULT_PORTS
 from .report import to_html, to_json
@@ -113,6 +113,19 @@ _HOSTNAME_RE = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
 )
 _scan_lock = threading.Lock()
+
+
+def _load_view(conn, scan_id: int | None = None) -> tuple[dict | None, dict | None]:
+    """A scan and its diff with trust labels and inventory fields applied.
+
+    The CLI does the same in `_prepare_report`. Without it the dashboard and
+    the HTML report would never show owner, location, tags, criticality, or
+    notes.
+    """
+    scan, diff = load_scan_with_diff(conn, scan_id)
+    assetlib.attach_assets(conn, scan)
+    assetlib.attach_assets_to_diff(conn, diff)
+    return scan, diff
 
 
 def _canonical_host(host: str) -> str:
@@ -1120,12 +1133,12 @@ class LanternHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"scans": list_scans(conn)})
                 return
             if path in ("/api/scans/latest", "/api/diff"):
-                scan, diff = load_scan_with_diff(conn)
+                scan, diff = _load_view(conn)
                 self._send_json(200, {"scan": scan, "diff": diff})
                 return
             if path.startswith("/api/scans/"):
                 scan_id = self._int_param(path[len("/api/scans/"):], "Scan id")
-                scan, diff = load_scan_with_diff(conn, scan_id)
+                scan, diff = _load_view(conn, scan_id)
                 if scan is None:
                     self._send_json(404, {"error": "Scan not found."})
                 else:
@@ -1138,7 +1151,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                     raise ValueError("format must be json or html.")
                 if scan_id:
                     scan_id = self._int_param(scan_id, "scan_id")
-                scan, diff = load_scan_with_diff(conn, scan_id)
+                scan, diff = _load_view(conn, scan_id)
                 if scan is None:
                     self._send_json(404, {"error": "Scan not found." if scan_id else "No scans yet."})
                     return
@@ -1209,7 +1222,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         try:
             save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True)
             save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
-            scan, diff = load_scan_with_diff(conn)
+            scan, diff = _load_view(conn)
             self._send_json(200, {"scan_id": scan["id"], "scan": scan, "diff": diff})
         finally:
             conn.close()
@@ -1237,7 +1250,7 @@ class LanternHandler(BaseHTTPRequestHandler):
             conn = self._db()
             try:
                 scan_id = save_scan(conn, subnet, devices, demo=False)
-                scan, diff = load_scan_with_diff(conn, scan_id)
+                scan, diff = _load_view(conn, scan_id)
             finally:
                 conn.close()
         finally:

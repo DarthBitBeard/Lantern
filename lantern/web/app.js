@@ -224,6 +224,8 @@ function renderDevice(device) {
   const extra = [
     device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
     device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
+    device.location ? `<p>Location: ${esc(device.location)}</p>` : "",
+    device.criticality ? `<p>Criticality: ${esc(device.criticality)}</p>` : "",
     Array.isArray(device.tags) && device.tags.length
       ? `<p>Tags: ${device.tags.map((tag) => esc(tag)).join(", ")}</p>`
       : "",
