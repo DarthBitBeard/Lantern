@@ -118,6 +118,60 @@ class WebTests(unittest.TestCase):
         self.assertEqual([d["ip"] for d in data["diff"]["added"]], ["192.168.50.11"])
         self.assertEqual(data["diff"]["removed"], [])
 
+    def test_inventory_fields_reach_the_scan_api_and_html_report(self):
+        from lantern.assets import set_asset
+        from lantern.store import connect, save_scan
+
+        def device(ip, mac):
+            return {
+                "ip": ip, "mac": mac, "hostname": None, "label": None,
+                "open_ports": [], "findings": [],
+            }
+
+        mac = "aa:bb:cc:dd:ee:01"
+        conn = connect(Path(self.tmp.name) / "test.db")
+        try:
+            save_scan(conn, "192.168.50.0/24", [device("192.168.50.10", mac)])
+            scan_id = save_scan(
+                conn, "192.168.50.0/24",
+                [device("192.168.50.10", mac), device("192.168.50.11", "aa:bb:cc:dd:ee:02")],
+            )
+            set_asset(
+                conn, f"mac:{mac}", "mac",
+                owner="Dana", location="Garage", tags=["nas"],
+                criticality="high", notes="Backs up the laptops",
+            )
+            set_asset(
+                conn, "mac:aa:bb:cc:dd:ee:02", "mac", owner="Sam", notes="New switch",
+            )
+        finally:
+            conn.close()
+
+        def assert_fields(shown):
+            self.assertEqual(shown["owner"], "Dana")
+            self.assertEqual(shown["location"], "Garage")
+            self.assertEqual(shown["tags"], ["nas"])
+            self.assertEqual(shown["criticality"], "high")
+            self.assertEqual(shown["notes"], "Backs up the laptops")
+
+        for path in ("/api/scans/latest", f"/api/scans/{scan_id}", "/api/diff"):
+            status, data = self.get_json(path)
+            self.assertEqual(status, 200, path)
+            by_ip = {d["ip"]: d for d in data["scan"]["devices"]}
+            assert_fields(by_ip["192.168.50.10"])
+            self.assertEqual(by_ip["192.168.50.11"]["owner"], "Sam")
+            # The diff side carries the same fields.
+            self.assertEqual(data["diff"]["added"][0]["owner"], "Sam")
+
+        status, body, _ = self.request("/api/report?format=html")
+        self.assertEqual(status, 200, body)
+        for text in ("Dana", "Garage", "Backs up the laptops", "Sam", "New switch"):
+            self.assertIn(text, body)
+
+        status, body, _ = self.request("/api/report?format=json")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["devices"][0]["owner"], "Dana")
+
     def test_flow(self):
         status, body, headers = self.request("/")
         self.assertEqual(status, 200)

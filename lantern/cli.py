@@ -66,6 +66,12 @@ def _scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
         live = {ip for ip, alive in zip(hosts, pool.map(ping_host, hosts)) if alive}
 
+    # Pinging is what fills the ARP cache, so a host found only by ping has
+    # no MAC in the snapshot taken above. Read the table again and let the
+    # fresh entries win; keep the first snapshot for entries that expired
+    # while the sweep ran.
+    macs = {**macs, **arp_table()}
+
     # Hosts in the ARP cache count as live even if they ignore ping.
     host_set = set(hosts)
     live.update(ip for ip in macs if ip in host_set)

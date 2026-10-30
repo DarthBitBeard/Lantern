@@ -145,6 +145,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual([d["ip"] for d in scan["devices"]], ["10.9.9.3", "10.9.9.7"])
         self.assertEqual(scan["devices"][1]["mac"], "aa:bb:cc:dd:ee:07")
 
+    def test_scan_reads_arp_after_pinging(self):
+        """Pinging fills the ARP cache, so the MAC only exists after the sweep."""
+        pinged = []
+
+        def ping(ip):
+            pinged.append(ip)
+            return ip == "10.9.9.3"
+
+        def arp():
+            # Cold cache before any ping, warm once 10.9.9.3 has answered.
+            return {"10.9.9.3": "aa:bb:cc:dd:ee:03"} if "10.9.9.3" in pinged else {}
+
+        with mock.patch.object(cli, "arp_table", side_effect=arp), \
+                mock.patch.object(cli, "ping_host", side_effect=ping), \
+                mock.patch.object(cli, "scan_host", return_value=[]), \
+                mock.patch.object(cli, "reverse_hostname", return_value=None):
+            code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.0/24", "--format", "json")
+        self.assertEqual(code, 0)
+        devices = json.loads(out)["devices"]
+        self.assertEqual([d["ip"] for d in devices], ["10.9.9.3"])
+        self.assertEqual(devices[0]["mac"], "aa:bb:cc:dd:ee:03")
+
     def test_bad_db_path_and_port(self):
         # A plain file where the parent directory should be: open fails.
         Path(self.tmp.name, "file.db").write_text("")
