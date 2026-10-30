@@ -1,5 +1,6 @@
 """Subnet validation, neighbor-cache parsing, and ping flags. Offline."""
 
+import threading
 import time
 import unittest
 from unittest import mock
@@ -112,6 +113,87 @@ class PingCommandTests(unittest.TestCase):
     def test_ping_host_failure_is_false(self):
         with mock.patch.object(discovery.subprocess, "run", side_effect=OSError("no ping")):
             self.assertFalse(discovery.ping_host("10.0.0.1"))
+
+    def _ping(self, system, returncode, stdout):
+        result = mock.Mock(returncode=returncode, stdout=stdout)
+        with mock.patch.object(discovery.platform, "system", return_value=system), \
+                mock.patch.object(discovery.subprocess, "run", return_value=result):
+            return discovery.ping_host("192.168.1.50")
+
+    def test_windows_needs_an_echo_reply_not_just_exit_zero(self):
+        reply = (
+            b"Pinging 192.168.1.50 with 32 bytes of data:\r\n"
+            b"Reply from 192.168.1.50: bytes=32 time<1ms TTL=64\r\n"
+        )
+        # Windows can exit 0 on a reply from this machine saying the host is
+        # unreachable. That is not a live host.
+        unreachable = (
+            b"Pinging 192.168.1.50 with 32 bytes of data:\r\n"
+            b"Reply from 192.168.1.5: Destination host unreachable.\r\n"
+        )
+        expired = b"Reply from 192.168.1.1: TTL expired in transit.\r\n"
+        self.assertTrue(self._ping("Windows", 0, reply))
+        self.assertTrue(self._ping("Windows", 0, reply.lower()))
+        self.assertFalse(self._ping("Windows", 0, unreachable))
+        self.assertFalse(self._ping("Windows", 0, expired))
+        self.assertFalse(self._ping("Windows", 0, b""))
+        self.assertFalse(self._ping("Windows", 0, None))
+        self.assertFalse(self._ping("Windows", 1, reply))
+
+    def test_other_platforms_trust_the_exit_code(self):
+        for system in ("Linux", "Darwin"):
+            self.assertTrue(self._ping(system, 0, b""), system)
+            self.assertFalse(self._ping(system, 1, b"64 bytes from x: ttl=64"), system)
+
+
+class ReverseHostnameTests(unittest.TestCase):
+    def test_returns_the_name(self):
+        with mock.patch.object(discovery.socket, "gethostbyaddr", return_value=("nas.lan", [], ["10.0.0.9"])):
+            self.assertEqual(discovery.reverse_hostname("10.0.0.9"), "nas.lan")
+
+    def test_failure_and_empty_name_are_none(self):
+        with mock.patch.object(discovery.socket, "gethostbyaddr", side_effect=OSError("no PTR")):
+            self.assertIsNone(discovery.reverse_hostname("10.0.0.9"))
+        with mock.patch.object(discovery.socket, "gethostbyaddr", return_value=("", [], [])):
+            self.assertIsNone(discovery.reverse_hostname("10.0.0.9"))
+
+    def test_slow_lookup_does_not_stall_the_scan(self):
+        def hang(_ip):
+            time.sleep(5)
+            return ("late.lan", [], [])
+
+        started = time.monotonic()
+        with mock.patch.object(discovery, "_REVERSE_LOOKUP_TIMEOUT", 0.2), \
+                mock.patch.object(discovery.socket, "gethostbyaddr", side_effect=hang):
+            self.assertIsNone(discovery.reverse_hostname("10.0.0.9"))
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_stuck_lookups_cannot_exhaust_threads(self):
+        """With every slot held by a stuck lookup, callers give up instead of piling on."""
+        slots = threading.BoundedSemaphore(2)
+        release = threading.Event()
+
+        def hang(_ip):
+            release.wait(5)
+            return ("late.lan", [], [])
+
+        def stuck():
+            return sum(1 for t in threading.enumerate() if t.name == "lantern-reverse-dns")
+
+        # Another test may still have an abandoned lookup sleeping.
+        before = stuck()
+        started = time.monotonic()
+        try:
+            with mock.patch.object(discovery, "_REVERSE_LOOKUP_TIMEOUT", 0.1), \
+                    mock.patch.object(discovery, "_reverse_slots", slots), \
+                    mock.patch.object(discovery.socket, "gethostbyaddr", side_effect=hang):
+                results = [discovery.reverse_hostname(f"10.0.0.{n}") for n in range(6)]
+            self.assertEqual(results, [None] * 6)
+            self.assertLess(time.monotonic() - started, 3.0)
+            # Two lookups hold the slots; the other four were refused a slot.
+            self.assertEqual(stuck() - before, 2)
+        finally:
+            release.set()
 
 
 class GuessSubnetTests(unittest.TestCase):
