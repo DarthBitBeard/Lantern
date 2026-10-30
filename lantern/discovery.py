@@ -40,6 +40,14 @@ _EMPTY_MAC = "00:00:00:00:00:00"
 # Auto-detect must not stall a scan or the dashboard on that lookup.
 _HOSTNAME_LOOKUP_TIMEOUT = 0.5
 _hostname_lock = threading.Lock()
+# A reverse lookup that is not answered by now is not worth holding a scan
+# worker for. The slot count bounds lookups still stuck in the resolver.
+_REVERSE_LOOKUP_TIMEOUT = 1.0
+_REVERSE_LOOKUP_SLOTS = 32
+_reverse_slots = threading.BoundedSemaphore(_REVERSE_LOOKUP_SLOTS)
+# Marks a real echo reply in Windows `ping` output. "TTL expired in transit"
+# has no equals sign, so it does not match.
+_TTL_MARK = b"ttl="
 
 
 def validate_subnet(text: str) -> ipaddress.IPv4Network:
@@ -169,13 +177,24 @@ def ping_command(ip: str, timeout_ms: int = 1000, system: str | None = None) -> 
 
 
 def ping_host(ip: str, timeout_ms: int = 1000) -> bool:
-    """True if the host answers one ping. Best effort, never fatal."""
+    """True if the host answers one ping. Best effort, never fatal.
+
+    Windows `ping` can exit 0 on "Reply from <this machine>: Destination host
+    unreachable", which would make every empty address on the local subnet
+    look alive. A real echo reply carries `TTL=`; an unreachable or
+    TTL-expired reply does not. Windows therefore also needs that marker.
+    """
+    system = platform.system().lower()
     try:
         result = subprocess.run(
-            ping_command(ip, timeout_ms), capture_output=True,
+            ping_command(ip, timeout_ms, system), capture_output=True,
             timeout=timeout_ms / 1000 + 2,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        if system == "windows":
+            return _TTL_MARK in (result.stdout or b"").lower()
+        return True
     except Exception:
         return False
 
@@ -231,9 +250,36 @@ def arp_table() -> dict[str, str]:
 
 
 def reverse_hostname(ip: str) -> str | None:
-    """Best-effort reverse DNS. Returns None on failure."""
-    try:
-        name, _, _ = socket.gethostbyaddr(str(ip))
-        return name or None
-    except Exception:
+    """Best-effort reverse DNS. Returns None on failure or after a short wait.
+
+    Home networks often have no PTR records, and the system resolver can take
+    several seconds per address to give up (longer on Windows, which also
+    tries NetBIOS). The lookup runs in a daemon thread that is abandoned
+    after `_REVERSE_LOOKUP_TIMEOUT` seconds. At most `_REVERSE_LOOKUP_SLOTS`
+    abandoned or running lookups exist at once; a caller that cannot get a
+    slot within the timeout also returns None, so stuck lookups cannot pile
+    up threads across a large scan.
+    """
+    slots = _reverse_slots
+    if not slots.acquire(timeout=_REVERSE_LOOKUP_TIMEOUT):
         return None
+    found: list[str] = []
+
+    def lookup() -> None:
+        try:
+            name, _, _ = socket.gethostbyaddr(str(ip))
+            if name:
+                found.append(name)
+        except Exception:
+            pass
+        finally:
+            slots.release()
+
+    worker = threading.Thread(target=lookup, name="lantern-reverse-dns", daemon=True)
+    try:
+        worker.start()
+    except Exception:
+        slots.release()
+        return None
+    worker.join(_REVERSE_LOOKUP_TIMEOUT)
+    return found[0] if found else None
