@@ -30,7 +30,7 @@ This does not authorize testing against anyone else's network or devices. This i
 
 ## Supported versions
 
-Only `main` is supported. That branch is currently version 0.3.0 in `pyproject.toml`. There are no tagged releases yet. Security fixes go to `main`. Older versions are not maintained.
+Only `main` is supported. That branch is currently version 0.4.0 in `pyproject.toml`. Tagged releases are published on the GitHub releases page, and 0.4.0 is marked as a pre-release. Security fixes go to `main` and ship in the next release. Older versions are not maintained.
 
 ## Scope
 
