@@ -1875,6 +1875,25 @@ fallback.context.api("/api/status").catch(() => {}).then(() => {
         )
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
+    def test_randomized_mac_check_reads_the_locally_administered_bit(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        app = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        start = app.index("function isRandomizedMac")
+        func = app[start:app.index("function renderDevice")]
+        script = func + r"""
+const cases = [
+  ["02:11:22:33:44:55", true], ["DA-A1-19-00-00-01", true], ["fe:ff:ff:ff:ff:ff", true],
+  ["00:11:22:33:44:55", false], ["b8:27:eb:00:00:01", false], ["", false], [null, false], ["junk", false],
+];
+for (const [mac, want] of cases) {
+  if (isRandomizedMac(mac) !== want) { console.error(mac, want); process.exit(1); }
+}
+"""
+        proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
     def test_dashboard_escapes_scope_and_device_fields(self):
         """app.js must escape scope, banner, hostname, label, owner, tag, and notes."""
         node = shutil.which("node")

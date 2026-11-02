@@ -206,6 +206,14 @@ function deviceMatches(device) {
   return hay.includes(q);
 }
 
+// A set 0x02 bit in the first byte marks a locally administered address.
+// Phones use these as "private Wi-Fi addresses" and change them, so the
+// same phone can look like a new device.
+function isRandomizedMac(mac) {
+  const first = /^([0-9a-f]{2})[:-]/i.exec(mac || "");
+  return Boolean(first) && (parseInt(first[1], 16) & 2) === 2;
+}
+
 function renderDevice(device) {
   const name = esc(device.label || device.hostname || device.ip);
   const worst = worstSeverity(device);
@@ -244,6 +252,7 @@ function renderDevice(device) {
       <button type="button" class="secondary" data-untrust="${esc(mac)}" ${disabled}>Mark unknown</button>
     </div>
     ${mac ? "" : "<p class='hint'>No MAC address, so this device cannot be trusted yet. It is tracked by IP only.</p>"}
+    ${isRandomizedMac(mac) ? "<p class='hint'>This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.</p>" : ""}
   </article>`;
 }
 
