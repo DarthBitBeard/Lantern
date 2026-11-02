@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Schema 4 adds one index on the device table, `devices (ip, scan_id, mac)`. It changes no rows. `lantern asset` by IP address and the `/api/v1` and export sighting dates no longer read every stored scan's port and finding JSON: on 30,000 device rows the IP lookup went from about 46 ms to 0.1 ms and the sighting query from about 70 ms to 20 ms. Opening a schema 3 database copies it to `<file>.v3.bak` first, like any upgrade, and then builds the index, which takes time in proportion to the size of the history. A database written by this version is refused by 0.4.0, as with any newer schema.
+
 ## 0.4.0 - 2026-10-30
 
 Pre-release for testing. Adds scopes, device inventory, export, the read-only `/api/v1`, strict auth by default, and a hardened dashboard server. A database from 0.3.0 is upgraded in place after a `.bak` copy is written.

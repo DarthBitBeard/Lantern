@@ -448,6 +448,99 @@ class MigrationTests(unittest.TestCase):
         finally:
             saved.close()
 
+    def _index_names(self, conn):
+        return {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'devices'"
+            )
+        }
+
+    def test_schema_3_database_gains_the_device_index_and_keeps_rows(self):
+        """A database stamped at schema 3 upgrades forward to schema 4."""
+        from lantern.store import (
+            _migration_1_v030_baseline,
+            _migration_2_scope_name,
+            _migration_3_assets,
+        )
+
+        raw = sqlite3.connect(self.path)
+        try:
+            apply_migrations(
+                raw,
+                migrations={
+                    1: _migration_1_v030_baseline,
+                    2: _migration_2_scope_name,
+                    3: _migration_3_assets,
+                },
+                target=3,
+                db_path=self.path,
+            )
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
+                ("2026-10-28T00:00:00+00:00", "10.9.0.0/24", 0, "home"),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?)",
+                ("10.9.0.4", "aa:bb:cc:dd:ee:04", None, None, '[{"port": 22}]', "[]"),
+            )
+            raw.execute(
+                "INSERT INTO assets (asset_key, key_kind, owner, tags, updated_at)"
+                " VALUES ('mac:aa:bb:cc:dd:ee:04', 'mac', 'Dana', '[]', '2026-10-28T00:00:00+00:00')"
+            )
+            raw.commit()
+            self.assertNotIn("devices_ip_scan_mac", self._index_names(raw))
+        finally:
+            raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            self.assertGreaterEqual(SCHEMA_VERSION, 4)
+            self.assertIn("devices_ip_scan_mac", self._index_names(conn))
+            scan = load_scan(conn, 1)
+            self.assertEqual(scan["scope_name"], "home")
+            self.assertEqual(scan["devices"][0]["open_ports"], [{"port": 22}])
+            self.assertEqual(conn.execute("SELECT owner FROM assets").fetchone()[0], "Dana")
+        finally:
+            conn.close()
+
+        backups = list(Path(self.tmp.name).glob("*.bak"))
+        self.assertEqual([p.name for p in backups], ["lantern.db.v3.bak"])
+        saved = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 3)
+            self.assertNotIn("devices_ip_scan_mac", self._index_names(saved))
+        finally:
+            saved.close()
+
+    def test_fresh_database_has_the_device_index(self):
+        conn = connect(self.path)
+        try:
+            self.assertIn("devices_ip_scan_mac", self._index_names(conn))
+            # The 0.3.0 index is still there; shipped migrations are not edited.
+            self.assertIn("devices_scan_id", self._index_names(conn))
+        finally:
+            conn.close()
+
+    def test_history_wide_queries_use_the_covering_index(self):
+        """Guards the point of schema 4: these must not read every device row."""
+        conn = connect(self.path)
+        try:
+            for sql in (
+                "SELECT d.mac FROM devices d JOIN scans s ON s.id = d.scan_id "
+                "WHERE d.ip = '10.0.0.1' ORDER BY s.id DESC LIMIT 1",
+                "SELECT lower(replace(trim(IFNULL(d.mac, '')), '-', ':')), d.ip, "
+                "MIN(s.started_at), MAX(s.started_at) "
+                "FROM devices d JOIN scans s ON s.id = d.scan_id GROUP BY 1, d.ip",
+            ):
+                plan = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql))
+                self.assertIn("COVERING INDEX devices_ip_scan_mac", plan, sql)
+        finally:
+            conn.close()
+
     def test_newer_schema_is_refused_and_left_in_place(self):
         _write_v030(self.path)
         raw = sqlite3.connect(self.path)
