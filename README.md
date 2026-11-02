@@ -218,7 +218,8 @@ API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` i
 | `GET /api/scans/latest`, `GET /api/diff` | latest scan plus its diff against the scan before it |
 | `GET /api/scans/{id}` | one scan plus its diff against the scan before it |
 | `GET /api/report?format=json\|html&scan_id=N` | report for the latest scan, or scan `N` |
-| `POST /api/scan` `{"subnet": "192.168.1.0/24"}` | runs a real scan (subnet optional, auto-detected); 409 while one is running |
+| `POST /api/scan` `{"subnet": "192.168.1.0/24"}` | starts a real scan in the background (subnet optional, auto-detected) and returns 202 at once; 409 while one is running |
+| `GET /api/scan` | the latest dashboard scan: `state` (`idle`, `running`, `done`, `error`), `subnet`, `scan_id` once done, and a fixed `error` message when it failed |
 | `POST /api/demo` `{}` | saves the two demo scans |
 | `POST /api/trust` `{"mac": "...", "label": "...", "trusted": true}` | labels a device by MAC |
 

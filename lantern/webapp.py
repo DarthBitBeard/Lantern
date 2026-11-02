@@ -98,6 +98,7 @@ TOKEN_PLACEHOLDER = "__LANTERN_TOKEN__"
 AUTH_PLACEHOLDER = "__LANTERN_AUTH__"
 FORBIDDEN_MESSAGE = "Forbidden."
 SERVER_ERROR_MESSAGE = "Server error."
+SCAN_FAILED_MESSAGE = "The scan failed."
 BAD_REQUEST_MESSAGE = "Bad request."
 # 32 bytes is 256 bits. The LAN gate accepts anything of at least 128 bits,
 # which is 22 characters of urlsafe text (token_urlsafe(16) with no padding).
@@ -113,6 +114,64 @@ _HOSTNAME_RE = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
 )
 _scan_lock = threading.Lock()
+
+
+class _ScanJob:
+    """Outcome of the latest dashboard scan, for `GET /api/scan`.
+
+    A scan takes about a minute on a /24, so `POST /api/scan` starts it on a
+    background thread and the page polls this. `state` is idle, running,
+    done, or error. `error` is a fixed message: the exception text stays on
+    stderr, and only with --debug.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = {"state": "idle", "subnet": None, "scan_id": None, "error": None}
+
+    def start(self, subnet: str) -> None:
+        with self._lock:
+            self._state = {"state": "running", "subnet": subnet, "scan_id": None, "error": None}
+
+    def finish(self, scan_id: int) -> None:
+        with self._lock:
+            self._state = {**self._state, "state": "done", "scan_id": scan_id}
+
+    def fail(self) -> None:
+        with self._lock:
+            self._state = {**self._state, "state": "error", "error": SCAN_FAILED_MESSAGE}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+
+def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool) -> None:
+    """Scan and save on a background thread, record the outcome, free the scan lock."""
+    try:
+        # Import here to avoid a module cycle with cli.py.
+        from .cli import run_scan
+
+        devices = run_scan(subnet, DEFAULT_PORTS)
+        conn = connect(db_path)
+        try:
+            scan_id = save_scan(conn, subnet, devices, demo=False)
+        finally:
+            conn.close()
+        job.finish(scan_id)
+    except Exception as exc:
+        if debug:
+            try:
+                print(
+                    f"Lantern scan error: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except OSError:
+                pass
+        job.fail()
+    finally:
+        _scan_lock.release()
 
 
 def _load_view(conn, scan_id: int | None = None) -> tuple[dict | None, dict | None]:
@@ -553,6 +612,8 @@ class _DeadlineRaw(io.RawIOBase):
 class LanternHandler(BaseHTTPRequestHandler):
     db_path = None
     debug = False
+    # make_server gives each server its own job record.
+    scan_job = None
     # Fail closed until make_server fills these in for this process.
     api_token = ""
     allowed_hosts = frozenset()
@@ -1129,6 +1190,9 @@ class LanternHandler(BaseHTTPRequestHandler):
                     "scan_running": _scan_lock.locked(),
                 })
                 return
+            if path == "/api/scan":
+                self._send_json(200, self.scan_job.snapshot())
+                return
             if path == "/api/scans":
                 self._send_json(200, {"scans": list_scans(conn)})
                 return
@@ -1242,20 +1306,23 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not _scan_lock.acquire(blocking=False):
             self._send_json(409, {"error": "A scan is already running. Wait for it to finish."})
             return
+        # The scan runs on its own thread, which releases the lock when it
+        # ends. The request returns at once so a proxy or tunnel with a short
+        # timeout cannot cut it off, and the scan does not hold a connection
+        # slot for a minute.
+        self.scan_job.start(subnet)
         try:
-            # Import here to avoid a module cycle with cli.py.
-            from .cli import run_scan
-
-            devices = run_scan(subnet, DEFAULT_PORTS)
-            conn = self._db()
-            try:
-                scan_id = save_scan(conn, subnet, devices, demo=False)
-                scan, diff = _load_view(conn, scan_id)
-            finally:
-                conn.close()
-        finally:
+            threading.Thread(
+                target=_run_scan_job,
+                args=(self.scan_job, self.db_path, subnet, bool(self.debug)),
+                name="lantern-scan",
+                daemon=True,
+            ).start()
+        except Exception:
+            self.scan_job.fail()
             _scan_lock.release()
-        self._send_json(200, {"scan_id": scan_id, "scan": scan, "diff": diff})
+            raise
+        self._send_json(202, {"state": "running", "subnet": subnet})
 
     def _handle_trust(self, body: dict) -> None:
         mac = str(body.get("mac") or "").strip().lower()
@@ -1490,6 +1557,7 @@ def make_server(
             "debug": bool(debug),
             "lan_bound": bool(lan_bound),
             "strict_auth": bool(strict_auth),
+            "scan_job": _ScanJob(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
             "write_timeout": float(write_timeout),

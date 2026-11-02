@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A scan started from the dashboard runs in the background. `POST /api/scan` now returns 202 with `{"state": "running", "subnet": ...}` as soon as the scan starts, instead of holding the request open for about a minute and returning the scan. The scan no longer holds one of the 32 connection slots, and a proxy or tunnel with a short timeout cannot cut it off. `GET /api/scan` returns `state` (`idle`, `running`, `done`, `error`), `subnet`, `scan_id`, and `error`. A failed scan reports the fixed message "The scan failed."; the exception text goes to stderr only with `--debug`. Only one scan runs at a time, and a second `POST` is still 409. The dashboard polls every two seconds, and a page opened while a scan is running resumes watching it. Anything that called `POST /api/scan` and read `scan` from the response must now poll `GET /api/scan` and then read `/api/scans/{scan_id}`. `lantern scan` on the command line is unchanged.
+
 ## 0.4.0 - 2026-10-30
 
 Pre-release for testing. Adds scopes, device inventory, export, the read-only `/api/v1`, strict auth by default, and a hardened dashboard server. A database from 0.3.0 is upgraded in place after a `.bak` copy is written.

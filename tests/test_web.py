@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -267,6 +268,94 @@ class WebTests(unittest.TestCase):
                 status, body, _ = self.request("/api/scan", method="POST", body={})
                 self.assertEqual(status, 400, body)
                 self.assertIn("auto-detect", json.loads(body)["error"])
+
+    def _wait_for_scan(self):
+        deadline = time.monotonic() + 10
+        job = {}
+        while time.monotonic() < deadline:
+            status, job = self.get_json("/api/scan")
+            self.assertEqual(status, 200, job)
+            if job["state"] != "running":
+                return job
+            time.sleep(0.02)
+        self.fail(f"scan still running: {job}")
+
+    def test_scan_runs_in_the_background_and_reports_the_result(self):
+        status, job = self.get_json("/api/scan")
+        self.assertEqual((status, job["state"]), (200, "idle"))
+
+        release = threading.Event()
+        started = threading.Event()
+        device = {
+            "ip": "192.168.1.20", "mac": "aa:bb:cc:dd:ee:20", "hostname": None, "label": None,
+            "open_ports": [], "findings": [],
+        }
+
+        def slow_scan(subnet, ports):
+            self.assertEqual(subnet, "192.168.1.0/24")
+            started.set()
+            self.assertTrue(release.wait(10))
+            return [device]
+
+        with mock.patch("lantern.cli.run_scan", side_effect=slow_scan):
+            began = time.monotonic()
+            status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
+            # The request returns while the scan is still blocked.
+            self.assertLess(time.monotonic() - began, 5)
+            self.assertEqual(status, 202, body)
+            self.assertEqual(json.loads(body), {"state": "running", "subnet": "192.168.1.0/24"})
+            self.assertTrue(started.wait(10))
+
+            status, job = self.get_json("/api/scan")
+            self.assertEqual((job["state"], job["scan_id"]), ("running", None))
+            status, data = self.get_json("/api/status")
+            self.assertTrue(data["scan_running"])
+            status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
+            self.assertEqual(status, 409, body)
+
+            release.set()
+            job = self._wait_for_scan()
+
+        self.assertEqual(job["state"], "done", job)
+        self.assertEqual(job["subnet"], "192.168.1.0/24")
+        self.assertIsNone(job["error"])
+        status, data = self.get_json("/api/scans/latest")
+        self.assertEqual(data["scan"]["id"], job["scan_id"])
+        self.assertEqual([d["ip"] for d in data["scan"]["devices"]], ["192.168.1.20"])
+        status, data = self.get_json("/api/status")
+        self.assertFalse(data["scan_running"])
+
+    def test_failed_scan_reports_a_fixed_message_and_frees_the_lock(self):
+        with mock.patch("lantern.cli.run_scan", side_effect=RuntimeError("secret detail /etc/passwd")):
+            status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
+            self.assertEqual(status, 202, body)
+            job = self._wait_for_scan()
+        self.assertEqual(job["state"], "error", job)
+        self.assertEqual(job["error"], webapp.SCAN_FAILED_MESSAGE)
+        self.assertIsNone(job["scan_id"])
+        self.assertNotIn("secret detail", json.dumps(job))
+        status, data = self.get_json("/api/status")
+        self.assertFalse(data["scan_running"])
+        self.assertEqual(data["scan_count"], 0)
+
+        # The next scan is accepted and clears the old error.
+        with mock.patch("lantern.cli.run_scan", return_value=[]):
+            status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
+            self.assertEqual(status, 202, body)
+            job = self._wait_for_scan()
+        self.assertEqual((job["state"], job["error"]), ("done", None))
+
+    def test_scan_error_text_goes_to_stderr_only_with_debug(self):
+        err = io.StringIO()
+        with mock.patch("lantern.cli.run_scan", side_effect=RuntimeError("boom detail")), \
+                contextlib.redirect_stderr(err):
+            webapp._scan_lock.acquire()
+            job = webapp._ScanJob()
+            job.start("192.168.1.0/24")
+            webapp._run_scan_job(job, str(Path(self.tmp.name) / "test.db"), "192.168.1.0/24", True)
+        self.assertIn("boom detail", err.getvalue())
+        self.assertEqual(job.snapshot()["error"], webapp.SCAN_FAILED_MESSAGE)
+        self.assertFalse(webapp._scan_lock.locked())
 
     def test_scan_is_serialized(self):
         self.assertTrue(webapp._scan_lock.acquire(blocking=False))
@@ -1594,6 +1683,7 @@ class StrictAuthTests(unittest.TestCase):
     def test_every_get_api_route_requires_the_token(self):
         paths = (
             "/api/status",
+            "/api/scan",
             "/api/scans",
             "/api/scans/latest",
             "/api/diff",
@@ -1635,7 +1725,16 @@ class StrictAuthTests(unittest.TestCase):
             status, body, _headers = self.request(
                 "/api/scan", method="POST", body={"subnet": "192.168.1.0/24"}, token=self.token,
             )
-        self.assertEqual(status, 200, body)
+            self.assertEqual(status, 202, body)
+            self.assertEqual(json.loads(body)["state"], "running")
+            # The scan runs on its own thread; the mock must outlive it.
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                status, body, _headers = self.request("/api/scan", token=self.token)
+                if json.loads(body)["state"] != "running":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(json.loads(body)["state"], "done", body)
         run_scan.assert_called_once()
 
     def test_opt_out_loopback_embeds_the_token_and_allows_get(self):
@@ -1858,6 +1957,115 @@ if (option.includes("<script>") || !option.includes("&lt;script&gt;alert(1)&lt;/
   console.error(option);
   process.exit(5);
 }
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+    def test_dashboard_polls_a_background_scan(self):
+        """app.js starts a scan, polls `GET /api/scan`, then shows the result or the error."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const app = fs.readFileSync(process.argv[1], "utf8");
+
+function load(mode) {
+  const elements = {};
+  const listeners = {};
+  const calls = [];
+  const state = { polls: 0 };
+  function el(id) {
+    if (!elements[id]) {
+      elements[id] = {
+        id, hidden: true, textContent: "", value: "", className: "",
+        innerHTML: "", href: "", disabled: false,
+        addEventListener(type, fn) { listeners[id + ":" + type] = fn; },
+        getAttribute() { return ""; },
+        querySelectorAll() { return []; },
+      };
+    }
+    return elements[id];
+  }
+  const scan = {
+    id: 7, subnet: "10.0.0.0/24", started_at: "2026-10-30T00:00:00Z", demo: false,
+    devices: [{ ip: "10.0.0.2", mac: null, open_ports: [], findings: [] }],
+  };
+  const reply = (body, status = 200) => ({
+    ok: status < 400, status, json: async () => body, text: async () => "",
+  });
+  const context = {
+    sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    document: {
+      getElementById: el,
+      querySelector() { return { getAttribute() { return ""; } }; },
+      body: { setAttribute() {} },
+    },
+    window: { open() {} },
+    history: { replaceState() {} },
+    URL: { createObjectURL: () => "blob:test" },
+    setTimeout: (fn) => setImmediate(fn),
+    fetch: async (path, opts) => {
+      const method = (opts && opts.method) || "GET";
+      calls.push(method + " " + path);
+      if (path === "/api/scan" && method === "POST") return reply({ state: "running" }, 202);
+      if (path === "/api/scan") {
+        state.polls += 1;
+        if (state.polls < 3) return reply({ state: "running" });
+        if (mode === "error") return reply({ state: "error", error: "The scan failed." });
+        return reply({ state: "done", scan_id: 7 });
+      }
+      if (path === "/api/scans/latest") return reply({ scan, diff: null });
+      if (path === "/api/scans") return reply({ scans: [] });
+      if (path === "/api/status") {
+        return reply({ scan_count: 0, latest_scan_id: null, scan_running: mode === "resume", version: "t" });
+      }
+      return reply({});
+    },
+    console,
+  };
+  context.window.location = { hash: "", pathname: "/", search: "" };
+  vm.createContext(context);
+  vm.runInContext(app, context);
+  return { elements, listeners, calls, state };
+}
+
+async function settle(page, done) {
+  for (let i = 0; i < 200 && !done(page); i += 1) await new Promise((r) => setImmediate(r));
+}
+
+(async () => {
+  const ok = load("done");
+  await settle(ok, (p) => p.listeners["scan-form:submit"]);
+  await ok.listeners["scan-form:submit"]({ preventDefault() {} });
+  if (!ok.calls.includes("POST /api/scan")) { console.error("no POST"); process.exit(2); }
+  if (ok.state.polls !== 3) { console.error("polls " + ok.state.polls); process.exit(3); }
+  if (ok.elements.message.textContent !== "Scan done: 1 devices.") {
+    console.error(ok.elements.message.textContent); process.exit(4);
+  }
+  if (ok.elements["scan-btn"].disabled !== false) { console.error("still busy"); process.exit(5); }
+
+  const bad = load("error");
+  await settle(bad, (p) => p.listeners["scan-form:submit"]);
+  await bad.listeners["scan-form:submit"]({ preventDefault() {} });
+  if (bad.elements.message.textContent !== "The scan failed.") {
+    console.error(bad.elements.message.textContent); process.exit(6);
+  }
+  if (bad.elements.message.className !== "message error") { console.error("not an error"); process.exit(7); }
+  if (bad.elements["scan-btn"].disabled !== false) { console.error("still busy"); process.exit(8); }
+
+  // A page opened while a scan is already running resumes watching it.
+  const resumed = load("resume");
+  await settle(resumed, (p) => p.elements.message && p.elements.message.textContent.startsWith("Scan done"));
+  if (resumed.elements.message.textContent !== "Scan done: 1 devices.") {
+    console.error(resumed.elements.message.textContent); process.exit(9);
+  }
+  if (resumed.calls.includes("POST /api/scan")) { console.error("resume posted"); process.exit(10); }
+})().catch((err) => { console.error(err); process.exit(11); });
 """
         proc = subprocess.run(
             [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
