@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The dashboard marks a device whose MAC address is randomized (a private Wi-Fi address, the locally administered bit set). A phone that rotates its address shows up as a new device; the note says so, so it is not mistaken for an intruder.
+- The scan now also checks ports 554 (RTSP camera streams), 1883 (MQTT), 2375 (the Docker API, critical because it gives control of the host), 9100 (printers), 9200 (Elasticsearch), 11211 (Memcached), and 27017 (MongoDB). Each has a plain-English fix. Per-host connection workers drop from 50 to 24, so eight hosts at once stay under 256 open sockets, the macOS default limit; a scan of a busy network takes slightly longer.
 - A scan started from the dashboard runs in the background. `POST /api/scan` now returns 202 with `{"state": "running", "subnet": ...}` as soon as the scan starts, instead of holding the request open for about a minute and returning the scan. The scan no longer holds one of the 32 connection slots, and a proxy or tunnel with a short timeout cannot cut it off. `GET /api/scan` returns `state` (`idle`, `running`, `done`, `error`), `subnet`, `scan_id`, and `error`. A failed scan reports the fixed message "The scan failed."; the exception text goes to stderr only with `--debug`. Only one scan runs at a time, and a second `POST` is still 409. The dashboard polls every two seconds, and a page opened while a scan is running resumes watching it. Anything that called `POST /api/scan` and read `scan` from the response must now poll `GET /api/scan` and then read `/api/scans/{scan_id}`. `lantern scan` on the command line is unchanged.
 
 ## 0.4.0 - 2026-10-30

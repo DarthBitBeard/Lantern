@@ -42,7 +42,7 @@ from .store import connect, list_scans, load_scan_with_diff, save_scan, write_pr
 
 DEFAULT_DB = Path("data/lantern.db")
 PING_WORKERS = 50
-HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to 25 sockets
+HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to MAX_PORT_WORKERS sockets
 
 
 def _scan_one(ip: str, macs: dict[str, str], ports) -> dict:

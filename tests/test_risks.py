@@ -2,8 +2,10 @@
 
 import unittest
 
+from lantern.cli import HOST_WORKERS
 from lantern.discovery import guess_subnet, validate_subnet
 from lantern.ports import DEFAULT_PORTS, PORT_RULES, SEVERITY_RANK, findings_for_ports
+from lantern.scanner import MAX_PORT_WORKERS
 from lantern.webapp import WEB_DIR
 
 
@@ -18,8 +20,20 @@ class RiskRuleTests(unittest.TestCase):
         severities = [f["severity"] for f in findings]
         self.assertEqual(severities, sorted(severities, key=SEVERITY_RANK.get))
 
+    def test_exposed_database_and_container_ports_are_flagged(self):
+        severities = {f["port"]: f["severity"] for f in findings_for_ports([2375, 9200, 11211, 27017, 1883, 554])}
+        self.assertEqual(
+            severities,
+            {2375: "critical", 9200: "high", 11211: "high", 27017: "high", 1883: "medium", 554: "medium"},
+        )
+        for port in severities:
+            self.assertIn(port, DEFAULT_PORTS)
+
+    def test_a_full_scan_stays_under_the_macos_socket_limit(self):
+        self.assertLess(HOST_WORKERS * MAX_PORT_WORKERS, 256)
+
     def test_unknown_port_is_low_with_a_fix(self):
-        (finding,) = findings_for_ports([9100])
+        (finding,) = findings_for_ports([9999])
         self.assertEqual(finding["service"], "unknown")
         self.assertEqual(finding["severity"], "low")
         self.assertTrue(finding["fix"])

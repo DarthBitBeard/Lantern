@@ -16,7 +16,7 @@ BANNER_PORTS = {80, 8080, 8888, 9000, 9090, 32400, 8096, 8123}
 BANNER_BYTES = 256
 BANNER_MAX_CHARS = 120
 DEFAULT_TIMEOUT = 0.6
-MAX_PORT_WORKERS = 50
+MAX_PORT_WORKERS = 24  # with HOST_WORKERS = 8 this stays under 256 open sockets (the macOS default limit)
 
 
 def clean_banner(data: bytes) -> str:
