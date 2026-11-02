@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A scan started from the dashboard runs in the background. `POST /api/scan` now returns 202 with `{"state": "running", "subnet": ...}` as soon as the scan starts, instead of holding the request open for about a minute and returning the scan. The scan no longer holds one of the 32 connection slots, and a proxy or tunnel with a short timeout cannot cut it off. `GET /api/scan` returns `state` (`idle`, `running`, `done`, `error`), `subnet`, `scan_id`, and `error`. A failed scan reports the fixed message "The scan failed."; the exception text goes to stderr only with `--debug`. Only one scan runs at a time, and a second `POST` is still 409. The dashboard polls every two seconds, and a page opened while a scan is running resumes watching it. Anything that called `POST /api/scan` and read `scan` from the response must now poll `GET /api/scan` and then read `/api/scans/{scan_id}`. `lantern scan` on the command line is unchanged.
 - Schema 4 adds one index on the device table, `devices (ip, scan_id, mac)`. It changes no rows. `lantern asset` by IP address and the `/api/v1` and export sighting dates no longer read every stored scan's port and finding JSON: on 30,000 device rows the IP lookup went from about 46 ms to 0.1 ms and the sighting query from about 70 ms to 20 ms. Opening a schema 3 database copies it to `<file>.v3.bak` first, like any upgrade, and then builds the index, which takes time in proportion to the size of the history. A database written by this version is refused by 0.4.0, as with any newer schema.
 
 ## 0.4.0 - 2026-10-30
