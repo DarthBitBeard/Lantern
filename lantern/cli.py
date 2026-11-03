@@ -1082,6 +1082,14 @@ def _cmd_asset(args, conn) -> int:
             asset_key, kind = assetlib.resolve_asset_key(conn, args.key)
             saved = assetlib.set_asset(conn, asset_key, kind, **updates)
             _print_asset_text(saved)
+            if kind == "ip":
+                print(
+                    "lantern: note: this device has no MAC address, so the record is tied to "
+                    "its IP address. If your router gives that address to a different device, "
+                    "the owner and notes will follow the address. Trust or label it by MAC "
+                    "once a scan sees one.",
+                    file=sys.stderr,
+                )
             return 0
         if args.asset_command == "show":
             asset_key, _kind = assetlib.resolve_asset_key(conn, args.key)
