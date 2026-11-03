@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
+- CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
 - Auto-detected subnets use the interface's real prefix length instead of always assuming a /24, so a /23 or /22 home network is scanned whole and a /26 is not widened. It reads `ip addr`, `ifconfig`, or English `ipconfig` output. If the prefix is unknown (another Windows language) or larger than the 1024-address cap, it falls back to the /24 around the address, as before.
 - A host that ignores ping and is not in the ARP cache is now found by a short TCP connect to ports 80, 443, 22, and 445 (a refusal counts). This also makes discovery work in the Docker image, which has no `ping`. A scan of a mostly empty /24 takes a few seconds longer.
 ## 0.5.0 - 2026-11-02
