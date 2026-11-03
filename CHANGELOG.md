@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
+- CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
 - `lantern prune --keep N` and `--older-than DAYS` delete old scans. It only shows what would be deleted until `--yes` is given. The newest scan of each scope is always kept so a diff has a baseline, each scope is judged on its own, and inventory and trust records are kept. `--vacuum` shrinks the file afterwards.
 - `GET /api/scans` now returns at most 200 scans by default (`?limit=` up to 1000, `?offset=`), and adds `total`, `limit`, and `offset`. `/api/status` no longer loads every scan to count them.
 ## 0.5.0 - 2026-11-02
