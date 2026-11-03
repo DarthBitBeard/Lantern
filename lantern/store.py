@@ -30,7 +30,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
@@ -732,22 +732,38 @@ def latest_two_scan_ids(conn: sqlite3.Connection, scope_name: str | None = None)
     return [r[0] for r in rows]
 
 
-def list_scans(conn: sqlite3.Connection, scope_name: str | None = None) -> list[dict]:
-    """Newest first: id, time, subnet, scope name, demo flag, device count."""
+def count_scans(conn: sqlite3.Connection, scope_name: str | None = None) -> int:
+    """How many scans are stored, optionally for one scope."""
     if scope_name is None:
-        rows = conn.execute(
-            "SELECT s.id, s.started_at, s.subnet, s.scope_name, s.demo, COUNT(d.id)"
-            " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
-            " GROUP BY s.id ORDER BY s.id DESC"
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT s.id, s.started_at, s.subnet, s.scope_name, s.demo, COUNT(d.id)"
-            " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
-            " WHERE s.scope_name = ?"
-            " GROUP BY s.id ORDER BY s.id DESC",
-            (scope_name,),
-        ).fetchall()
+        return conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+    return conn.execute(
+        "SELECT COUNT(*) FROM scans WHERE scope_name = ?", (scope_name,)
+    ).fetchone()[0]
+
+
+def list_scans(
+    conn: sqlite3.Connection,
+    scope_name: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """Newest first: id, time, subnet, scope name, demo flag, device count.
+
+    ``limit`` and ``offset`` page through the result. No ``limit`` returns
+    every scan.
+    """
+    sql = (
+        "SELECT s.id, s.started_at, s.subnet, s.scope_name, s.demo, COUNT(d.id)"
+        " FROM scans s LEFT JOIN devices d ON d.scan_id = s.id"
+    )
+    params: list = []
+    if scope_name is not None:
+        sql += " WHERE s.scope_name = ?"
+        params.append(scope_name)
+    sql += " GROUP BY s.id ORDER BY s.id DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += [int(limit), int(offset)]
     return [
         {
             "id": r[0],
@@ -757,8 +773,76 @@ def list_scans(conn: sqlite3.Connection, scope_name: str | None = None) -> list[
             "demo": bool(r[4]),
             "device_count": r[5],
         }
-        for r in rows
+        for r in conn.execute(sql, params).fetchall()
     ]
+
+
+def scans_to_prune(
+    conn: sqlite3.Connection,
+    keep: int | None = None,
+    older_than_days: float | None = None,
+    scope_name: str | None = None,
+    now: datetime | None = None,
+) -> list[int]:
+    """Ids of scans that ``delete_scans`` would remove, oldest first.
+
+    Each scope (and the unscoped scans) is judged on its own, so a scope
+    that is scanned rarely is not wiped by one that is scanned often. The
+    newest scan of every scope is always kept, because a diff needs a
+    baseline. With ``keep``, a scan is a candidate only when it is not among
+    the newest ``keep`` of its scope. With ``older_than_days``, only when it
+    started before that many days ago. With both, a scan must satisfy both
+    to be removed. With neither, nothing is removed. ``scope_name`` limits
+    the candidates to that scope.
+    """
+    if keep is None and older_than_days is None:
+        return []
+    if keep is not None and keep < 1:
+        raise ValueError("keep must be at least 1.")
+    if older_than_days is not None and older_than_days < 0:
+        raise ValueError("older-than must not be negative.")
+    cutoff = None
+    if older_than_days is not None:
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)
+    by_scope: dict = {}
+    for scan_id, started_at, scope in conn.execute(
+        "SELECT id, started_at, scope_name FROM scans ORDER BY id DESC"
+    ):
+        by_scope.setdefault(scope, []).append((scan_id, started_at))
+    doomed = []
+    for scope, scans in by_scope.items():
+        if scope_name is not None and scope != scope_name:
+            continue
+        for position, (scan_id, started_at) in enumerate(scans):
+            if position == 0:
+                continue
+            if keep is not None and position < keep:
+                continue
+            if cutoff is not None:
+                try:
+                    when = datetime.fromisoformat(started_at)
+                except (TypeError, ValueError):
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when >= cutoff:
+                    continue
+            doomed.append(scan_id)
+    return sorted(doomed)
+
+
+def delete_scans(conn: sqlite3.Connection, scan_ids: list[int]) -> int:
+    """Delete scans and their device rows in one transaction. Returns the scan count.
+
+    Inventory and trust records are not tied to a scan and are kept.
+    """
+    ids = [(int(i),) for i in scan_ids]
+    if not ids:
+        return 0
+    with conn:
+        conn.executemany("DELETE FROM devices WHERE scan_id = ?", ids)
+        conn.executemany("DELETE FROM scans WHERE id = ?", ids)
+    return len(ids)
 
 
 def get_trusted(conn: sqlite3.Connection) -> dict[str, dict]:
