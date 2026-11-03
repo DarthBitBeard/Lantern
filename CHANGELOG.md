@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
+- CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
 ## 0.5.0 - 2026-11-02
 
 Pre-release for testing. Dashboard scans run in the background, the scan checks more risky ports, and the database moves to schema 4. This version changes the `POST /api/scan` response (see the first entry), which is why it is 0.5.0 and not 0.4.1. A schema 3 database is copied to `<file>.v3.bak` and upgraded in place on first open. 0.4.0 refuses a schema 4 database.

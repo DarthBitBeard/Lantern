@@ -1,19 +1,19 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "lantern"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Local-first home network scanner: find devices, flag risky open ports, and show what changed since the last scan."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 keywords = ["network", "scanner", "security", "homelab", "lan"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Topic :: Security",
     "Topic :: System :: Networking :: Monitoring",
@@ -35,3 +35,17 @@ include = ["lantern*"]
 # and the Docker image serve a 404 for the UI even though the API still starts.
 [tool.setuptools.package-data]
 lantern = ["web/*"]
+
+# One place for the version: `lantern.__version__`.
+[tool.setuptools.dynamic]
+version = {attr = "lantern.__version__"}
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["build", "dist", "data"]
+
+[tool.ruff.lint]
+# Real mistakes only: pycodestyle errors and warnings, pyflakes, bugbear.
+# Long lines and zip() without strict= are left to the author.
+select = ["E", "F", "W", "B"]
+ignore = ["E501", "B905"]
