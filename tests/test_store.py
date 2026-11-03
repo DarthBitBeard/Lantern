@@ -212,13 +212,16 @@ class PruneTests(unittest.TestCase):
         self.assertNotIn(newer, scans_to_prune(self.conn, older_than_days=1, now=self.now))
 
     def test_older_than_only_takes_old_scans(self):
-        old, mid, new = self.add(90), self.add(10), self.add(1)
+        old, mid = self.add(90), self.add(10)
+        self.add(1)
         self.assertEqual(scans_to_prune(self.conn, older_than_days=30, now=self.now), [old])
         self.assertEqual(scans_to_prune(self.conn, older_than_days=5, now=self.now), [old, mid])
 
     def test_both_rules_must_agree(self):
-        a, b, c, d = self.add(90), self.add(80), self.add(70), self.add(1)
-        # Keep protects the newest two (c and d); only scans older than 75 days qualify.
+        a, b = self.add(90), self.add(80)
+        # The two newest scans are protected by keep; only scans older than 75 days qualify.
+        self.add(70)
+        self.add(1)
         self.assertEqual(scans_to_prune(self.conn, keep=2, older_than_days=75, now=self.now), [a, b])
 
     def test_each_scope_is_judged_on_its_own(self):
