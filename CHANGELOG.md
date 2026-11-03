@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Auto-detected subnets use the interface's real prefix length instead of always assuming a /24, so a /23 or /22 home network is scanned whole and a /26 is not widened. It reads `ip addr`, `ifconfig`, or English `ipconfig` output. If the prefix is unknown (another Windows language) or larger than the 1024-address cap, it falls back to the /24 around the address, as before.
+- A host that ignores ping and is not in the ARP cache is now found by a short TCP connect to ports 80, 443, 22, and 445 (a refusal counts). This also makes discovery work in the Docker image, which has no `ping`. A scan of a mostly empty /24 takes a few seconds longer.
 ## 0.5.0 - 2026-11-02
 
 Pre-release for testing. Dashboard scans run in the background, the scan checks more risky ports, and the database moves to schema 4. This version changes the `POST /api/scan` response (see the first entry), which is why it is 0.5.0 and not 0.4.1. A schema 3 database is copied to `<file>.v3.bak` and upgraded in place on first open. 0.4.0 refuses a schema 4 database.

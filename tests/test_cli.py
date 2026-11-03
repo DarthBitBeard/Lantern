@@ -136,6 +136,7 @@ class CliTests(unittest.TestCase):
         macs = {"10.9.9.7": "aa:bb:cc:dd:ee:07", "10.8.0.1": "aa:bb:cc:dd:ee:08"}
         with mock.patch.object(cli, "arp_table", return_value=macs), \
                 mock.patch.object(cli, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
+                mock.patch.object(cli, "tcp_alive", return_value=False), \
                 mock.patch.object(cli, "scan_host", return_value=[]), \
                 mock.patch.object(cli, "reverse_hostname", return_value=None):
             code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.200/24", "--format", "json")
@@ -159,6 +160,7 @@ class CliTests(unittest.TestCase):
 
         with mock.patch.object(cli, "arp_table", side_effect=arp), \
                 mock.patch.object(cli, "ping_host", side_effect=ping), \
+                mock.patch.object(cli, "tcp_alive", return_value=False), \
                 mock.patch.object(cli, "scan_host", return_value=[]), \
                 mock.patch.object(cli, "reverse_hostname", return_value=None):
             code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.0/24", "--format", "json")
@@ -166,6 +168,30 @@ class CliTests(unittest.TestCase):
         devices = json.loads(out)["devices"]
         self.assertEqual([d["ip"] for d in devices], ["10.9.9.3"])
         self.assertEqual(devices[0]["mac"], "aa:bb:cc:dd:ee:03")
+
+    def test_scan_finds_hosts_that_ignore_ping_by_tcp_connect(self):
+        tried = []
+
+        def tcp(ip):
+            tried.append(ip)
+            return ip == "10.9.9.9"
+
+        def arp():
+            return {"10.9.9.9": "aa:bb:cc:dd:ee:09"} if "10.9.9.9" in tried else {}
+
+        with mock.patch.object(cli, "arp_table", side_effect=arp), \
+                mock.patch.object(cli, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
+                mock.patch.object(cli, "tcp_alive", side_effect=tcp), \
+                mock.patch.object(cli, "scan_host", return_value=[]), \
+                mock.patch.object(cli, "reverse_hostname", return_value=None):
+            code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.0/24", "--format", "json")
+        self.assertEqual(code, 0)
+        devices = json.loads(out)["devices"]
+        self.assertEqual([d["ip"] for d in devices], ["10.9.9.3", "10.9.9.9"])
+        self.assertEqual(devices[1]["mac"], "aa:bb:cc:dd:ee:09")
+        # Only addresses that did not answer ping or sit in the ARP cache are probed.
+        self.assertNotIn("10.9.9.3", tried)
+        self.assertEqual(len(tried), 253)
 
     def test_bad_db_path_and_port(self):
         # A plain file where the parent directory should be: open fails.

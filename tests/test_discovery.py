@@ -1,5 +1,6 @@
 """Subnet validation, neighbor-cache parsing, and ping flags. Offline."""
 
+import socket
 import threading
 import time
 import unittest
@@ -222,6 +223,105 @@ class GuessSubnetTests(unittest.TestCase):
                 mock.patch.object(discovery.socket, "gethostname", return_value="lantern-test"):
             self.assertIsNone(guess_subnet())
         self.assertLess(time.monotonic() - started, 2.0)
+
+
+class InterfacePrefixTests(unittest.TestCase):
+    def test_parses_linux_ip_addr(self):
+        text = (
+            "1: lo    inet 127.0.0.1/8 scope host lo\n"
+            "2: eth0    inet 192.168.4.20/23 brd 192.168.5.255 scope global eth0\n"
+        )
+        self.assertEqual(
+            discovery.parse_interface_prefixes(text), {"127.0.0.1": 8, "192.168.4.20": 23}
+        )
+
+    def test_parses_macos_and_bsd_ifconfig(self):
+        text = "en0: flags=8863<UP>\n\tinet 10.0.1.5 netmask 0xfffffc00 broadcast 10.0.3.255\n"
+        self.assertEqual(discovery.parse_interface_prefixes(text), {"10.0.1.5": 22})
+
+    def test_parses_linux_ifconfig_dotted_mask(self):
+        text = "eth0: flags=4163\n        inet 192.168.1.9  netmask 255.255.255.192  broadcast 192.168.1.63\n"
+        self.assertEqual(discovery.parse_interface_prefixes(text), {"192.168.1.9": 26})
+
+    def test_parses_windows_ipconfig(self):
+        text = (
+            "Wireless LAN adapter Wi-Fi:\n\n"
+            "   IPv4 Address. . . . . . . . . . . : 192.168.0.14\n"
+            "   Subnet Mask . . . . . . . . . . . : 255.255.254.0\n"
+            "   Default Gateway . . . . . . . . . : 192.168.0.1\n"
+        )
+        self.assertEqual(discovery.parse_interface_prefixes(text), {"192.168.0.14": 23})
+
+    def test_ignores_garbage_and_bad_masks(self):
+        text = (
+            "inet 10.0.0.1/99\ninet 10.0.0.2 netmask 0xff00ff00\n"
+            "inet 10.0.0.3 netmask 255.0.255.0\nnothing here\n"
+        )
+        self.assertEqual(discovery.parse_interface_prefixes(text), {})
+        self.assertEqual(discovery.parse_interface_prefixes(""), {})
+
+    def test_interface_prefixes_never_raises(self):
+        with mock.patch.object(discovery, "_run_text", return_value=""):
+            self.assertEqual(discovery.interface_prefixes("linux"), {})
+            self.assertEqual(discovery.interface_prefixes("windows"), {})
+        with mock.patch.object(discovery, "_run_text", side_effect=["", "inet 10.1.1.1/24"]) as run:
+            self.assertEqual(discovery.interface_prefixes("darwin"), {"10.1.1.1": 24})
+        self.assertEqual(run.call_args_list[0].args[0][0], "ip")
+        self.assertEqual(run.call_args_list[1].args[0], ["ifconfig"])
+
+
+class RealPrefixGuessTests(unittest.TestCase):
+    def guess(self, ip, prefixes):
+        with mock.patch.object(discovery, "_local_ipv4_candidates", return_value=[ip]), \
+                mock.patch.object(discovery, "interface_prefixes", return_value=prefixes):
+            return guess_subnet()
+
+    def test_uses_a_wider_real_prefix(self):
+        self.assertEqual(self.guess("192.168.4.20", {"192.168.4.20": 23}), "192.168.4.0/23")
+        self.assertEqual(self.guess("10.0.1.5", {"10.0.1.5": 22}), "10.0.0.0/22")
+
+    def test_uses_a_narrower_real_prefix(self):
+        self.assertEqual(self.guess("192.168.1.9", {"192.168.1.9": 26}), "192.168.1.0/26")
+
+    def test_falls_back_to_a_24_when_the_prefix_is_unknown_or_unusable(self):
+        self.assertEqual(self.guess("10.4.5.6", {}), "10.4.5.0/24")
+        # A /16 is over the scan cap, so scan the /24 around the address.
+        self.assertEqual(self.guess("172.17.0.2", {"172.17.0.2": 16}), "172.17.0.0/24")
+        self.assertEqual(self.guess("10.4.5.6", {"10.4.5.6": 32}), "10.4.5.0/24")
+
+    def test_every_guess_passes_the_safety_check(self):
+        for length in range(0, 33):
+            subnet = self.guess("10.4.5.6", {"10.4.5.6": length})
+            validate_subnet(subnet)
+
+
+class TcpAliveTests(unittest.TestCase):
+    def test_a_connection_or_a_refusal_means_alive(self):
+        with mock.patch.object(discovery.socket, "create_connection", return_value=mock.MagicMock()):
+            self.assertTrue(discovery.tcp_alive("10.0.0.5"))
+        with mock.patch.object(discovery.socket, "create_connection", side_effect=ConnectionRefusedError()):
+            self.assertTrue(discovery.tcp_alive("10.0.0.5"))
+
+    def test_silence_and_errors_mean_not_alive(self):
+        for exc in (socket.timeout(), OSError("no route to host"), TimeoutError()):
+            with mock.patch.object(discovery.socket, "create_connection", side_effect=exc) as connect:
+                self.assertFalse(discovery.tcp_alive("10.0.0.5"))
+            self.assertEqual(connect.call_count, len(discovery.DISCOVERY_PORTS))
+        with mock.patch.object(discovery.socket, "create_connection", side_effect=RuntimeError("odd")):
+            self.assertFalse(discovery.tcp_alive("10.0.0.5"))
+
+    def test_stops_at_the_first_port_that_answers(self):
+        calls = []
+
+        def connect(addr, timeout):
+            calls.append(addr[1])
+            if addr[1] == 443:
+                return mock.MagicMock()
+            raise OSError("filtered")
+
+        with mock.patch.object(discovery.socket, "create_connection", side_effect=connect):
+            self.assertTrue(discovery.tcp_alive("10.0.0.5", ports=(80, 443, 22)))
+        self.assertEqual(calls, [80, 443])
 
 
 if __name__ == "__main__":
