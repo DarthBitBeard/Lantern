@@ -4,33 +4,28 @@ from __future__ import annotations
 
 import argparse
 import errno
-import ipaddress
 import json
 import os
 import secrets
 import sqlite3
 import stat
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
-from . import __version__, assets as assetlib, demo
+from . import __version__, assets as assetlib, demo, engine
+from .engine import run_scan
+from .netutil import is_loopback_host
 from .discovery import (
     MAX_SCAN_HOSTS,
-    arp_table,
     guess_subnet,
     merged_address_count,
-    ping_host,
-    reverse_hostname,
-    tcp_alive,
     validate_subnet,
 )
-from .ports import DEFAULT_PORTS, findings_for_ports
+from .ports import DEFAULT_PORTS
 from .report import describe_change, diff_to_json, multi_scope_html, to_html, to_json
-from .scanner import scan_host
 from .scopes import (
     DEFAULT_CONFIG_NAME,
     ScopeConfigError,
@@ -50,67 +45,6 @@ from .store import (
 )
 
 DEFAULT_DB = Path("data/lantern.db")
-PING_WORKERS = 50
-TCP_DISCOVERY_WORKERS = 64
-HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to MAX_PORT_WORKERS sockets
-
-
-def _scan_one(ip: str, macs: dict[str, str], ports) -> dict:
-    open_ports = scan_host(ip, ports)
-    return {
-        "ip": ip,
-        "mac": macs.get(ip),
-        "hostname": reverse_hostname(ip),
-        "open_ports": open_ports,
-        "findings": findings_for_ports([p["port"] for p in open_ports]),
-        "label": None,
-    }
-
-
-def _scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
-    """Ping and port-scan these addresses. An empty list does not touch the network."""
-    if not hosts:
-        return []
-    macs = arp_table()
-
-    with ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
-        live = {ip for ip, alive in zip(hosts, pool.map(ping_host, hosts)) if alive}
-
-    # Pinging is what fills the ARP cache, so a host found only by ping has
-    # no MAC in the snapshot taken above. Read the table again and let the
-    # fresh entries win; keep the first snapshot for entries that expired
-    # while the sweep ran.
-    macs = {**macs, **arp_table()}
-
-    # Hosts in the ARP cache count as live even if they ignore ping.
-    host_set = set(hosts)
-    live.update(ip for ip in macs if ip in host_set)
-
-    # Last resort for hosts that block ping and are not in the cache (and for
-    # machines with no `ping` binary): a short TCP connect to a few ports.
-    silent = [ip for ip in hosts if ip not in live]
-    if silent:
-        with ThreadPoolExecutor(max_workers=TCP_DISCOVERY_WORKERS) as pool:
-            found = [ip for ip, alive in zip(silent, pool.map(tcp_alive, silent)) if alive]
-        if found:
-            live.update(found)
-            macs = {**macs, **arp_table()}
-
-    ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
-    with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
-        return list(pool.map(lambda ip: _scan_one(ip, macs, ports), ordered))
-
-
-def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
-    """Discover live hosts on one private subnet and port-scan each.
-
-    Raises ValueError for an invalid or unsafe subnet. Never touches the
-    network in demo mode.
-    """
-    if demo_mode:
-        return demo.demo_scan_1()
-    network = validate_subnet(subnet_text)
-    return _scan_hosts([str(ip) for ip in network.hosts()], ports)
 
 
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
@@ -397,27 +331,6 @@ class WebBind(NamedTuple):
     lan_bound: bool = False
     print_token: bool = False
     strict_auth: bool = False
-
-
-def is_loopback_host(host: str) -> bool:
-    """True when `host` cannot be reached from another machine.
-
-    localhost (any case), ::1, and any address ipaddress treats as loopback
-    (the whole 127.0.0.0/8, plus IPv4-mapped loopback). 0.0.0.0, ::, LAN
-    addresses, and any other name are not loopback.
-    """
-    if not isinstance(host, str) or not host or host != host.strip():
-        return False
-    if host.lower() == "localhost":
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if addr.is_loopback:
-        return True
-    mapped = getattr(addr, "ipv4_mapped", None)
-    return bool(mapped is not None and mapped.is_loopback)
 
 
 def _strict_env_value(environ: dict) -> tuple[str | None, str | None]:
@@ -1329,7 +1242,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             file=sys.stderr,
                         )
                     if fresh:
-                        for device in _scan_hosts(fresh, DEFAULT_PORTS):
+                        for device in engine.scan_hosts(fresh, DEFAULT_PORTS):
                             found[device["ip"]] = device
                         seen_hosts.update(fresh)
                     devices = [found[ip] for ip in scope_hosts if ip in found]

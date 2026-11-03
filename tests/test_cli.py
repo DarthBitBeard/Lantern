@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lantern import cli
+from lantern import cli, engine
 
 
 class CliTests(unittest.TestCase):
@@ -148,7 +148,7 @@ class CliTests(unittest.TestCase):
 
     def test_scan_demo_needs_no_subnet_or_network(self):
         with mock.patch.object(cli, "guess_subnet", return_value=None), \
-                mock.patch.object(cli, "ping_host", side_effect=AssertionError("network touched")):
+                mock.patch.object(engine, "ping_host", side_effect=AssertionError("network touched")):
             code, out, _ = self.run_cli("scan", "--demo")
         self.assertEqual(code, 0)
         self.assertIn("192.168.1.0/24 (demo data)", out)
@@ -157,7 +157,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(out)["diff"]["added"], [])
 
     def test_scan_refuses_bad_subnets_before_touching_network(self):
-        with mock.patch.object(cli, "ping_host", side_effect=AssertionError("network touched")):
+        with mock.patch.object(engine, "ping_host", side_effect=AssertionError("network touched")):
             for subnet in ("8.8.8.0/24", "10.0.0.0/8", "nope"):
                 code, _, err = self.run_cli("scan", "--subnet", subnet)
                 self.assertEqual(code, 2, subnet)
@@ -169,11 +169,11 @@ class CliTests(unittest.TestCase):
 
     def test_scan_uses_arp_hosts_and_normalizes_subnet(self):
         macs = {"10.9.9.7": "aa:bb:cc:dd:ee:07", "10.8.0.1": "aa:bb:cc:dd:ee:08"}
-        with mock.patch.object(cli, "arp_table", return_value=macs), \
-                mock.patch.object(cli, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
-                mock.patch.object(cli, "tcp_alive", return_value=False), \
-                mock.patch.object(cli, "scan_host", return_value=[]), \
-                mock.patch.object(cli, "reverse_hostname", return_value=None):
+        with mock.patch.object(engine, "arp_table", return_value=macs), \
+                mock.patch.object(engine, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
+                mock.patch.object(engine, "tcp_alive", return_value=False), \
+                mock.patch.object(engine, "scan_host", return_value=[]), \
+                mock.patch.object(engine, "reverse_hostname", return_value=None):
             code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.200/24", "--format", "json")
         self.assertEqual(code, 0)
         scan = json.loads(out)
@@ -193,11 +193,11 @@ class CliTests(unittest.TestCase):
             # Cold cache before any ping, warm once 10.9.9.3 has answered.
             return {"10.9.9.3": "aa:bb:cc:dd:ee:03"} if "10.9.9.3" in pinged else {}
 
-        with mock.patch.object(cli, "arp_table", side_effect=arp), \
-                mock.patch.object(cli, "ping_host", side_effect=ping), \
-                mock.patch.object(cli, "tcp_alive", return_value=False), \
-                mock.patch.object(cli, "scan_host", return_value=[]), \
-                mock.patch.object(cli, "reverse_hostname", return_value=None):
+        with mock.patch.object(engine, "arp_table", side_effect=arp), \
+                mock.patch.object(engine, "ping_host", side_effect=ping), \
+                mock.patch.object(engine, "tcp_alive", return_value=False), \
+                mock.patch.object(engine, "scan_host", return_value=[]), \
+                mock.patch.object(engine, "reverse_hostname", return_value=None):
             code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.0/24", "--format", "json")
         self.assertEqual(code, 0)
         devices = json.loads(out)["devices"]
@@ -214,11 +214,11 @@ class CliTests(unittest.TestCase):
         def arp():
             return {"10.9.9.9": "aa:bb:cc:dd:ee:09"} if "10.9.9.9" in tried else {}
 
-        with mock.patch.object(cli, "arp_table", side_effect=arp), \
-                mock.patch.object(cli, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
-                mock.patch.object(cli, "tcp_alive", side_effect=tcp), \
-                mock.patch.object(cli, "scan_host", return_value=[]), \
-                mock.patch.object(cli, "reverse_hostname", return_value=None):
+        with mock.patch.object(engine, "arp_table", side_effect=arp), \
+                mock.patch.object(engine, "ping_host", side_effect=lambda ip: ip == "10.9.9.3"), \
+                mock.patch.object(engine, "tcp_alive", side_effect=tcp), \
+                mock.patch.object(engine, "scan_host", return_value=[]), \
+                mock.patch.object(engine, "reverse_hostname", return_value=None):
             code, out, _ = self.run_cli("scan", "--subnet", "10.9.9.0/24", "--format", "json")
         self.assertEqual(code, 0)
         devices = json.loads(out)["devices"]
@@ -418,7 +418,7 @@ class CliTests(unittest.TestCase):
             key = "192.168.50.0/24" if hosts[0].startswith("192.168.50.") else "10.50.0.0/24"
             return queues[key].pop(0)
 
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli("scan", "--config", str(path), "--all", "--format", "json")
         self.assertEqual(code, 0, err)
         summary = json.loads(out)
@@ -431,7 +431,7 @@ class CliTests(unittest.TestCase):
         probed = [ip for call in scan_hosts.call_args_list for ip in call.args[0]]
         self.assertEqual(len(probed), len(set(probed)))
 
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "lab", "--scope", "home",
             )
@@ -496,7 +496,7 @@ class CliTests(unittest.TestCase):
                 raise RuntimeError("lab unreachable")
             return [self._device("192.168.50.10")]
 
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts:
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts:
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "lab", "--scope", "home",
             )
@@ -542,7 +542,7 @@ class CliTests(unittest.TestCase):
 
     def test_all_refuses_non_rfc1918_before_probe(self):
         path = self._write_scopes('[scopes.zero]\nsubnet = "0.0.0.0/24"\n', name="zero.toml")
-        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(path), "--all")
         self.assertEqual(code, 2, err)
@@ -561,11 +561,11 @@ class CliTests(unittest.TestCase):
             '[scopes.one]\nsubnet = "10.8.0.1/32"\n',
             name="cap1025.toml",
         )
-        with mock.patch.object(cli, "_scan_hosts", return_value=[]) as scan_hosts:
+        with mock.patch.object(engine, "scan_hosts", return_value=[]) as scan_hosts:
             code, out, err = self.run_cli("scan", "--config", str(allowed), "--all")
         self.assertEqual(code, 0, err)
         self.assertEqual(scan_hosts.call_count, 2)
-        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
             code, _, err = self.run_cli("scan", "--config", str(refused), "--all")
         self.assertEqual(code, 2, err)
@@ -574,7 +574,7 @@ class CliTests(unittest.TestCase):
 
     def test_case_variant_scope_flags_scan_once(self):
         path = self._two_scopes()
-        with mock.patch.object(cli, "_scan_hosts", return_value=[]) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", return_value=[]) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "home", "--scope", "HOME",
@@ -725,7 +725,7 @@ class CliTests(unittest.TestCase):
                 return [self._device("192.168.50.10")]
             return [self._device("10.50.0.10")]
 
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake):
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake):
             code, _, err = self.run_cli("scan", "--config", str(path), "--all")
             self.assertEqual(code, 0, err)
             code, _, err = self.run_cli("scan", "--config", str(path), "--all")
@@ -742,7 +742,7 @@ class CliTests(unittest.TestCase):
 
     def test_all_html_is_one_html_document(self):
         path = self._two_scopes()
-        with mock.patch.object(cli, "_scan_hosts", return_value=[]):
+        with mock.patch.object(engine, "scan_hosts", return_value=[]):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--all", "--format", "html",
             )
@@ -769,7 +769,7 @@ class CliTests(unittest.TestCase):
             '[scopes.extra]\nsubnet = "10.8.0.0/24"\n',
             name="overlap.toml",
         )
-        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(many), "--all")
             self.assertEqual(code, 2, err)
@@ -792,7 +792,7 @@ class CliTests(unittest.TestCase):
 
         args = ["scan", "--config", str(path)]
         args.extend(["--scope", "home"] * 20)
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli(*args)
         self.assertEqual(code, 0, err)
@@ -817,7 +817,7 @@ class CliTests(unittest.TestCase):
                 return [self._device("10.2.1.10")]
             return []
 
-        with mock.patch.object(cli, "_scan_hosts", side_effect=fake) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli("scan", "--config", str(path), "--all")
         self.assertEqual(code, 0, err)

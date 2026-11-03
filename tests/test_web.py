@@ -280,7 +280,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(data["diff"]["added"]), 1)
 
     def test_scan_validation_and_no_network_for_bad_input(self):
-        with mock.patch("lantern.cli.ping_host", side_effect=AssertionError("network touched")):
+        with mock.patch("lantern.engine.ping_host", side_effect=AssertionError("network touched")):
             status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "8.8.8.0/24"})
             self.assertEqual(status, 400, body)
             self.assertIn("private", json.loads(body)["error"])
@@ -319,7 +319,7 @@ class WebTests(unittest.TestCase):
             self.assertTrue(release.wait(10))
             return [device]
 
-        with mock.patch("lantern.cli.run_scan", side_effect=slow_scan):
+        with mock.patch("lantern.engine.run_scan", side_effect=slow_scan):
             began = time.monotonic()
             status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
             # The request returns while the scan is still blocked.
@@ -348,7 +348,7 @@ class WebTests(unittest.TestCase):
         self.assertFalse(data["scan_running"])
 
     def test_failed_scan_reports_a_fixed_message_and_frees_the_lock(self):
-        with mock.patch("lantern.cli.run_scan", side_effect=RuntimeError("secret detail /etc/passwd")):
+        with mock.patch("lantern.engine.run_scan", side_effect=RuntimeError("secret detail /etc/passwd")):
             status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
             self.assertEqual(status, 202, body)
             job = self._wait_for_scan()
@@ -361,7 +361,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["scan_count"], 0)
 
         # The next scan is accepted and clears the old error.
-        with mock.patch("lantern.cli.run_scan", return_value=[]):
+        with mock.patch("lantern.engine.run_scan", return_value=[]):
             status, body, _ = self.request("/api/scan", method="POST", body={"subnet": "192.168.1.0/24"})
             self.assertEqual(status, 202, body)
             job = self._wait_for_scan()
@@ -369,7 +369,7 @@ class WebTests(unittest.TestCase):
 
     def test_scan_error_text_goes_to_stderr_only_with_debug(self):
         err = io.StringIO()
-        with mock.patch("lantern.cli.run_scan", side_effect=RuntimeError("boom detail")), \
+        with mock.patch("lantern.engine.run_scan", side_effect=RuntimeError("boom detail")), \
                 contextlib.redirect_stderr(err):
             webapp._scan_lock.acquire()
             job = webapp._ScanJob()
@@ -489,7 +489,7 @@ class HostAllowlistTests(unittest.TestCase):
         """Matching evil Host and Origin must not read inventory or start a demo."""
         port = self.port
         evil_host = f"evil.example:{port}"
-        with mock.patch("lantern.cli.run_scan", side_effect=AssertionError("scan started")):
+        with mock.patch("lantern.engine.run_scan", side_effect=AssertionError("scan started")):
             status, body, _ = self.request(
                 "/api/demo",
                 method="POST",
@@ -1738,12 +1738,12 @@ class StrictAuthTests(unittest.TestCase):
         slept.assert_called_with(webapp.TOKEN_FAILURE_DELAY_SECONDS)
 
     def test_post_scan_requires_the_token_and_then_runs(self):
-        with mock.patch("lantern.cli.run_scan", side_effect=AssertionError("scan started")):
+        with mock.patch("lantern.engine.run_scan", side_effect=AssertionError("scan started")):
             status, body, _headers = self.request(
                 "/api/scan", method="POST", body={"subnet": "192.168.1.0/24"},
             )
         self.assertEqual(status, 403, body)
-        with mock.patch("lantern.cli.run_scan", return_value=[]) as run_scan:
+        with mock.patch("lantern.engine.run_scan", return_value=[]) as run_scan:
             status, body, _headers = self.request(
                 "/api/scan", method="POST", body={"subnet": "192.168.1.0/24"}, token=self.token,
             )

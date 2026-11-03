@@ -57,11 +57,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from . import __version__, assets as assetlib, demo
+from . import __version__, assets as assetlib, demo, engine
 from .discovery import MAC_RE, guess_subnet, validate_subnet
+from .netutil import is_loopback_host
 from .ports import DEFAULT_PORTS
 from .report import to_html, to_json
 from .store import connect, count_scans, list_scans, load_scan_with_diff, save_scan, set_trusted
+from .v1 import header_value
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC_TYPES = {
@@ -151,10 +153,7 @@ class _ScanJob:
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock."""
     try:
-        # Import here to avoid a module cycle with cli.py.
-        from .cli import run_scan
-
-        devices = run_scan(subnet, DEFAULT_PORTS)
+        devices = engine.run_scan(subnet, DEFAULT_PORTS)
         conn = connect(db_path)
         try:
             scan_id = save_scan(conn, subnet, devices, demo=False)
@@ -708,8 +707,6 @@ class LanternHandler(BaseHTTPRequestHandler):
         self, status: int, data: bytes, content_type: str,
         cache: str = "no-store", headers: dict | None = None,
     ) -> None:
-        from .v1 import header_value
-
         extra = {str(key): header_value(value) for key, value in (headers or {}).items()}
         content_type = header_value(content_type)
         cache = header_value(cache)
@@ -1493,10 +1490,8 @@ def _server_class(family: int, connection_limit: int, per_ip_limit: int):
 
 
 def _loopback_host(host: str) -> bool:
-    # cli.is_loopback_host is the one list. serve() used to keep a second,
+    # netutil.is_loopback_host is the one list. serve() used to keep a second,
     # shorter one, and the banner disagreed with it.
-    from .cli import is_loopback_host
-
     return is_loopback_host(host)
 
 
