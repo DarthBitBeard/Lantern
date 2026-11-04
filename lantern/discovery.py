@@ -6,7 +6,8 @@ Safety rules, enforced here and in the CLI:
   The normal case is a /24. A run that names several scopes uses
   that same cap on the unique addresses across the whole run.
 - No scanning of public IPs, ever.
-- Discovery is ping + ARP + a TCP connect to a few common ports.
+- Discovery is ping + ARP + a TCP connect to a few common ports for
+  addresses that did not answer the first two.
   No exploits, no password guessing, no packet crafting.
 """
 
@@ -148,15 +149,109 @@ def _local_ipv4_candidates() -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+# Sizes of the network a /24 guess may be replaced by. A /31 or /32 has no
+# neighbours to scan, and anything over the scan cap is refused anyway.
+_MIN_GUESS_PREFIX = MIN_PREFIXLEN
+_MAX_GUESS_PREFIX = 30
+
+_INET_SLASH_RE = re.compile(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})\b")
+_INET_NETMASK_RE = re.compile(
+    r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\s+.*?\bnetmask\s+(0x[0-9a-fA-F]+|\d{1,3}(?:\.\d{1,3}){3})"
+)
+_WIN_ADDRESS_RE = re.compile(r"IPv4 Address[ .]*:\s*(\d{1,3}(?:\.\d{1,3}){3})")
+_WIN_MASK_RE = re.compile(r"Subnet Mask[ .]*:\s*(\d{1,3}(?:\.\d{1,3}){3})")
+
+
+def _mask_prefixlen(mask: str) -> int | None:
+    """Prefix length of a netmask written as 0xffffff00 or 255.255.255.0."""
+    try:
+        if mask.lower().startswith("0x"):
+            value = int(mask, 16)
+        else:
+            value = int(ipaddress.IPv4Address(mask))
+    except ValueError:
+        return None
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    bits = f"{value:032b}"
+    # A real mask is a run of ones then a run of zeros.
+    if "01" in bits:
+        return None
+    return bits.count("1")
+
+
+def parse_interface_prefixes(text: str) -> dict[str, int]:
+    """Parse interface listings into {ipv4_address: prefix_length}.
+
+    Understands `ip -4 -o addr`, `ifconfig` on Linux and macOS, and the
+    English `ipconfig` on Windows. Text in another language, or anything
+    unrecognised, simply yields fewer entries.
+    """
+    prefixes: dict[str, int] = {}
+    pending_windows_ip = None
+    for line in text.splitlines():
+        match = _INET_SLASH_RE.search(line)
+        if match:
+            ip, length = match.group(1), int(match.group(2))
+            if 0 <= length <= 32:
+                prefixes[ip] = length
+            continue
+        match = _INET_NETMASK_RE.search(line)
+        if match:
+            length = _mask_prefixlen(match.group(2))
+            if length is not None:
+                prefixes[match.group(1)] = length
+            continue
+        match = _WIN_ADDRESS_RE.search(line)
+        if match:
+            pending_windows_ip = match.group(1)
+            continue
+        match = _WIN_MASK_RE.search(line)
+        if match and pending_windows_ip:
+            length = _mask_prefixlen(match.group(1))
+            if length is not None:
+                prefixes[pending_windows_ip] = length
+            pending_windows_ip = None
+    return prefixes
+
+
+def interface_prefixes(system: str | None = None) -> dict[str, int]:
+    """This machine's {ipv4: prefix length}. Best effort, never raises."""
+    system = (system or platform.system()).lower()
+    commands = [["ipconfig"]] if system == "windows" else [["ip", "-4", "-o", "addr", "show"], ["ifconfig"]]
+    for command in commands:
+        found = parse_interface_prefixes(_run_text(command))
+        if found:
+            return found
+    return {}
+
+
+def _guess_prefix(local_ip: str, prefixes: dict[str, int]) -> int:
+    """The prefix to scan around this address: the real one when it is sensible, else /24."""
+    length = prefixes.get(local_ip)
+    if length is None or length < _MIN_GUESS_PREFIX or length > _MAX_GUESS_PREFIX:
+        return 24
+    return length
+
+
 def guess_subnet() -> str | None:
-    """Guess the local /24 from the machine's own IP. Returns a string or None."""
+    """Guess the local subnet from the machine's own IP. Returns a string or None.
+
+    Uses the interface's real prefix length when the OS reports one that fits
+    inside the scan cap (so a /23 is scanned whole, and a /26 is not widened).
+    Otherwise it falls back to the /24 around the address.
+    """
+    prefixes = None
     for local_ip in _local_ipv4_candidates():
         try:
             host = ipaddress.ip_network(f"{local_ip}/32", strict=False)
         except ValueError:
             continue
         if any(host.subnet_of(block) for block in _RFC1918):
-            return str(ipaddress.ip_network(f"{local_ip}/24", strict=False))
+            if prefixes is None:
+                prefixes = interface_prefixes()
+            length = _guess_prefix(local_ip, prefixes)
+            return str(ipaddress.ip_network(f"{local_ip}/{length}", strict=False))
     return None
 
 
@@ -197,6 +292,32 @@ def ping_host(ip: str, timeout_ms: int = 1000) -> bool:
         return True
     except Exception:
         return False
+
+
+# Ports tried to tell that an address is alive when it ignores ping and is
+# not in the ARP cache. A refused connection counts: it proves a host answered.
+DISCOVERY_PORTS = (80, 443, 22, 445)
+DISCOVERY_TIMEOUT = 0.3
+
+
+def tcp_alive(ip: str, ports=DISCOVERY_PORTS, timeout: float = DISCOVERY_TIMEOUT) -> bool:
+    """True if a host answers a TCP connect on any of these ports, even with a refusal.
+
+    Catches hosts that block ping, and machines (such as a Docker container
+    without a `ping` binary) where the ping sweep cannot run at all. Silence,
+    a timeout, or "no route" mean nobody answered. Never raises.
+    """
+    for port in ports:
+        try:
+            with socket.create_connection((str(ip), port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            continue
+        except Exception:
+            return False
+    return False
 
 
 def parse_neighbors(text: str) -> dict[str, str]:
