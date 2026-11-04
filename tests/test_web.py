@@ -1295,6 +1295,48 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(data.count(b"HTTP/1.1"), 1)
         self.assertIn(b"Connection: close", data)
 
+    def test_refused_post_with_an_unread_body_still_delivers_the_403(self):
+        # The server answers from the headers alone, then closes. urllib
+        # sends the body in a second write, so it can land after the close.
+        # Without a lingering close that late body made the server send a
+        # reset, and Windows dropped the 403 the client had not read yet.
+        port = self.port
+        body = b'{"x": 1}'
+        head = (
+            f"POST /api/demo HTTP/1.1\r\n"
+            f"Host: evil.example:{port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"\r\n"
+        ).encode()
+        for _ in range(5):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                sock.sendall(head)
+                time.sleep(0.2)  # the 403 is sent and the server is closing
+                sock.sendall(body)
+                time.sleep(0.2)  # give a reset, if any, time to arrive
+                data = b""
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        break
+                    data += chunk
+            self.assertTrue(data.startswith(b"HTTP/1.1 403"), data[:200])
+            self.assertEqual(data.count(b"HTTP/1.1"), 1)
+
+    def test_drain_unread_stops_at_the_byte_cap_and_at_eof(self):
+        a, b = socket.socketpair()
+        with a, b:
+            b.sendall(b"x" * 5000)
+            self.assertEqual(webapp._drain_unread(a, seconds=2, max_bytes=1000), 1000)
+            b.shutdown(socket.SHUT_WR)
+            self.assertEqual(webapp._drain_unread(a, seconds=2, max_bytes=10_000), 4000)
+        a, b = socket.socketpair()
+        with a, b:
+            started = time.monotonic()
+            self.assertEqual(webapp._drain_unread(a, seconds=0.2, max_bytes=1000), 0)
+            self.assertLess(time.monotonic() - started, 2)
+
     def test_empty_transfer_encoding_is_rejected(self):
         port = self.port
         payload = (

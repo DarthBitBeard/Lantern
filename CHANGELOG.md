@@ -8,6 +8,8 @@
 - `GET /api/scans` now returns at most 200 scans by default (`?limit=` up to 1000, `?offset=`), and adds `total`, `limit`, and `offset`. `/api/status` no longer loads every scan to count them.
 - Auto-detected subnets use the interface's real prefix length instead of always assuming a /24, so a /23 or /22 home network is scanned whole and a /26 is not widened. It reads `ip addr`, `ifconfig`, or English `ipconfig` output. If the prefix is unknown (another Windows language) or larger than the 1024-address cap, it falls back to the /24 around the address, as before.
 - A host that ignores ping and is not in the ARP cache is now found by a short TCP connect to ports 80, 443, 22, and 445 (a refusal counts). This also makes discovery work in the Docker image, which has no `ping`. A scan of a mostly empty /24 takes a few seconds longer.
+- Dashboard: a refused POST (wrong Host, token, or Origin) now reliably delivers its 403. The server answered before reading the body and closed at once, so a body that arrived a moment later made the operating system reset the connection, and on Windows the client could see "connection aborted" instead of the answer. The server now stops writing and discards a declared but unread body for up to one second (64 KB at most) before closing. This was the cause of an occasional Windows test failure.
+
 ## 0.5.0 - 2026-11-02
 
 Pre-release for testing. Dashboard scans run in the background, the scan checks more risky ports, and the database moves to schema 4. This version changes the `POST /api/scan` response (see the first entry), which is why it is 0.5.0 and not 0.4.1. A schema 3 database is copied to `<file>.v3.bak` and upgraded in place on first open. 0.4.0 refuses a schema 4 database.

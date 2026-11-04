@@ -654,7 +654,37 @@ class LanternHandler(BaseHTTPRequestHandler):
         # Keep-alive gets a fresh window. Response writes restore the
         # idle timeout so a large report is not cut off.
         self._header_deadline = time.monotonic() + float(self.header_timeout)
+        self._body_read = False
         super().handle_one_request()
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            self._linger_if_body_unread()
+
+    def _linger_if_body_unread(self) -> None:
+        # A refused POST is answered and closed with its body unread. Closing
+        # a socket that still holds unread bytes sends a reset on Windows
+        # (and often Linux), and the reset can reach the client before the
+        # response does, so it sees "connection aborted" instead of the 403.
+        # Stop writing, then discard the declared body for a short, capped
+        # time. Requests without a declared body skip this, so a slow
+        # header drip gains nothing from it.
+        headers = getattr(self, "headers", None)
+        if headers is None or getattr(self, "_body_read", True):
+            return
+        try:
+            declared = int(headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if declared <= 0:
+            return
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except OSError:
+            return
+        _drain_unread(self.connection, max_bytes=min(declared, LINGER_MAX_BYTES))
 
     def parse_request(self) -> bool:
         ok = super().parse_request()
@@ -780,6 +810,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         if content_type != "application/json":
             raise UnsupportedMediaType("Send JSON with Content-Type: application/json.")
         raw = self.rfile.read(length)
+        self._body_read = True
         try:
             value = json.loads(raw.decode("utf-8"))
         except Exception as exc:
@@ -1402,6 +1433,29 @@ def _reject_busy(request) -> None:
             request.close()
         except OSError:
             pass
+
+
+LINGER_SECONDS = 1.0
+LINGER_MAX_BYTES = MAX_BODY_BYTES
+
+
+def _drain_unread(request, seconds: float = LINGER_SECONDS, max_bytes: int = LINGER_MAX_BYTES) -> int:
+    """Read and discard what the client still sends, until it closes or a cap is hit."""
+    deadline = time.monotonic() + seconds
+    drained = 0
+    try:
+        while drained < max_bytes:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            request.settimeout(left)
+            chunk = request.recv(min(8192, max_bytes - drained))
+            if not chunk:
+                break
+            drained += len(chunk)
+    except OSError:  # includes socket.timeout
+        pass
+    return drained
 
 
 class _LanternServer(ThreadingHTTPServer):
