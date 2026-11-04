@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-11-04
+
+First stable release. From here on, `/api/v1`, the command-line flags, exit codes and `--format json` output, and the export columns stay compatible for every 1.x release (see "Versioning and compatibility" in the README). There is no schema change since 0.5.0, so a 0.5.0 database opens as is. Discovery has been tested with mocked network calls and the offline suite on Linux, macOS and Windows, but not yet against a live home network; please report anything it misses.
 
 - `lantern asset set` by IP address now prints a note on stderr that the record follows the address, so it can land on a different device if DHCP reassigns it. Devices with a MAC are keyed by MAC and are not affected.
 - Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
