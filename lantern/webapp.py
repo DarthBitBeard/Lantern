@@ -61,7 +61,7 @@ from . import __version__, assets as assetlib, demo
 from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .ports import DEFAULT_PORTS
 from .report import to_html, to_json
-from .store import connect, list_scans, load_scan_with_diff, save_scan, set_trusted
+from .store import connect, count_scans, list_scans, load_scan_with_diff, save_scan, set_trusted
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC_TYPES = {
@@ -77,6 +77,8 @@ MAX_LABEL_CHARS = 80
 # Signed 64-bit SQLite INTEGER. Larger values used to raise OverflowError
 # and leak the exception text to the client.
 MAX_SCAN_ID = 2**63 - 1
+SCANS_PAGE_DEFAULT = 200
+SCANS_PAGE_MAX = 1000
 REQUEST_TIMEOUT_SECONDS = 10
 # Total time allowed to read one request line, its headers, and its body.
 # A client that drips a byte just inside the per-read timeout cannot refresh this.
@@ -1051,6 +1053,20 @@ class LanternHandler(BaseHTTPRequestHandler):
         return number
 
     @staticmethod
+    def _page_param(query: dict, name: str, default: int, maximum: int | None) -> int:
+        raw = query.get(name, [None])[0]
+        if raw is None or raw == "":
+            return default
+        try:
+            number = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a number.") from exc
+        low = 1 if name == "limit" else 0
+        if number < low or (maximum is not None and number > maximum) or number > MAX_SCAN_ID:
+            raise ValueError(f"{name} is out of range.")
+        return number
+
+    @staticmethod
     def _is_v1(path: str) -> bool:
         from .v1 import is_v1_path
 
@@ -1181,12 +1197,12 @@ class LanternHandler(BaseHTTPRequestHandler):
         conn = self._db()
         try:
             if path == "/api/status":
-                scans = list_scans(conn)
+                newest = list_scans(conn, limit=1)
                 self._send_json(200, {
                     "version": __version__,
                     "guessed_subnet": guess_subnet(),
-                    "scan_count": len(scans),
-                    "latest_scan_id": scans[0]["id"] if scans else None,
+                    "scan_count": count_scans(conn),
+                    "latest_scan_id": newest[0]["id"] if newest else None,
                     "scan_running": _scan_lock.locked(),
                 })
                 return
@@ -1194,7 +1210,14 @@ class LanternHandler(BaseHTTPRequestHandler):
                 self._send_json(200, self.scan_job.snapshot())
                 return
             if path == "/api/scans":
-                self._send_json(200, {"scans": list_scans(conn)})
+                limit = self._page_param(query, "limit", SCANS_PAGE_DEFAULT, SCANS_PAGE_MAX)
+                offset = self._page_param(query, "offset", 0, None)
+                self._send_json(200, {
+                    "scans": list_scans(conn, limit=limit, offset=offset),
+                    "total": count_scans(conn),
+                    "limit": limit,
+                    "offset": offset,
+                })
                 return
             if path in ("/api/scans/latest", "/api/diff"):
                 scan, diff = _load_view(conn)
