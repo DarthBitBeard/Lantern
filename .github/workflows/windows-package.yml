@@ -49,7 +49,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m pip install --require-hashes -r .github/requirements-pyinstaller.txt
           python -m PyInstaller --noconfirm --clean --onefile --console --name lantern `
-            --icon packaging/windows/lantern.ico --collect-data lantern `
+            --icon "$PWD\packaging\windows\lantern.ico" --collect-data lantern `
             --distpath build/exe --workpath build/pyi --specpath build/pyi `
             packaging/windows/lantern_launcher.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
