@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lantern import assets, cli
+from lantern import assets, cli, engine
 from lantern.scopes import MAX_SCOPE_CONFIG_BYTES
 from lantern.store import connect, save_scan
 
@@ -511,7 +511,7 @@ class AssetCommandTests(unittest.TestCase):
             "asset", "list", "--scope", "bad name", "--config", str(bogus),
         )
         self.assertEqual(code, 2, err)
-        with mock.patch.object(cli, "_scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
+        with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
                 mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(bogus), "--scope", "Lab-2")
         self.assertEqual(code, 2, err)

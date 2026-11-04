@@ -2,7 +2,7 @@
 
 import unittest
 
-from lantern.cli import HOST_WORKERS
+from lantern.engine import HOST_WORKERS
 from lantern.discovery import guess_subnet, validate_subnet
 from lantern.ports import DEFAULT_PORTS, PORT_RULES, SEVERITY_RANK, findings_for_ports
 from lantern.scanner import MAX_PORT_WORKERS
