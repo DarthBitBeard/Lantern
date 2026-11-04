@@ -25,6 +25,7 @@ from .discovery import (
     merged_address_count,
     ping_host,
     reverse_hostname,
+    tcp_alive,
     validate_subnet,
 )
 from .ports import DEFAULT_PORTS, findings_for_ports
@@ -50,6 +51,7 @@ from .store import (
 
 DEFAULT_DB = Path("data/lantern.db")
 PING_WORKERS = 50
+TCP_DISCOVERY_WORKERS = 64
 HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to MAX_PORT_WORKERS sockets
 
 
@@ -83,6 +85,16 @@ def _scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
     # Hosts in the ARP cache count as live even if they ignore ping.
     host_set = set(hosts)
     live.update(ip for ip in macs if ip in host_set)
+
+    # Last resort for hosts that block ping and are not in the cache (and for
+    # machines with no `ping` binary): a short TCP connect to a few ports.
+    silent = [ip for ip in hosts if ip not in live]
+    if silent:
+        with ThreadPoolExecutor(max_workers=TCP_DISCOVERY_WORKERS) as pool:
+            found = [ip for ip, alive in zip(silent, pool.map(tcp_alive, silent)) if alive]
+        if found:
+            live.update(found)
+            macs = {**macs, **arp_table()}
 
     ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
