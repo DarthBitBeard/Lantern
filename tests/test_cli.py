@@ -1238,6 +1238,63 @@ class WebBindTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertFalse(Path(self.db).exists())
 
+    def test_cli_open_without_a_terminal_hands_the_link_to_the_browser_only(self):
+        # A Start Menu shortcut may have no console to print on. --open
+        # mints the token anyway and passes the fragment link to serve(),
+        # which gives it to the local browser. Nothing is printed.
+        token = "o" * 43
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch.object(cli, "new_api_token", return_value=token), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, out, err = self.run_cli("web", "--open", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(token, out)
+        self.assertNotIn(token, err)
+        kwargs = serve.call_args.kwargs
+        self.assertEqual(kwargs["open_url"], f"http://127.0.0.1:9/#token={token}")
+        self.assertEqual(kwargs["api_token"], token)
+        self.assertTrue(kwargs["strict_auth"])
+
+    def test_cli_open_on_a_tty_prints_and_opens_the_same_link(self):
+        token = "p" * 43
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=True), \
+                mock.patch.object(cli, "new_api_token", return_value=token), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, _out, err = self.run_cli("web", "--open", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.count(token), 1)
+        self.assertEqual(serve.call_args.kwargs["open_url"], f"http://127.0.0.1:9/#token={token}")
+
+    def test_cli_open_without_strict_auth_opens_the_plain_page(self):
+        env = self._no_token_env()
+        env.pop(cli.STRICT_AUTH_ENV, None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch("lantern.webapp.serve") as serve:
+            code, _out, err = self.run_cli("web", "--open", "--no-strict-auth", "--port", "9")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(serve.call_args.kwargs["open_url"], "http://127.0.0.1:9/")
+
+    def test_cli_open_is_refused_for_a_lan_bind(self):
+        token = "L" * 32
+        env = self._no_token_env()
+        env[cli.TOKEN_ENV] = token
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "_stderr_is_tty", return_value=False), \
+                mock.patch("lantern.webapp.serve", side_effect=AssertionError("serve")):
+            code, out, err = self.run_cli(
+                "web", "--open", "--host", "192.168.1.50", "--allow-lan", "--port", "9",
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("--open works only with a loopback bind", err)
+        self.assertNotIn(token, err + out)
+
     def test_cli_strict_auth_env_enables_it_and_a_file_is_not_printed(self):
         token = "e" * 32
         path = Path(self.tmp.name) / "strict-token"

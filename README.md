@@ -26,6 +26,19 @@ Nmap is powerful and has no memory: no history, no diff, no plain English fix st
 
 ## Quick start
 
+### Windows installer
+
+Download `lantern-<version>-windows-x64-setup.exe` from the [releases page](https://github.com/DarthBitBeard/Lantern/releases) and run it. It needs no Python and no admin rights. It installs for your user only into `%LOCALAPPDATA%\Programs\Lantern`, adds `lantern` to your PATH (a checkbox), and creates these Start Menu entries:
+
+- **Lantern Dashboard** starts the dashboard and opens it in your browser. Closing its window stops Lantern.
+- **Lantern Command Prompt** opens a prompt where `lantern scan`, `lantern history`, and the other commands work.
+
+Both use the scan history in `%LOCALAPPDATA%\Lantern\lantern.db`. Uninstall from Settings > Apps. The uninstaller leaves that folder in place, so your history survives a reinstall; delete it yourself to remove it.
+
+The installer and `lantern.exe` are not code-signed, so SmartScreen may warn "Windows protected your PC". Choose "More info", then "Run anyway", after checking the SHA-256 in the release notes. The build is `.github/workflows/windows-package.yml`, which installs, runs, and uninstalls the package on a clean runner.
+
+### From source
+
 No third-party dependencies. Python 3.11 or newer.
 
 From a clone of this repo:
@@ -40,6 +53,8 @@ python3 -m lantern web
 # Open that link. The token is valid until this process restarts.
 # The fragment is not sent to the server.
 # With no terminal, set LANTERN_API_TOKEN_FILE or the process exits 2.
+python3 -m lantern web --open
+# Same, and opens that link in your default browser (loopback only).
 ```
 
 You can also run without installing: `python3 -m lantern …` from the repo root works the same way, because the `lantern` package lives next to the command.

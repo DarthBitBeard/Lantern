@@ -1681,6 +1681,18 @@ def make_server(
     return server
 
 
+def _open_browser(url: str) -> bool:
+    import webbrowser
+
+    try:
+        opened = webbrowser.open(url, new=2)
+    except Exception:
+        opened = False
+    if not opened:
+        print("Could not open a browser. Use the link printed above.", file=sys.stderr, flush=True)
+    return bool(opened)
+
+
 def serve(
     db_path,
     host: str = "127.0.0.1",
@@ -1690,6 +1702,7 @@ def serve(
     api_token: str | None = None,
     lan_bound: bool = False,
     strict_auth: bool = False,
+    open_url: str | None = None,
 ) -> None:
     server = make_server(
         db_path,
@@ -1719,6 +1732,10 @@ def serve(
     if debug:
         print("Debug request logging on.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
+    if open_url:
+        # The socket is already listening, so the browser's first request
+        # waits in the backlog until serve_forever starts.
+        _open_browser(open_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

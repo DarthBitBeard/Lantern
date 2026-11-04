@@ -180,6 +180,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
     web_p.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the dashboard in the default browser once it is listening. "
+             "Loopback only. With strict auth the token travels in the link's "
+             "#fragment, as in the printed link, and is not sent to the server.",
+    )
+    web_p.add_argument(
         "--allow-lan",
         action="store_true",
         help=(
@@ -1066,7 +1073,7 @@ def main(argv=None) -> int:
             allow_hosts=args.allow_host,
             port=args.port,
             environ=os.environ,
-            tty=_stderr_is_tty(),
+            tty=_stderr_is_tty() or bool(args.open),  # --open gives the token to the local browser
             debug=bool(args.debug),
             strict_auth=strict_auth,
             strict_off_because=strict_off_source(
@@ -1140,7 +1147,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 allow_hosts=getattr(args, "allow_host", None),
                 port=args.port,
                 environ=os.environ,
-                tty=_stderr_is_tty(),
+                # --open hands the token to the local browser, so a token can
+                # be minted without a terminal to print it on.
+                tty=_stderr_is_tty() or bool(getattr(args, "open", False)),
                 debug=bool(getattr(args, "debug", False)),
                 strict_auth=strict_auth,
                 strict_off_because=strict_off_source(
@@ -1151,10 +1160,12 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             )
             if web_bind.error:
                 return _err(web_bind.error)
+        if getattr(args, "open", False) and web_bind.lan_bound:
+            return _err("--open works only with a loopback bind (the default 127.0.0.1).")
         conn.close()
         if web_bind.warning:
             print(web_bind.warning, file=sys.stderr, flush=True)
-        if web_bind.print_token and web_bind.token and not args.debug:
+        if web_bind.print_token and web_bind.token and not args.debug and _stderr_is_tty():
             # Interactive console only, and never with --debug. print_token
             # is also false when stderr is not a TTY (`docker logs`).
             if web_bind.strict_auth:
@@ -1180,6 +1191,11 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             "lan_bound": web_bind.lan_bound,
             "strict_auth": web_bind.strict_auth,
         }
+        if getattr(args, "open", False):
+            if web_bind.strict_auth and web_bind.token:
+                kwargs["open_url"] = one_time_open_link(args.host, args.port, web_bind.token)
+            else:
+                kwargs["open_url"] = one_time_open_link(args.host, args.port, "").split("#", 1)[0]
         if web_bind.lan_bound or web_bind.strict_auth:
             kwargs["api_token"] = web_bind.token
         try:

@@ -37,6 +37,8 @@ CI (`.github/workflows/ci.yml`) runs the suite on Linux, macOS, and Windows for 
 
 A separate workflow (`.github/workflows/docker.yml`) builds the Docker image and runs every container with `--network none`. It checks the image is not root, the default command without a token exits non-zero and does not listen, and the same command with a mode-0400 token file listens on `127.0.0.1:8068`. Inside that container, `GET /api/*` is 403 without the token and 200 with it. The token is read from the file and is not printed to the job log. A non-loopback bind without `--allow-lan` is refused, and `--allow-lan` without a token is refused. It also runs an offline demo and checks that loopback and public subnets are refused. It does not scan a network, and it does not push or publish the image.
 
+A third workflow (`.github/workflows/windows-package.yml`) freezes `packaging/windows/lantern_launcher.py` into a one-file `lantern.exe` with PyInstaller (pinned with hashes in `.github/requirements-pyinstaller.txt`) and builds the per-user installer from `packaging/windows/lantern.iss` with Inno Setup. It then installs silently on the runner, checks the Start Menu shortcuts, the user PATH, `--version`, the demo, and the dashboard (page, assets, and the API token), and uninstalls. Uninstalling must remove the program and the PATH entry and keep `%LOCALAPPDATA%\Lantern`. The exe and installer are kept as workflow artifacts. Nothing is signed or published by the workflow. To build locally on Windows: install those requirements, run the same PyInstaller command, then `iscc /DAppVersion=<version> /DExeDir=<exe folder> /DOutDir=<output folder> packaging\windows\lantern.iss`.
+
 ## Pull requests
 
 - Keep the change focused. One feature or fix per pull request.

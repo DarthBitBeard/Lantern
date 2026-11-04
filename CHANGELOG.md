@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Windows installer: `lantern-<version>-windows-x64-setup.exe` installs Lantern for the current user with no Python and no admin rights. It adds `lantern` to the user PATH (optional), adds Start Menu entries for the dashboard and a command prompt, and keeps scan history in `%LOCALAPPDATA%\Lantern`. Uninstalling keeps that history. A new CI workflow builds the one-file `lantern.exe` (PyInstaller) and the installer (Inno Setup), then installs, runs, and uninstalls them on a clean Windows runner.
+- `lantern web --open` opens the dashboard in the default browser once it is listening. Loopback only; `--open` with `--allow-lan` exits 2. With strict auth the token travels in the link's `#fragment`, as in the printed link. Because the token goes straight to the local browser, `--open` can mint one without a terminal (a Start Menu shortcut), and then prints nothing.
+
 ## 1.0.0 - 2026-11-04
 
 First stable release. From here on, `/api/v1`, the command-line flags, exit codes and `--format json` output, and the export columns stay compatible for every 1.x release (see "Versioning and compatibility" in the README). There is no schema change since 0.5.0, so a 0.5.0 database opens as is. Discovery has been tested with mocked network calls and the offline suite on Linux, macOS and Windows, but not yet against a live home network; please report anything it misses.
