@@ -39,7 +39,15 @@ from .scopes import (
     select_scope,
     validate_scope_name,
 )
-from .store import connect, list_scans, load_scan_with_diff, save_scan, write_private_file
+from .store import (
+    connect,
+    delete_scans,
+    list_scans,
+    load_scan_with_diff,
+    save_scan,
+    scans_to_prune,
+    write_private_file,
+)
 
 DEFAULT_DB = Path("data/lantern.db")
 PING_WORKERS = 50
@@ -157,6 +165,16 @@ def build_parser() -> argparse.ArgumentParser:
     history_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
     history_p.add_argument("--scope", help="List only scans tagged with this scope. Matched without regard to case against the name in --config. If that name is not in the file, or the file cannot be read, the typed name is used.")
     history_p.add_argument("--format", choices=["text", "json"], default="text")
+
+    prune_p = sub.add_parser("prune", help="Delete old scans. Shows what would go unless --yes is given.")
+    _add_db_arg(prune_p)
+    prune_p.add_argument("--config", help="TOML file used to match --scope without regard to case. Default ./lantern.toml when that file exists.")
+    prune_p.add_argument("--scope", help="Only prune scans tagged with this scope. Matched without regard to case against the name in --config.")
+    prune_p.add_argument("--keep", type=int, help="Keep the newest N scans of each scope.")
+    prune_p.add_argument("--older-than", type=float, dest="older_than", metavar="DAYS", help="Only delete scans that started more than DAYS days ago.")
+    prune_p.add_argument("--yes", action="store_true", help="Actually delete. Without this, nothing changes.")
+    prune_p.add_argument("--vacuum", action="store_true", help="Shrink the database file after deleting (with --yes).")
+    prune_p.add_argument("--format", choices=["text", "json"], default="text")
 
     asset_p = sub.add_parser("asset", help="Record owner, location, tags, criticality, and notes for a device.")
     asset_sub = asset_p.add_subparsers(dest="asset_command", required=True)
@@ -1171,6 +1189,36 @@ def main(argv=None) -> int:
         conn.close()
 
 
+def _cmd_prune(args, conn) -> int:
+    if args.keep is None and args.older_than is None:
+        return _err("Give --keep N, --older-than DAYS, or both.")
+    try:
+        scope_name = _one_scope_name(args)
+        doomed = scans_to_prune(
+            conn, keep=args.keep, older_than_days=args.older_than, scope_name=scope_name,
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    deleted = 0
+    if args.yes and doomed:
+        deleted = delete_scans(conn, doomed)
+        if args.vacuum:
+            conn.execute("VACUUM")
+    if args.format == "json":
+        print(json.dumps({"dry_run": not args.yes, "scan_ids": doomed, "deleted": deleted}, indent=2))
+        return 0
+    if not doomed:
+        print("Nothing to prune.")
+    elif args.yes:
+        print(f"Deleted {deleted} scan(s): {', '.join(str(i) for i in doomed)}.")
+    else:
+        print(
+            f"Would delete {len(doomed)} scan(s): {', '.join(str(i) for i in doomed)}. "
+            "Run again with --yes to delete them. Inventory and trust records are kept."
+        )
+    return 0
+
+
 def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int:
     if args.command == "web":
         serve = _load_serve()
@@ -1382,6 +1430,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 f"{scan['device_count']:>7}  {'yes' if scan['demo'] else ''}"
             )
         return 0
+
+    if args.command == "prune":
+        return _cmd_prune(args, conn)
 
     return _err(f"Unknown command: {args.command}")
 

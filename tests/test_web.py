@@ -119,6 +119,28 @@ class WebTests(unittest.TestCase):
         self.assertEqual([d["ip"] for d in data["diff"]["added"]], ["192.168.50.11"])
         self.assertEqual(data["diff"]["removed"], [])
 
+    def test_scan_list_is_paged_and_reports_the_total(self):
+        from lantern.store import connect, save_scan
+
+        conn = connect(Path(self.tmp.name) / "test.db")
+        try:
+            ids = [save_scan(conn, "192.168.50.0/24", []) for _ in range(5)]
+        finally:
+            conn.close()
+        status, body, _ = self.request("/api/scans")
+        data = json.loads(body)
+        self.assertEqual((status, data["total"], len(data["scans"])), (200, 5, 5))
+        self.assertEqual(data["limit"], webapp.SCANS_PAGE_DEFAULT)
+        status, body, _ = self.request("/api/scans?limit=2&offset=1")
+        data = json.loads(body)
+        self.assertEqual([s["id"] for s in data["scans"]], [ids[3], ids[2]])
+        self.assertEqual((data["total"], data["limit"], data["offset"]), (5, 2, 1))
+        for bad in ("limit=0", "limit=abc", "offset=-1", f"limit={webapp.SCANS_PAGE_MAX + 1}"):
+            status, body, _ = self.request("/api/scans?" + bad)
+            self.assertEqual(status, 400, bad)
+        status, body, _ = self.request("/api/status")
+        self.assertEqual(json.loads(body)["scan_count"], 5)
+
     def test_inventory_fields_reach_the_scan_api_and_html_report(self):
         from lantern.assets import set_asset
         from lantern.store import connect, save_scan
