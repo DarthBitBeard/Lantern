@@ -710,6 +710,33 @@ class HostAllowlistTests(unittest.TestCase):
         self.assertEqual(data["scan_count"], 0)
 
 
+class OpenBrowserTests(unittest.TestCase):
+    def test_serve_opens_the_url_once_listening_and_never_prints_it(self):
+        url = "http://127.0.0.1:9/#token=" + "t" * 43
+        fake = mock.MagicMock()
+        fake.server_address = ("127.0.0.1", 9)
+        fake.RequestHandlerClass = mock.MagicMock(
+            lan_bound=False, strict_auth=True, allowed_hosts=frozenset({"127.0.0.1:9"}),
+        )
+        fake.serve_forever.side_effect = KeyboardInterrupt
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(webapp, "make_server", return_value=fake), \
+                mock.patch("webbrowser.open", return_value=True) as opener, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            webapp.serve("x.db", port=9, strict_auth=True, api_token="t" * 43, open_url=url)
+        opener.assert_called_once_with(url, new=2)
+        self.assertNotIn("t" * 43, out.getvalue() + err.getvalue())
+        fake.server_close.assert_called_once()
+
+    def test_a_missing_browser_is_reported_without_the_url(self):
+        url = "http://127.0.0.1:9/#token=" + "s" * 43
+        err = io.StringIO()
+        with mock.patch("webbrowser.open", return_value=False), contextlib.redirect_stderr(err):
+            self.assertFalse(webapp._open_browser(url))
+        self.assertIn("Could not open a browser", err.getvalue())
+        self.assertNotIn("s" * 43, err.getvalue())
+
+
 class AllowlistUnitTests(unittest.TestCase):
     def test_defaults_and_extras(self):
         allowed = webapp.build_allowed_hosts(

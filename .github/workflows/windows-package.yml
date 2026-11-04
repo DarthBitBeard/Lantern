@@ -1,0 +1,157 @@
+name: Windows package
+
+# Builds lantern.exe (PyInstaller, one file) and the per-user installer
+# (Inno Setup), then installs, runs, and uninstalls it on a clean runner.
+# The files are kept as workflow artifacts. Nothing is published or
+# released from here, and nothing scans a network.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: winpkg-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    name: windows installer
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel and install it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --require-hashes -r .github/requirements-build.txt
+          python -m build --wheel --no-isolation
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip install (Get-Item dist/*.whl).FullName
+          $version = python -c "import lantern; print(lantern.__version__)"
+          "LANTERN_VERSION=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Freeze lantern.exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --require-hashes -r .github/requirements-pyinstaller.txt
+          python -m PyInstaller --noconfirm --clean --onefile --console --name lantern `
+            --icon packaging/windows/lantern.ico --collect-data lantern `
+            --distpath build/exe --workpath build/pyi --specpath build/pyi `
+            packaging/windows/lantern_launcher.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Smoke-test lantern.exe outside the checkout
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Resolve-Path build/exe/lantern.exe).Path
+          Set-Location $env:RUNNER_TEMP
+          $out = & $exe --version
+          if ($out -ne "lantern $env:LANTERN_VERSION") { throw "unexpected --version: $out" }
+          & $exe demo --db "$env:RUNNER_TEMP\exe-demo.db" | Out-Null
+          if ($LASTEXITCODE) { throw "demo failed" }
+          if (-not (Test-Path "$env:RUNNER_TEMP\demo-report.html")) { throw "no demo report" }
+
+      - name: Build the installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup 6 is not on this runner image." }
+          & $iscc /Q "/DAppVersion=$env:LANTERN_VERSION" "/DExeDir=$PWD\build\exe" "/DOutDir=$PWD\build\installer" packaging\windows\lantern.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem build/installer
+
+      - name: Install silently, run, and uninstall
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-Item build/installer/*-setup.exe).FullName
+          $app = "$env:LOCALAPPDATA\Programs\Lantern"
+          $data = "$env:LOCALAPPDATA\Lantern"
+          $menu = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Lantern"
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$env:RUNNER_TEMP\install.log" -Wait -PassThru
+          if ($p.ExitCode) { Get-Content "$env:RUNNER_TEMP\install.log"; throw "installer exit $($p.ExitCode)" }
+
+          if (-not (Test-Path "$app\lantern.exe")) { throw "lantern.exe not installed to $app" }
+          if (-not (Test-Path $data)) { throw "data folder $data missing" }
+          foreach ($name in 'Lantern Dashboard','Lantern Command Prompt','Uninstall Lantern') {
+            if (-not (Test-Path "$menu\$name.lnk")) { throw "Start Menu shortcut missing: $name" }
+          }
+          $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut("$menu\Lantern Dashboard.lnk")
+          Write-Host "Dashboard shortcut: $($lnk.TargetPath) $($lnk.Arguments)"
+          if ($lnk.Arguments -notlike "*lantern.exe`" web --open --db `"$data\lantern.db`"*") { throw "dashboard shortcut arguments are wrong" }
+
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -notcontains $app) { throw "install folder not on the user PATH: $userPath" }
+
+          $out = & "$app\lantern.exe" --version
+          if ($out -ne "lantern $env:LANTERN_VERSION") { throw "installed --version: $out" }
+          & "$app\lantern.exe" demo --db "$data\lantern.db" | Out-Null
+          if ($LASTEXITCODE) { throw "installed demo failed" }
+
+          # The dashboard as the shortcut runs it, minus --open (no browser
+          # on CI). A fixed token so the API check can use it.
+          $token = -join (1..32 | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+          $env:LANTERN_API_TOKEN = $token
+          $web = Start-Process "$app\lantern.exe" -ArgumentList 'web','--db',"$data\lantern.db",'--port','8099' -PassThru -NoNewWindow
+          try {
+            $page = $null
+            for ($i = 0; $i -lt 30 -and -not $page; $i++) {
+              Start-Sleep -Milliseconds 500
+              try { $page = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8099/ } catch {}
+            }
+            if (-not $page -or $page.StatusCode -ne 200) { throw "dashboard page did not load" }
+            foreach ($asset in '/app.js','/styles.css') {
+              $r = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8099$asset"
+              if ($r.StatusCode -ne 200) { throw "$asset returned $($r.StatusCode)" }
+            }
+            $denied = $false
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8099/api/scans | Out-Null } catch { $denied = $true }
+            if (-not $denied) { throw "/api/scans answered without the token" }
+            $scans = Invoke-RestMethod -Headers @{ 'X-Lantern-Token' = $token } http://127.0.0.1:8099/api/scans
+            if ($scans.total -lt 2) { throw "expected the demo scans, got $($scans.total)" }
+          } finally {
+            Stop-Process -Id $web.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:LANTERN_API_TOKEN
+          }
+
+          $p = Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode) { throw "uninstaller exit $($p.ExitCode)" }
+          # The uninstaller copies itself to a temp folder and finishes there.
+          for ($i = 0; $i -lt 30 -and (Test-Path "$app\lantern.exe"); $i++) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path "$app\lantern.exe") { throw "lantern.exe still installed after uninstall" }
+          if (Test-Path "$menu\Lantern Dashboard.lnk") { throw "Start Menu shortcut left behind" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -contains $app) { throw "install folder still on the user PATH" }
+          if (-not (Test-Path "$data\lantern.db")) { throw "uninstall removed the scan database" }
+          Write-Host "Install, run, and uninstall OK. Scan data kept in $data."
+
+      - name: Checksums
+        run: |
+          Get-FileHash build/exe/lantern.exe, (Get-Item build/installer/*-setup.exe).FullName -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lantern-${{ env.LANTERN_VERSION }}-windows-x64
+          path: |
+            build/exe/lantern.exe
+            build/installer/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
