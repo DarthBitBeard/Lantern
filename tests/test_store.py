@@ -7,6 +7,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,8 @@ from lantern.store import (
     apply_migrations,
     apply_trust,
     connect,
+    count_scans,
+    delete_scans,
     diff_scans,
     get_trusted,
     latest_scan_id,
@@ -24,6 +27,7 @@ from lantern.store import (
     load_scan_with_diff,
     previous_scan_id,
     save_scan,
+    scans_to_prune,
     schema_version,
     set_trusted,
     warn_loose_permissions,
@@ -176,6 +180,95 @@ class StoreTests(unittest.TestCase):
         apply_trust(scan, {"": {"label": "nope", "trusted": True}})
         self.assertFalse(scan["devices"][0]["trusted"])
         self.assertIsNone(scan["devices"][0]["label"])
+
+
+class PruneTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+
+    def add(self, days_ago, scope=None, ip="192.168.1.2"):
+        scan_id = save_scan(self.conn, "192.168.1.0/24", [_dev(ip, "aa:bb:cc:00:00:01")], scope_name=scope)
+        started = (self.now - timedelta(days=days_ago)).isoformat()
+        with self.conn:
+            self.conn.execute("UPDATE scans SET started_at = ? WHERE id = ?", (started, scan_id))
+        return scan_id
+
+    def test_nothing_is_pruned_without_a_rule(self):
+        self.add(100)
+        self.add(1)
+        self.assertEqual(scans_to_prune(self.conn), [])
+
+    def test_keep_leaves_the_newest_n(self):
+        ids = [self.add(d) for d in (50, 40, 30, 20, 10)]
+        self.assertEqual(scans_to_prune(self.conn, keep=2), ids[:3])
+        self.assertEqual(scans_to_prune(self.conn, keep=5), [])
+
+    def test_the_newest_scan_is_always_kept(self):
+        old = self.add(500)
+        self.assertEqual(scans_to_prune(self.conn, older_than_days=1, now=self.now), [])
+        newer = self.add(400)
+        self.assertEqual(scans_to_prune(self.conn, older_than_days=1, now=self.now), [old])
+        self.assertNotIn(newer, scans_to_prune(self.conn, older_than_days=1, now=self.now))
+
+    def test_older_than_only_takes_old_scans(self):
+        old, mid = self.add(90), self.add(10)
+        self.add(1)
+        self.assertEqual(scans_to_prune(self.conn, older_than_days=30, now=self.now), [old])
+        self.assertEqual(scans_to_prune(self.conn, older_than_days=5, now=self.now), [old, mid])
+
+    def test_both_rules_must_agree(self):
+        a, b = self.add(90), self.add(80)
+        # The two newest scans are protected by keep; only scans older than 75 days qualify.
+        self.add(70)
+        self.add(1)
+        self.assertEqual(scans_to_prune(self.conn, keep=2, older_than_days=75, now=self.now), [a, b])
+
+    def test_each_scope_is_judged_on_its_own(self):
+        home = [self.add(d, "home") for d in (30, 20, 10)]
+        lab = [self.add(d, "lab") for d in (200, 100)]
+        bare = [self.add(d) for d in (8, 7)]
+        self.assertEqual(
+            scans_to_prune(self.conn, keep=1), sorted(home[:2] + lab[:1] + bare[:1])
+        )
+        self.assertEqual(scans_to_prune(self.conn, keep=1, scope_name="lab"), lab[:1])
+
+    def test_bad_arguments_are_refused(self):
+        with self.assertRaises(ValueError):
+            scans_to_prune(self.conn, keep=0)
+        with self.assertRaises(ValueError):
+            scans_to_prune(self.conn, older_than_days=-1)
+
+    def test_delete_removes_devices_and_keeps_inventory_and_trust(self):
+        from lantern.assets import set_asset
+
+        old, new = self.add(10), self.add(1)
+        set_trusted(self.conn, "aa:bb:cc:00:00:01", "TV", True)
+        set_asset(self.conn, "mac:aa:bb:cc:00:00:01", "mac", owner="Dana")
+        self.assertEqual(delete_scans(self.conn, [old]), 1)
+        self.assertEqual([s["id"] for s in list_scans(self.conn)], [new])
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM devices WHERE scan_id = ?", (old,)).fetchone()[0], 0
+        )
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0], 1)
+        self.assertTrue(get_trusted(self.conn))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 1)
+        self.assertEqual(delete_scans(self.conn, []), 0)
+
+    def test_ids_are_not_reused_after_a_delete(self):
+        last = self.add(1)
+        delete_scans(self.conn, [last])
+        self.assertGreater(self.add(0), last)
+
+    def test_paging_and_count(self):
+        ids = [self.add(d) for d in (5, 4, 3, 2, 1)]
+        self.assertEqual(count_scans(self.conn), 5)
+        self.assertEqual([s["id"] for s in list_scans(self.conn, limit=2)], ids[::-1][:2])
+        self.assertEqual([s["id"] for s in list_scans(self.conn, limit=2, offset=4)], [ids[0]])
+        self.assertEqual(len(list_scans(self.conn)), 5)
+        self.add(1, "lab")
+        self.assertEqual(count_scans(self.conn, "lab"), 1)
+        self.assertEqual(len(list_scans(self.conn, "lab", limit=10)), 1)
 
 
 class DiffTests(unittest.TestCase):

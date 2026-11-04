@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
+- CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
+- `lantern prune --keep N` and `--older-than DAYS` delete old scans. It only shows what would be deleted until `--yes` is given. The newest scan of each scope is always kept so a diff has a baseline, each scope is judged on its own, and inventory and trust records are kept. `--vacuum` shrinks the file afterwards.
+- `GET /api/scans` now returns at most 200 scans by default (`?limit=` up to 1000, `?offset=`), and adds `total`, `limit`, and `offset`. `/api/status` no longer loads every scan to count them.
 - The dashboard's Content-Security-Policy adds `base-uri 'none'`, `form-action 'self'`, and `object-src 'none'`. (`style-src` keeps `'unsafe-inline'`, which the saved HTML report needs for its own styles.)
 - `/api/status` remembers the auto-detected subnet for 30 seconds (5 seconds when none was found) instead of looking it up on every poll.
 - The findings export no longer scans the whole device list once per device, which was quadratic on a large network. Export path errors are now a typed `ExportPathError` instead of being recognised by their message text. Behavior and messages are unchanged.

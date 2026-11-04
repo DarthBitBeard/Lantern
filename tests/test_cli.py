@@ -29,6 +29,41 @@ class CliTests(unittest.TestCase):
             code = cli.main(["--db", self.db, *args])
         return code, out.getvalue(), err.getvalue()
 
+    def test_prune_shows_a_dry_run_then_deletes_with_yes(self):
+        for _ in range(3):
+            self.run_cli("demo")
+        code, before, _ = self.run_cli("history", "--format", "json")
+        ids = [scan["id"] for scan in json.loads(before)["scans"]]
+        self.assertGreater(len(ids), 3)
+
+        code, out, _ = self.run_cli("prune", "--keep", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("Would delete", out)
+        self.assertIn("--yes", out)
+        _, still, _ = self.run_cli("history", "--format", "json")
+        self.assertEqual(json.loads(still), json.loads(before))
+
+        code, out, _ = self.run_cli("prune", "--keep", "2", "--yes", "--format", "json")
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["deleted"], len(ids) - 2)
+        _, after, _ = self.run_cli("history", "--format", "json")
+        self.assertEqual([s["id"] for s in json.loads(after)["scans"]], ids[:2])
+
+        code, out, _ = self.run_cli("prune", "--keep", "2", "--yes", "--vacuum")
+        self.assertEqual(code, 0)
+        self.assertIn("Nothing to prune", out)
+
+    def test_prune_needs_a_rule_and_rejects_bad_numbers(self):
+        self.run_cli("demo")
+        code, _, err = self.run_cli("prune")
+        self.assertEqual(code, 2)
+        self.assertIn("--keep", err)
+        code, _, err = self.run_cli("prune", "--keep", "0")
+        self.assertEqual(code, 2)
+        self.assertIn("at least 1", err)
+
     def test_empty_db_messages(self):
         for command in ("diff", "report", "history"):
             code, out, _ = self.run_cli(command)

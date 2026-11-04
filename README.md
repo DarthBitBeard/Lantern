@@ -63,6 +63,7 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | Scan every scope | `python3 -m lantern scan --config lantern.toml --all` |
 | Diff last two scans | `python3 -m lantern diff` (add `--scope home` to stay inside one scope) |
 | List saved scans | `python3 -m lantern history` (add `--scope home` to list one scope) |
+| Delete old scans | `python3 -m lantern prune --keep 30` shows what would go; add `--yes` to delete. `--older-than DAYS` works too, and `--vacuum` shrinks the file. The newest scan of each scope is always kept, and inventory and trust records are kept. |
 | HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` or `--scope home`) |
 | Export devices, findings, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
 | Tests | `python3 tests/run_tests.py` |
@@ -214,7 +215,7 @@ API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` i
 | Route | Returns |
 | --- | --- |
 | `GET /api/status` | version, guessed subnet, scan count, latest scan id, `scan_running` |
-| `GET /api/scans` | saved scans, newest first |
+| `GET /api/scans` | saved scans, newest first, with `total`. `?limit=` (default 200, at most 1000) and `?offset=` page through them |
 | `GET /api/scans/latest`, `GET /api/diff` | latest scan plus its diff against the scan before it |
 | `GET /api/scans/{id}` | one scan plus its diff against the scan before it |
 | `GET /api/report?format=json\|html&scan_id=N` | report for the latest scan, or scan `N` |
