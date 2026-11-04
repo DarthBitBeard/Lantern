@@ -94,7 +94,13 @@ MAX_CONNECTIONS_PER_IP = 8
 # A presented token that does not match waits this long. Guessing a
 # 128-bit token is not practical; the delay only slows a tight loop.
 TOKEN_FAILURE_DELAY_SECONDS = 0.05
-CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+# style-src keeps 'unsafe-inline' because the saved HTML report carries its own
+# <style> block. base-uri, form-action, and object-src close the ways a stray
+# injected tag could redirect a form or a relative URL.
+CSP = (
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+)
 TOKEN_HEADER = "X-Lantern-Token"
 TOKEN_PLACEHOLDER = "__LANTERN_TOKEN__"
 AUTH_PLACEHOLDER = "__LANTERN_AUTH__"
@@ -146,6 +152,31 @@ class _ScanJob:
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._state)
+
+
+class _SubnetGuess:
+    """Remember the auto-detected subnet for a short while.
+
+    The dashboard polls /api/status, and finding the subnet can wait on the
+    OS for up to half a second, so it is not redone on every poll. A failed
+    guess is retried sooner, in case the network has just come up.
+    """
+
+    FOUND_TTL = 30.0
+    MISSING_TTL = 5.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._value: str | None = None
+        self._expires = 0.0
+
+    def get(self) -> str | None:
+        with self._lock:
+            now = time.monotonic()
+            if now >= self._expires:
+                self._value = guess_subnet()
+                self._expires = now + (self.FOUND_TTL if self._value else self.MISSING_TTL)
+            return self._value
 
 
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool) -> None:
@@ -616,6 +647,7 @@ class LanternHandler(BaseHTTPRequestHandler):
     debug = False
     # make_server gives each server its own job record.
     scan_job = None
+    subnet_guess = None
     # Fail closed until make_server fills these in for this process.
     api_token = ""
     allowed_hosts = frozenset()
@@ -1200,7 +1232,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                 newest = list_scans(conn, limit=1)
                 self._send_json(200, {
                     "version": __version__,
-                    "guessed_subnet": guess_subnet(),
+                    "guessed_subnet": self.subnet_guess.get(),
                     "scan_count": count_scans(conn),
                     "latest_scan_id": newest[0]["id"] if newest else None,
                     "scan_running": _scan_lock.locked(),
@@ -1581,6 +1613,7 @@ def make_server(
             "lan_bound": bool(lan_bound),
             "strict_auth": bool(strict_auth),
             "scan_job": _ScanJob(),
+            "subnet_guess": _SubnetGuess(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
             "write_timeout": float(write_timeout),

@@ -105,6 +105,10 @@ def is_v1_path(path: str) -> bool:
     return path == "/api/v1" or path.startswith("/api/v1/")
 
 
+class ExportPathError(ValueError):
+    """An export destination was refused. The message is safe to show the user."""
+
+
 def header_value(value: str) -> str:
     """Refuse a response header that could split the header block."""
     text = str(value)
@@ -577,8 +581,11 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
     scan, devices = device_rows(conn, query, private=False)
     severity = _severity(query)
     rows = []
+    raw_by_ip: dict = {}
+    for item in scan["devices"]:
+        raw_by_ip.setdefault(item["ip"], item)
     for device in devices:
-        raw = next(item for item in scan["devices"] if item["ip"] == device["ip"])
+        raw = raw_by_ip[device["ip"]]
         for finding in raw.get("findings") or []:
             if severity is not None and finding.get("severity") != severity:
                 continue
@@ -816,13 +823,13 @@ def export_locked(build):
 
 def _reject_path_text(path: str) -> None:
     if path is None or path == "":
-        raise ValueError("Pass a file path to --output, or omit it to write to stdout.")
+        raise ExportPathError("Pass a file path to --output, or omit it to write to stdout.")
     if "\x00" in path or len(path) > 4096 or path.count("/") + path.count("\\") > 40:
-        raise ValueError("The export path is not allowed.")
+        raise ExportPathError("The export path is not allowed.")
     if path.endswith(("/", "\\")) or path.endswith(os.sep):
-        raise ValueError("The export path must be a file.")
+        raise ExportPathError("The export path must be a file.")
     if path == "~" or path.startswith("~/") or path.startswith("~\\"):
-        raise ValueError("The export path must not use ~.")
+        raise ExportPathError("The export path must not use ~.")
 
 
 def prepare_export_path(path: str, force: bool) -> Path:
@@ -833,24 +840,24 @@ def prepare_export_path(path: str, force: bool) -> Path:
         candidate = Path.cwd() / candidate
     parent = candidate.parent
     if not parent.is_dir():
-        raise ValueError("The export directory must already exist.")
+        raise ExportPathError("The export directory must already exist.")
     if os.path.realpath(parent) != os.path.abspath(parent):
-        raise ValueError("The export directory must not be a symlink.")
+        raise ExportPathError("The export directory must not be a symlink.")
     try:
         info = os.lstat(candidate)
     except FileNotFoundError:
         info = None
     except OSError as exc:
-        raise ValueError("The export path is not allowed.") from exc
+        raise ExportPathError("The export path is not allowed.") from exc
     if info is not None:
         if stat.S_ISLNK(info.st_mode):
-            raise ValueError("The export path must not be a symlink.")
+            raise ExportPathError("The export path must not be a symlink.")
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError("The export path must be a regular file.")
+            raise ExportPathError("The export path must be a regular file.")
         if not force:
-            raise ValueError("The export file already exists. Pass --force to replace it.")
+            raise ExportPathError("The export file already exists. Pass --force to replace it.")
         if info.st_nlink > 1:
-            raise ValueError("The export path must not be a hard link.")
+            raise ExportPathError("The export path must not be a hard link.")
     return candidate
 
 
@@ -923,8 +930,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
         success = True
     except OSError as exc:
         if exc.errno in _PATH_ERRNOS:
-            raise ValueError("The export path is not allowed.") from exc
-        raise ValueError("The export could not be written.") from exc
+            raise ExportPathError("The export path is not allowed.") from exc
+        raise ExportPathError("The export could not be written.") from exc
     finally:
         if not success:
             _unlink_quiet(temporary_path)

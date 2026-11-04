@@ -48,6 +48,7 @@ from .store import (
     scans_to_prune,
     write_private_file,
 )
+from .v1 import ExportPathError
 
 DEFAULT_DB = Path("data/lantern.db")
 PING_WORKERS = 50
@@ -288,22 +289,6 @@ _EXPORT_FORMAT_MISMATCH = (
     "Use .csv with csv, or .json with json."
 )
 
-_EXPORT_VALUE_ERRORS = frozenset({
-    "Pass a file path to --output, or omit it to write to stdout.",
-    _EXPORT_FORMAT_MISMATCH,
-    "The export path is not allowed.",
-    "The export directory must already exist.",
-    "The export directory must not be a symlink.",
-    "The export path must not be a symlink.",
-    "The export path must be a regular file.",
-    "The export file already exists. Pass --force to replace it.",
-    "The export path must not be a hard link.",
-    "The export path must be a file.",
-    "The export path must not use ~.",
-    "The export could not be written.",
-})
-
-
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
     return 2
@@ -315,7 +300,7 @@ def _export_format(output: str | None, chosen: str | None) -> str:
     if chosen is None:
         return "csv" if suffix == ".csv" else "json"
     if suffix in {".csv", ".json"} and suffix != f".{chosen}":
-        raise ValueError(_EXPORT_FORMAT_MISMATCH)
+        raise ExportPathError(_EXPORT_FORMAT_MISMATCH)
     return chosen
 
 
@@ -357,11 +342,10 @@ def _cmd_export(args, conn) -> int:
             print(f"lantern: {MESSAGES['not_found']}", file=sys.stderr)
             return 1
         return _err(MESSAGES[exc.code])
-    except ValueError as exc:
-        text = str(exc)
-        if text not in _EXPORT_VALUE_ERRORS:
-            return _err("The export could not be written.")
-        return _err(text)
+    except ExportPathError as exc:
+        return _err(str(exc))
+    except ValueError:
+        return _err("The export could not be written.")
     except Exception:
         return _err(MESSAGES["server_error"])
     if args.output:
