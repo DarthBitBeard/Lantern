@@ -12,6 +12,7 @@
 - The dashboard's Content-Security-Policy adds `base-uri 'none'`, `form-action 'self'`, and `object-src 'none'`. (`style-src` keeps `'unsafe-inline'`, which the saved HTML report needs for its own styles.)
 - `/api/status` remembers the auto-detected subnet for 30 seconds (5 seconds when none was found) instead of looking it up on every poll.
 - The findings export no longer scans the whole device list once per device, which was quadratic on a large network. Export path errors are now a typed `ExportPathError` instead of being recognised by their message text. Behavior and messages are unchanged.
+
 ## 0.5.0 - 2026-11-02
 
 Pre-release for testing. Dashboard scans run in the background, the scan checks more risky ports, and the database moves to schema 4. This version changes the `POST /api/scan` response (see the first entry), which is why it is 0.5.0 and not 0.4.1. A schema 3 database is copied to `<file>.v3.bak` and upgraded in place on first open. 0.4.0 refuses a schema 4 database.
