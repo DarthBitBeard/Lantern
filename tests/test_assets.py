@@ -232,6 +232,18 @@ class AssetCommandTests(unittest.TestCase):
         self.assertEqual(shown["key"], "192.168.50.11")
         self.assertEqual(shown["owner"], "Bea")
 
+    def test_setting_an_ip_keyed_record_warns_that_it_follows_the_address(self):
+        code, out, err = self.run_cli("asset", "set", "192.168.50.11", "--owner", "Bea")
+        self.assertEqual(code, 0, err)
+        self.assertIn("no MAC address", err)
+        self.assertIn("follow the address", err)
+        self.assertNotIn("no MAC address", out)
+
+    def test_setting_a_mac_keyed_record_does_not_warn(self):
+        code, _, err = self.run_cli("asset", "set", "aa:bb:cc:dd:ee:10", "--owner", "Ada")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("MAC address", err)
+
     def test_text_list_strips_a_stored_control_character(self):
         conn = connect(self.db)
         try:
