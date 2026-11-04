@@ -12,6 +12,7 @@
 - The dashboard's Content-Security-Policy adds `base-uri 'none'`, `form-action 'self'`, and `object-src 'none'`. (`style-src` keeps `'unsafe-inline'`, which the saved HTML report needs for its own styles.)
 - `/api/status` remembers the auto-detected subnet for 30 seconds (5 seconds when none was found) instead of looking it up on every poll.
 - The findings export no longer scans the whole device list once per device, which was quadratic on a large network. Export path errors are now a typed `ExportPathError` instead of being recognised by their message text. Behavior and messages are unchanged.
+- Dashboard: a refused POST (wrong Host, token, or Origin) now reliably delivers its 403. The server answered before reading the body and closed at once, so a body that arrived a moment later made the operating system reset the connection, and on Windows the client could see "connection aborted" instead of the answer. The server now stops writing and discards a declared but unread body for up to one second (64 KB at most) before closing. This was the cause of an occasional Windows test failure.
 
 ## 0.5.0 - 2026-11-02
 
