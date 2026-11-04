@@ -119,6 +119,30 @@ class WebTests(unittest.TestCase):
         self.assertEqual([d["ip"] for d in data["diff"]["added"]], ["192.168.50.11"])
         self.assertEqual(data["diff"]["removed"], [])
 
+    def test_status_does_not_redo_the_subnet_guess_on_every_poll(self):
+        with mock.patch.object(webapp, "guess_subnet", return_value="192.168.9.0/24") as guess:
+            for _ in range(3):
+                status, body, _ = self.request("/api/status")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["guessed_subnet"], "192.168.9.0/24")
+        self.assertEqual(guess.call_count, 1)
+
+    def test_a_missing_subnet_guess_is_retried_soon(self):
+        cache = webapp._SubnetGuess()
+        answers = iter([None, "10.1.2.0/24"])
+        with mock.patch.object(webapp, "guess_subnet", side_effect=lambda: next(answers)) as guess,                 mock.patch.object(webapp.time, "monotonic", side_effect=[100.0, 101.0, 106.0]):
+            self.assertIsNone(cache.get())
+            self.assertIsNone(cache.get())
+            self.assertEqual(cache.get(), "10.1.2.0/24")
+        self.assertEqual(guess.call_count, 2)
+
+    def test_html_pages_close_base_form_and_object_escapes(self):
+        status, _, headers = self.request("/")
+        self.assertEqual(status, 200)
+        policy = headers["Content-Security-Policy"]
+        for directive in ("base-uri 'none'", "form-action 'self'", "object-src 'none'", "frame-ancestors 'none'"):
+            self.assertIn(directive, policy)
+
     def test_scan_list_is_paged_and_reports_the_total(self):
         from lantern.store import connect, save_scan
 
