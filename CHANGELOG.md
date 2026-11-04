@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `lantern asset set` by IP address now prints a note on stderr that the record follows the address, so it can land on a different device if DHCP reassigns it. Devices with a MAC are keyed by MAC and are not affected.
 - Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
 - CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
 - `lantern prune --keep N` and `--older-than DAYS` delete old scans. It only shows what would be deleted until `--yes` is given. The newest scan of each scope is always kept so a diff has a baseline, each scope is judged on its own, and inventory and trust records are kept. `--vacuum` shrinks the file afterwards.
