@@ -127,7 +127,13 @@ jobs:
             $scans = Invoke-RestMethod -Headers @{ 'X-Lantern-Token' = $token } http://127.0.0.1:8099/api/scans
             if ($scans.total -lt 2) { throw "expected the demo scans, got $($scans.total)" }
           } finally {
-            Stop-Process -Id $web.Id -Force -ErrorAction SilentlyContinue
+            # A one-file exe runs as a launcher plus a child started from the
+            # same lantern.exe. Stop both, or the child keeps the file open
+            # and the uninstaller cannot remove it. (Closing the console
+            # window, as a user does, stops both.)
+            & taskkill.exe /PID $web.Id /T /F | Out-Null
+            for ($i = 0; $i -lt 20 -and (Get-Process lantern -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 250 }
+            if (Get-Process lantern -ErrorAction SilentlyContinue) { throw "lantern.exe processes still running" }
             Remove-Item Env:LANTERN_API_TOKEN
           }
 
