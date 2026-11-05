@@ -35,9 +35,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
+COPY .github/requirements-build.txt .github/requirements-build.txt
 COPY lantern ./lantern
 
-RUN pip install --no-cache-dir . \
+# Build tools are the hash-pinned set CI already uses (Gideon L-1).
+# --no-build-isolation keeps pip from fetching an unpinned setuptools.
+# --no-deps matches dependencies = [] in pyproject.toml. The tools are
+# removed after the package is installed; they are not runtime deps.
+RUN pip install --no-cache-dir --require-hashes -r .github/requirements-build.txt \
+    && pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && pip uninstall -y build packaging pyproject_hooks setuptools wheel \
     && groupadd --system --gid 10001 lantern \
     && useradd --system --uid 10001 --gid 10001 --home-dir /data --no-create-home lantern \
     && mkdir -p /data \

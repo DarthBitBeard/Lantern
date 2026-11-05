@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- CI pins `actions/checkout` at v7.0.1 and `actions/setup-python` at v7.1.0, the same commit in every workflow. The Docker image installs those hash-pinned build tools, then the package with `--no-deps --no-build-isolation`, so the image build does not fetch an unpinned setuptools. The monthly vendor-table job pushes a new branch for each run and does not force-push.
+
 ## 1.3.0 - 2026-11-05
 
 Names the maker of each device's network card from its MAC address, using a bundled copy of the IEEE registry; nothing is looked up online. No schema change: a 1.2.0 database opens as is, and older scans get vendors too. Everything 1.0 promised stays compatible; `vendor` and `private_mac` are additions.
