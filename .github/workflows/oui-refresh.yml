@@ -75,7 +75,12 @@ jobs:
           git switch -c "$branch"
           git add lantern/data/oui.tsv.gz
           git commit -m "Refresh the MAC vendor table from the IEEE listing"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" push origin "HEAD:refs/heads/${branch}"
+          # Git over HTTPS takes the token as Basic auth (x-access-token),
+          # the same header actions/checkout writes; GitHub refuses a Bearer
+          # header for a push. The encoded value is masked in the log.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" push origin "HEAD:refs/heads/${branch}"
           gh pr create --head "$branch" --title "Refresh the MAC vendor table ($(date -u +%Y-%m-%d))" \
             --body "Rebuild of \`lantern/data/oui.tsv.gz\` from the IEEE Registration Authority public listing by \`tools/update_oui.py\`. ${ADDED} line(s) added or changed, ${REMOVED} removed or changed. Review the diff before merging. This pull request is not set to auto-merge."
           gh workflow run ci.yml --ref "$branch"

@@ -633,3 +633,41 @@ class DashboardSwitchTests(unittest.TestCase):
             self.assertNotIn("sekrit-community", body)
         self.assertEqual(self.server.RequestHandlerClass.switch_config,
                          (["192.168.1.2"], "sekrit-community"))
+
+
+class CorruptScanCliTests(unittest.TestCase):
+    """A stored row that is not valid JSON is a clean error in every command."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.db = str(Path(tmp.name) / "c.db")
+        conn = store.connect(self.db)
+        try:
+            store.save_scan(conn, "192.168.1.0/24", [dict(DEVICES[2])])
+            conn.execute("UPDATE devices SET open_ports = '{broken'")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        saved = os.environ.get(cli.SNMP_COMMUNITY_ENV)
+        os.environ[cli.SNMP_COMMUNITY_ENV] = "public"
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--db", self.db, *argv])
+        finally:
+            if saved is None:
+                os.environ.pop(cli.SNMP_COMMUNITY_ENV, None)
+            else:
+                os.environ[cli.SNMP_COMMUNITY_ENV] = saved
+        return code, err.getvalue()
+
+    def test_commands_report_an_unreadable_scan(self):
+        for argv in (["report"], ["diff"], ["topology", "--switch", "192.168.1.2"],
+                     ["export", "--what", "devices"]):
+            code, err = self.run_cli(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn("The saved scan could not be read.", err, argv)
+            self.assertNotIn("Traceback", err, argv)
