@@ -543,7 +543,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("image/svg+xml", headers["Content-Type"])
         self.assertIn("<svg", body)
-        self.assertNotIn("Content-Security-Policy", headers)
+        self.assertEqual(headers["Content-Security-Policy"], webapp.SVG_CSP)
+        self.assertIn("default-src 'none'", webapp.SVG_CSP)
 
     def test_border_contrast_meets_the_panel_backgrounds(self):
         css = (webapp.WEB_DIR / "styles.css").read_text(encoding="utf-8")
@@ -2368,7 +2369,7 @@ walk(card, (item) => {
 const shown = texts(card);
 if (shown.includes("&lt;script&gt;")) process.exit(2);
 for (const field of ["hostname", "label", "owner", "tag", "notes", "banner", "location",
-  "criticality", "vendor", "reason", "name", "model", "maker", "switch", "port", "title", "fix"]) {
+  "criticality", "reason", "name", "model", "maker", "switch", "port", "title", "fix"]) {
   if (!shown.includes(payload + field)) {
     console.error("missing " + field);
     process.exit(3);
@@ -2382,6 +2383,17 @@ for (const cls of classes) {
     }
   }
 }
+const base = { ip: "192.168.50.11", mac: "aa:bb:cc:dd:ee:11", trusted: false, open_ports: [], findings: [], kind: "nas" };
+// The network card's maker shows when the device did not name its own maker, and not twice.
+const bare = texts(context.renderDevice({ ...base, vendor: "Vendorco" }));
+if (!bare.includes("Vendorco")) { console.error("vendor missing"); process.exit(7); }
+const named = texts(context.renderDevice({ ...base, vendor: "Vendorco", identity: { manufacturer: "Acme", model: "X1" } }));
+if (named.includes("Vendorco") || !named.includes("Acme")) { console.error("vendor shown beside the maker"); process.exit(7); }
+// A value that names an Object.prototype member is not a badge class.
+const proto = context.renderDevice({ ...base, findings: [{ port: 23, service: "t", severity: "constructor", title: "t", fix: "f" }] });
+walk(proto, (item) => {
+  if (item.className && /function|native/.test(item.className)) { console.error(item.className); process.exit(8); }
+});
 context.renderSummary({
   id: 1, devices: [], subnet: "192.168.50.0/24",
   scope_name: payload + "scope", started_at: "2026-10-28T00:00:00Z", demo: false,

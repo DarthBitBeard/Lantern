@@ -67,6 +67,9 @@ from .store import connect, count_scans, list_scans, load_scan_with_diff, save_s
 from .v1 import header_value
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+# For SVG files served on their own (the brand images).
+SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -795,6 +798,9 @@ class LanternHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CSP)
+        elif content_type.startswith("image/svg+xml"):
+            # An SVG opened on its own is a document: no scripts, no loads.
+            self.send_header("Content-Security-Policy", SVG_CSP)
         for key, value in extra.items():
             self.send_header(key, value)
         self.end_headers()

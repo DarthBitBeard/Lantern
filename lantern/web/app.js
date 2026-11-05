@@ -171,7 +171,8 @@ const CRITICALITY_CLASS = { low: "low", medium: "medium", high: "high", critical
 
 function badge(value, allow) {
   const raw = String(value ?? "");
-  const token = allow[raw] || "";
+  // Own keys only: a value like "constructor" must not reach the class list.
+  const token = Object.prototype.hasOwnProperty.call(allow, raw) ? allow[raw] : "";
   return node("span", { className: token ? `badge ${token}` : "badge", text: raw });
 }
 
@@ -282,7 +283,7 @@ function identityLine(device) {
   const identity = device.identity || {};
   // The network card's maker, unless the device already named its maker.
   const maker = identity.manufacturer || device.vendor;
-  const parts = [maker, identity.model, device.vendor]
+  const parts = [maker, identity.model]
     .filter((v, i, all) => v && all.indexOf(v) === i);
   if (identity.name && identity.name !== displayName(device)) parts.unshift(identity.name);
   return parts.join(" · ");
