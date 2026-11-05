@@ -6,6 +6,9 @@ name: Refresh MAC vendor table
 # Opening the PR needs "Allow GitHub Actions to create and approve pull
 # requests" (Settings > Actions > General). Without it the job still
 # builds the table and fails at the PR step, so the change is visible.
+# A PR opened with the workflow token does not start other workflows, so
+# this job dispatches CI and the Windows package build on the PR branch;
+# their results show as checks on the PR.
 
 on:
   schedule:
@@ -26,6 +29,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -69,3 +73,5 @@ jobs:
             gh pr create --head "$branch" --title "Refresh the MAC vendor table ($(date -u +%Y-%m))" \
               --body "Monthly rebuild of \`lantern/data/oui.tsv.gz\` from the IEEE Registration Authority public listing by \`tools/update_oui.py\`. ${ADDED} line(s) added or changed, ${REMOVED} removed or changed."
           fi
+          gh workflow run ci.yml --ref "$branch"
+          gh workflow run windows-package.yml --ref "$branch"

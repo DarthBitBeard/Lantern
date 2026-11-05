@@ -5,6 +5,9 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Pull requests opened by a workflow (the monthly vendor-table refresh)
+  # do not trigger other workflows, so that job starts this one by hand.
+  workflow_dispatch:
 
 # A new push to the same branch cancels the run it replaces.
 concurrency:
