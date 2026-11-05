@@ -29,10 +29,15 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # actions: write is only so this job can start CI on the pull request
+      # it opens. The workflow token does not start workflows on its own
+      # pull requests. No other permission was added.
       actions: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -62,16 +67,16 @@ jobs:
           ADDED: ${{ steps.compare.outputs.added }}
           REMOVED: ${{ steps.compare.outputs.removed }}
         run: |
-          branch="oui-refresh/$(date -u +%Y-%m)"
+          # One branch per run, including a re-run of the same run.
+          # A later month does not overwrite an open pull request.
+          branch="oui-refresh/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
           git add lantern/data/oui.tsv.gz
           git commit -m "Refresh the MAC vendor table from the IEEE listing"
-          git push --force origin "$branch"
-          if ! gh pr view "$branch" >/dev/null 2>&1; then
-            gh pr create --head "$branch" --title "Refresh the MAC vendor table ($(date -u +%Y-%m))" \
-              --body "Monthly rebuild of \`lantern/data/oui.tsv.gz\` from the IEEE Registration Authority public listing by \`tools/update_oui.py\`. ${ADDED} line(s) added or changed, ${REMOVED} removed or changed."
-          fi
+          git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" push origin "HEAD:refs/heads/${branch}"
+          gh pr create --head "$branch" --title "Refresh the MAC vendor table ($(date -u +%Y-%m-%d))" \
+            --body "Rebuild of \`lantern/data/oui.tsv.gz\` from the IEEE Registration Authority public listing by \`tools/update_oui.py\`. ${ADDED} line(s) added or changed, ${REMOVED} removed or changed. Review the diff before merging. This pull request is not set to auto-merge."
           gh workflow run ci.yml --ref "$branch"
           gh workflow run windows-package.yml --ref "$branch"
