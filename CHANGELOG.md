@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `/api/v1/devices`, `/api/v1/diffs`, and `lantern export` / `/api/v1/export` (JSON) add `kind`, `kind_reason`, and `identity` to each device, the same values the dashboard map uses. The device CSV adds `kind`, `kind_reason`, `announced_name`, `announced_model`, and `announced_manufacturer` after every 1.0 column. Nothing is renamed or removed. A streamed export picks the router in one light pass and classifies each device as it is written, so a large export still holds one device at a time.
+- README: the inventory section no longer says the dashboard can't show owner, location, and tags; it has shown them since 1.0.0.
+
 ## 1.1.0 - 2026-11-05
 
 Adds a network map and names devices from what they announce. Schema 5: the first 1.1.0 run copies a 1.0.0 database to `.v4.bak` and upgrades it; older scans still draw, with a guessed router. Everything 1.0.0 promised stays compatible; the new JSON fields are additions. Switch topology (which device sits on which switch port) needs SNMP or LLDP and is not in this release.
