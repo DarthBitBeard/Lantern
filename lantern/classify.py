@@ -1,8 +1,9 @@
 """Guess what kind of device each scanned host is, for the map and the cards.
 
 No network calls. The guess uses what a scan already stored: open ports,
-the SSDP/mDNS identity (see `identify.py`), the hostname, whether the MAC
-is randomized, and whether the address is the scan's gateway. It is
+the SSDP/mDNS identity (see `identify.py`), the hostname, the maker of the
+network card (see `vendors.py`), whether the MAC is randomized, and whether
+the address is the scan's gateway. It is
 computed when a scan is shown, not stored, so better rules apply to old
 scans too. Every result carries a short plain-English reason.
 """
@@ -10,6 +11,8 @@ scans too. Every result carries a short plain-English reason.
 from __future__ import annotations
 
 import re
+
+from . import vendors
 
 KINDS = (
     "router",
@@ -43,6 +46,45 @@ _CAMERA_NAME_RE = re.compile(r"(cam|camera|ipc|nvr|dvr|doorbell|reolink|hikvisio
 _PHONE_NAME_RE = re.compile(r"(iphone|ipad|android|galaxy|pixel|phone)", re.I)
 _PRINTER_NAME_RE = re.compile(r"(printer|laserjet|officejet|deskjet|epson|brother|lexmark|sharp|canon|kyocera|xerox|ricoh)", re.I)
 _ROUTER_NAME_RE = re.compile(r"(router|gateway|firewall|pfsense|opnsense|unifi|edgerouter|mikrotik|ubnt)", re.I)
+
+
+# Makers whose network cards go into one kind of device, matched on the IEEE
+# organization name. Strong hints outrank port-based guesses such as "has
+# file sharing, so a computer"; weak hints only fill in when nothing else
+# fits. Announced services and names still win over both.
+_STRONG_VENDORS = (
+    (re.compile(r"synology|qnap|asustor|terramaster|drobo", re.I), "nas",
+     "Its network card is from {v}, which makes network storage."),
+    (re.compile(r"hikvision|dahua|reolink|axis communications|amcrest|wyze|uniview|hanwha|vivotek|mobotix|arlo|ezviz", re.I),
+     "camera", "Its network card is from {v}, which makes security cameras."),
+    (re.compile(r"brother|lexmark|kyocera|xerox|ricoh|zebra|seiko epson|konica", re.I), "printer",
+     "Its network card is from {v}, which makes printers."),
+    (re.compile(r"ubiquiti|routerboard|mikrotik|meraki|aruba|ruckus|cambium|juniper|fortinet|netgate|eero|cisco", re.I),
+     "network", "Its network card is from {v}, which makes routers, switches, and access points."),
+    (re.compile(r"espressif|tuya|shelly|allterco|itead|signify|philips lighting|lifx|ecobee|nest labs", re.I),
+     "smart_home", "Its network card is from {v}, used in smart plugs, bulbs, and sensors."),
+    (re.compile(r"sonos|roku|bose|denon|harman|sound united", re.I), "media",
+     "Its network card is from {v}, which makes speakers and streaming players."),
+)
+_WEAK_VENDORS = (
+    (re.compile(r"raspberry pi", re.I), "server", "It is a Raspberry Pi, a small computer often used as a home server."),
+    (re.compile(r"^apple\b", re.I), "phone",
+     "An Apple device with no open services, often an iPhone, iPad, or Watch."),
+    (re.compile(r"samsung|xiaomi|oneplus|oppo|vivo mobile|huawei device|motorola mobility|google", re.I), "phone",
+     "Its network card is from {v} and it offers no services, like a phone or tablet."),
+    (re.compile(r"intel|realtek|dell|lenovo|hewlett|hp inc|micro-star|asustek|gigabyte|microsoft|liteon|azurewave", re.I),
+     "computer", "Its network card is from {v}, which mostly goes in PCs and laptops."),
+)
+
+
+def _vendor_hint(device: dict, rules) -> tuple[str, str] | None:
+    found = vendors.lookup(device.get("mac"))
+    if not found:
+        return None
+    for pattern, kind, reason in rules:
+        if pattern.search(found["vendor_name"]):
+            return kind, reason.format(v=found["vendor"])
+    return None
 
 
 def is_randomized_mac(mac: str | None) -> bool:
@@ -88,6 +130,9 @@ def classify(device: dict, gateway_ip: str | None = None, gateway_guessed: bool 
         return "smart_home", "It speaks HomeKit, Matter, MQTT, or runs Home Assistant."
     if _NAS_NAME_RE.search(text):
         return "nas", "Its name or model looks like network storage."
+    strong = _vendor_hint(device, _STRONG_VENDORS)
+    if strong:
+        return strong
     if services & _MEDIA_SERVICES or "mediarenderer" in upnp:
         return "media", "It is a cast, AirPlay, or speaker target."
     if 8096 in ports or 32400 in ports or "mediaserver" in upnp:
@@ -106,6 +151,9 @@ def classify(device: dict, gateway_ip: str | None = None, gateway_guessed: bool 
         return "phone", "Its name or services look like a phone or tablet."
     if 22 in ports:
         return "server", "It accepts SSH logins, like a Linux server or appliance."
+    weak = _vendor_hint(device, _WEAK_VENDORS)
+    if weak and (weak[0] != "phone" or not ports):
+        return weak
     if is_randomized_mac(device.get("mac")) and not ports:
         return "phone", "It uses a private (randomized) Wi-Fi address and offers no services, like a phone."
     if ports and ports <= _WEB_PORTS:
@@ -157,7 +205,7 @@ def likely_gateway(devices: list[dict], network_text: str | None = None) -> str 
 
 
 def annotate_scan(scan: dict | None) -> dict | None:
-    """Add `kind` and `kind_reason` to each device, and fill in the gateway.
+    """Add `kind`, `kind_reason`, `vendor`, and `private_mac` to each device, and fill in the gateway.
 
     Scans saved before schema 5 have no stored gateway; for those the
     likely router is used and `network.gateway_guessed` is true.
@@ -175,6 +223,7 @@ def annotate_scan(scan: dict | None) -> dict | None:
     else:
         network["gateway_guessed"] = False
     scan["network"] = network
+    vendors.annotate_vendors(devices)
     for device in devices:
         kind, reason = classify(device, network["gateway_ip"], network["gateway_guessed"])
         device["kind"] = kind

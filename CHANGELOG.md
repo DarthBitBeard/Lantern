@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **MAC vendors.** Each device gets `vendor`, the maker of its network card, looked up from the first half of its MAC address in a bundled copy of the IEEE public registry (MA-L, MA-M, and MA-S, about 54,000 prefixes, 550 KB compressed). Nothing is looked up online; the table loads once on first use and the longest prefix wins. A randomized address gets no vendor and `private_mac: true`. The vendor shows on device cards and in dashboard search, names unnamed devices in text output, and is in JSON reports, `/api/v1`, and exports (the device CSV adds `vendor` and `private_mac` after the 1.2.0 columns). No schema change: it is worked out from the stored MAC when a scan is shown, so old scans get vendors too.
+- **Better device kinds from the vendor.** A maker of one kind of device is a strong hint (Synology or QNAP: NAS; Hikvision, Reolink, or Axis: camera; Brother, Lexmark, or Xerox: printer; Ubiquiti, MikroTik, or Cisco: network gear; Espressif, Tuya, or Shelly: smart home; Sonos or Roku: media), so a Synology box with file sharing open is a NAS, not a computer. Phone makers and PC network-card makers only fill in when nothing else fits. Announced services and names still win.
+- `tools/update_oui.py` rebuilds the table from IEEE, reproducibly. A monthly workflow opens a pull request when the registry changes; it needs "Allow GitHub Actions to create and approve pull requests" turned on.
+
 ## 1.2.0 - 2026-11-05
 
 Adds a switch map: with managed switches that have SNMP v2c on, Lantern shows which switch and port each device is on. Schema 6: the first 1.2.0 run copies a 1.1.0 database to `.v5.bak` and upgrades it. Everything 1.0 promised stays compatible; the new API, export, and report fields are additions. The switch map was tested against a simulated SNMP agent, not yet against a real switch; please report what your switches return. SNMPv3 is not supported.

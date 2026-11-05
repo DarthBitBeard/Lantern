@@ -1,0 +1,71 @@
+name: Refresh MAC vendor table
+
+# Once a month, rebuild lantern/data/oui.tsv.gz from the IEEE public
+# listing and open a pull request when a prefix was added, removed, or
+# renamed. Lantern itself never downloads this data; it ships in releases.
+# Opening the PR needs "Allow GitHub Actions to create and approve pull
+# requests" (Settings > Actions > General). Without it the job still
+# builds the table and fails at the PR step, so the change is visible.
+
+on:
+  schedule:
+    - cron: "17 6 3 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: oui-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild the table from IEEE
+        run: |
+          cp lantern/data/oui.tsv.gz "$RUNNER_TEMP/old.tsv.gz"
+          python tools/update_oui.py
+
+      - name: Compare (ignoring the fetch-date header)
+        id: compare
+        run: |
+          python - "$RUNNER_TEMP/old.tsv.gz" lantern/data/oui.tsv.gz <<'EOF' >> "$GITHUB_OUTPUT"
+          import gzip, sys
+          def rows(path):
+              lines = gzip.decompress(open(path, "rb").read()).decode().splitlines()
+              return {line for line in lines if not line.startswith("#")}
+          old, new = rows(sys.argv[1]), rows(sys.argv[2])
+          print(f"changed={'true' if old != new else 'false'}")
+          print(f"added={len(new - old)}")
+          print(f"removed={len(old - new)}")
+          EOF
+
+      - name: Open a pull request
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADDED: ${{ steps.compare.outputs.added }}
+          REMOVED: ${{ steps.compare.outputs.removed }}
+        run: |
+          branch="oui-refresh/$(date -u +%Y-%m)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add lantern/data/oui.tsv.gz
+          git commit -m "Refresh the MAC vendor table from the IEEE listing"
+          git push --force origin "$branch"
+          if ! gh pr view "$branch" >/dev/null 2>&1; then
+            gh pr create --head "$branch" --title "Refresh the MAC vendor table ($(date -u +%Y-%m))" \
+              --body "Monthly rebuild of \`lantern/data/oui.tsv.gz\` from the IEEE Registration Authority public listing by \`tools/update_oui.py\`. ${ADDED} line(s) added or changed, ${REMOVED} removed or changed."
+          fi

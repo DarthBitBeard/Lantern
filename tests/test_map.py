@@ -369,10 +369,12 @@ class V1KindTests(unittest.TestCase):
         self._save(demo.demo_scan_1(), demo.DEMO_NETWORK)
         rows = list(csv.reader(io.StringIO(self._export("csv"))))
         header = rows[0]
+        start = header.index("kind")
         self.assertEqual(
-            header[-5:],
+            header[start:start + 5],
             ["kind", "kind_reason", "announced_name", "announced_model", "announced_manufacturer"],
         )
+        self.assertEqual(header[start + 5:], ["vendor", "private_mac"])
         self.assertEqual(header[header.index("finding_count") + 1], "kind")
         printer = next(dict(zip(header, row)) for row in rows[1:] if row[header.index("ip")] == "192.168.1.30")
         self.assertEqual(printer["kind"], "printer")

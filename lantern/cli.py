@@ -861,6 +861,8 @@ def _print_text_scan(scan: dict, diff: dict | None) -> None:
           f"{' (demo data)' if scan['demo'] else ''}")
     for device in devices:
         name = device.get("label") or device.get("hostname") or ""
+        if not name and device.get("vendor"):
+            name = f"({device['vendor']})"
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
         worst = device["findings"][0]["severity"] if device["findings"] else "none"
         print(f"  {device['ip']:<15} {name:<24} ports: {ports}  worst: {worst}")

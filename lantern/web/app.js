@@ -202,7 +202,7 @@ function deviceMatches(device) {
   if (!q) return true;
   const identity = device.identity || {};
   const hay = [device.ip, device.mac, device.hostname, device.label, identity.name,
-    identity.model, identity.manufacturer, KIND_LABELS[device.kind]]
+    identity.model, identity.manufacturer, KIND_LABELS[device.kind], device.vendor]
     .concat(identity.names || [])
     .concat((device.open_ports || []).map((p) => String(p.port)))
     .filter(Boolean).join(" ").toLowerCase();
@@ -230,7 +230,9 @@ function displayName(device) {
 
 function identityLine(device) {
   const identity = device.identity || {};
-  const parts = [identity.manufacturer, identity.model]
+  // The network card's maker, unless the device already named its maker.
+  const maker = identity.manufacturer || device.vendor;
+  const parts = [maker, identity.model]
     .filter((v, i, all) => v && all.indexOf(v) === i);
   if (identity.name && identity.name !== displayName(device)) parts.unshift(identity.name);
   return parts.join(" · ");
