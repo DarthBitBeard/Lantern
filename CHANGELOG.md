@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
+
 ## 1.3.0 - 2026-11-05
 
 Names the maker of each device's network card from its MAC address, using a bundled copy of the IEEE registry; nothing is looked up online. No schema change: a 1.2.0 database opens as is, and older scans get vendors too. Everything 1.0 promised stays compatible; `vendor` and `private_mac` are additions.
