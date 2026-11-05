@@ -6,7 +6,11 @@ import io
 import json
 import re
 import os
+import selectors
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -321,6 +325,157 @@ class PathTests(unittest.TestCase):
                     self.assertEqual(dest.read_bytes(), b"keep")
                 else:
                     self.assertFalse(dest.exists(), name)
+
+    def test_signal_handlers_are_restored_after_success_and_failure(self):
+        if not hasattr(signal, "SIGTERM"):
+            self.skipTest("SIGTERM is not available")
+        seen = []
+
+        def marker(signum, _frame):
+            seen.append(signum)
+
+        previous_term = signal.signal(signal.SIGTERM, marker)
+        previous_int = signal.signal(signal.SIGINT, marker)
+        try:
+            dest = self.root / "ok.json"
+            written = v1.write_export_file(str(dest), b"{}", force=False)
+            self.assertEqual(Path(written).read_bytes(), b"{}")
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(dest.stat().st_mode) & 0o777, 0o600)
+            self.assertIs(signal.getsignal(signal.SIGTERM), marker)
+            self.assertIs(signal.getsignal(signal.SIGINT), marker)
+
+            kept = self.root / "kept.json"
+            kept.write_bytes(b"keep")
+
+            def boom(*args, **kwargs):
+                raise OSError(errno.EIO, "boom")
+
+            with mock.patch("lantern.v1.os.write", boom):
+                with self.assertRaises(v1.ExportPathError):
+                    v1.write_export_file(str(kept), b"next", force=True)
+            self.assertEqual(kept.read_bytes(), b"keep")
+            self.assertEqual(list(self.root.glob(".lantern-export-*")), [])
+            self.assertIs(signal.getsignal(signal.SIGTERM), marker)
+            self.assertIs(signal.getsignal(signal.SIGINT), marker)
+
+            partial = self.root / "partial.json"
+
+            def stop(*args, **kwargs):
+                raise v1.ExportInterrupted(signal.SIGTERM)
+
+            with mock.patch("lantern.v1.os.write", stop):
+                with self.assertRaises(v1.ExportInterrupted):
+                    v1.write_export_file(str(partial), b"new", force=False)
+            self.assertFalse(partial.exists())
+            self.assertEqual(seen, [signal.SIGTERM])
+            self.assertIs(signal.getsignal(signal.SIGTERM), marker)
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
+            signal.signal(signal.SIGINT, previous_int)
+
+    def test_worker_thread_can_write_without_installing_signals(self):
+        dest = self.root / "thread.json"
+        errors = []
+
+        def run():
+            try:
+                v1.write_export_file(str(dest), b"from-thread", force=False)
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(dest.read_bytes(), b"from-thread")
+
+    def test_sigterm_and_sigint_remove_owned_files_only(self):
+        if os.name == "nt":
+            self.skipTest(
+                "Windows TerminateProcess does not run Python signal handlers. "
+                "os.kill(SIGTERM) is that forced kill."
+            )
+        for sig, force in (
+            (signal.SIGTERM, False),
+            (signal.SIGTERM, True),
+            (signal.SIGINT, False),
+            (signal.SIGINT, True),
+        ):
+            with self.subTest(signal=sig, force=force):
+                self._kill_export_child(sig, force)
+
+    def _kill_export_child(self, sig: int, force: bool) -> None:
+        folder = self.root / f"child-{sig}-{int(force)}"
+        folder.mkdir()
+        dest = folder / "out.json"
+        if force:
+            dest.write_bytes(b"keep")
+        sentinel = folder / ".lantern-export-sentinel"
+        sentinel.write_bytes(b"leave-me")
+        script = (
+            "import sys, time\n"
+            "import lantern.v1 as v1\n"
+            "real = v1.os.write\n"
+            "notified = False\n"
+            "def hooked(fd, data):\n"
+            "    global notified\n"
+            "    if not notified:\n"
+            "        notified = True\n"
+            "        sys.stdout.write('ready\\n')\n"
+            "        sys.stdout.flush()\n"
+            "        time.sleep(30)\n"
+            "    return real(fd, data)\n"
+            "v1.os.write = hooked\n"
+            "v1.write_export_file(sys.argv[1], b'payload-bytes', force=sys.argv[2] == '1')\n"
+        )
+        env = os.environ.copy()
+        root = Path(__file__).resolve().parents[1]
+        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, str(dest), "1" if force else "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=folder,
+            env=env,
+        )
+        ready = selectors.DefaultSelector()
+        try:
+            ready.register(proc.stdout, selectors.EVENT_READ)
+            if not ready.select(timeout=15):
+                proc.kill()
+                proc.wait(timeout=5)
+                err = proc.stderr.read().decode("utf-8", "replace")
+                self.fail(err)
+            self.assertEqual(proc.stdout.readline(), b"ready\n")
+            os.kill(proc.pid, sig)
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+            self.fail("export child survived the signal")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+            ready.close()
+        self.assertNotEqual(code, 0)
+        owned = [
+            path for path in folder.glob(".lantern-export-*")
+            if path.name != ".lantern-export-sentinel"
+        ]
+        self.assertEqual(owned, [])
+        self.assertEqual(sentinel.read_bytes(), b"leave-me")
+        if force:
+            self.assertEqual(dest.read_bytes(), b"keep")
+        else:
+            self.assertFalse(dest.exists())
 
 
 class ApiTests(unittest.TestCase):
