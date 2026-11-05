@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -251,12 +252,161 @@ class CliTests(unittest.TestCase):
 
     def test_bad_db_path_and_port(self):
         # A plain file where the parent directory should be: open fails.
-        Path(self.tmp.name, "file.db").write_text("")
+        blocked = Path(self.tmp.name) / "file.db"
+        blocked.write_text("")
+        target = blocked / "x.db"
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(["--db", str(Path(self.tmp.name) / "file.db" / "x.db"), "demo"])
+            code = cli.main(["--db", str(target), "demo"])
         self.assertEqual(code, 2)
-        self.assertIn("Cannot open database", err.getvalue())
+        text = err.getvalue()
+        self.assertIn("Cannot open database", text)
+        self.assertNotIn(str(target), text)
+        self.assertNotIn("file.db", text)
+        self.assertNotIn("x.db", text)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_database_errors_omit_paths_and_raw_details(self):
+        marker = "db-path-marker-9f3a"
+        opened = Path(self.tmp.name) / marker / "secret-open.db"
+        leaked = f"{opened}-from-exception"
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("lantern.cli.connect", side_effect=OSError(f"unable to open {leaked}")):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--db", str(opened), "history"])
+        self.assertEqual(code, 2)
+        text = err.getvalue()
+        self.assertIn("Cannot open database.", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("secret-open.db", text)
+        self.assertNotIn(leaked, text)
+        self.assertNotIn("unable to open", text)
+        self.assertEqual(out.getvalue(), "")
+
+        other = Path(self.tmp.name) / "dispatch-marker-77c1" / "secret-dispatch.db"
+        with mock.patch(
+            "lantern.cli._dispatch",
+            side_effect=sqlite3.DatabaseError(
+                f"database disk image is malformed at {other}"
+            ),
+        ):
+            code, out, err = self.run_cli("history")
+        self.assertEqual(code, 2)
+        self.assertIn("Database error.", err)
+        self.assertNotIn("dispatch-marker-77c1", err)
+        self.assertNotIn("secret-dispatch.db", err)
+        self.assertNotIn("database disk image is malformed", err)
+        self.assertNotIn(str(self.db), err)
+        self.assertNotIn(self.tmp.name, err)
+        self.assertEqual(out, "")
+
+    def test_symlink_and_newer_schema_use_fixed_messages(self):
+        if os.name != "nt" and hasattr(os, "symlink"):
+            marker = "symlink-db-marker-4c2e"
+            folder = Path(self.tmp.name) / marker
+            folder.mkdir()
+            target = folder / "secret-target.db"
+            target.write_bytes(b"keep")
+            link = folder / "secret-link.db"
+            link.symlink_to(target)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--db", str(link), "history"])
+            text = err.getvalue()
+            self.assertEqual(code, 2)
+            self.assertIn("Database path is a symlink. Lantern will not follow it.", text)
+            self.assertNotIn("Cannot open database.", text)
+            self.assertNotIn(marker, text)
+            self.assertNotIn("secret-link.db", text)
+            self.assertNotIn("secret-target.db", text)
+            self.assertNotIn("Traceback", text)
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(target.read_bytes(), b"keep")
+
+        marker = "newer-db-marker-8b11"
+        folder = Path(self.tmp.name) / marker
+        folder.mkdir()
+        db = folder / "secret-newer.db"
+        raw = sqlite3.connect(db)
+        raw.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        raw.execute("INSERT INTO schema_version VALUES (99, 'future')")
+        raw.execute(
+            "CREATE TABLE scans (id INTEGER PRIMARY KEY, started_at TEXT, subnet TEXT, demo INTEGER)"
+        )
+        raw.commit()
+        raw.close()
+        if os.name != "nt":
+            os.chmod(folder, 0o700)
+            os.chmod(db, 0o600)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--db", str(db), "history"])
+        text = err.getvalue()
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "Database schema is newer than this Lantern. Refusing to change it.",
+            text,
+        )
+        self.assertIn("schema 99 vs 6", text)
+        self.assertIn("Upgrade Lantern to open this file.", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("secret-newer.db", text)
+        self.assertNotIn("Traceback", text)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_unreadable_export_directory_is_a_fixed_open_error(self):
+        if os.name == "nt":
+            self.skipTest("mode 000 does not hide a directory on Windows")
+        marker = "unreadable-export-marker-77aa"
+        folder = Path(self.tmp.name) / marker
+        folder.mkdir()
+        db = folder / "l.db"
+        folder.chmod(0)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main([
+                    "--db", str(db), "export", "--what", "devices",
+                ])
+        finally:
+            folder.chmod(0o700)
+        text = err.getvalue()
+        self.assertEqual(code, 2)
+        self.assertIn("Cannot open database.", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("l.db", text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("Permission denied", text)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_corrupt_scan_json_exits_2_for_diff_and_report(self):
+        code, _, err = self.run_cli("demo")
+        self.assertEqual(code, 0, err)
+        raw = sqlite3.connect(self.db)
+        raw.execute("UPDATE devices SET open_ports = '{'")
+        raw.commit()
+        raw.close()
+        for command in (("diff",), ("report",)):
+            code, out, err = self.run_cli(*command)
+            self.assertEqual(code, 2, err)
+            self.assertIn("The saved scan could not be read.", err)
+            self.assertNotIn("Traceback", err)
+            self.assertNotIn(self.tmp.name, err)
+            self.assertNotIn("Expecting", err)
+            self.assertEqual(out, "")
+
+    def test_demo_report_directory_is_a_fixed_error(self):
+        report = Path(self.tmp.name) / "demo-report.html"
+        report.mkdir()
+        code, out, err = self.run_cli("demo")
+        self.assertEqual(code, 2, err)
+        self.assertIn("Could not write the demo report.", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn(self.tmp.name, err)
+        self.assertNotIn("demo-report.html", err)
+        self.assertEqual(out, "")
 
         code, _, err = self.run_cli("web", "--port", "70000")
         self.assertEqual(code, 2)

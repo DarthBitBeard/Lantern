@@ -30,8 +30,10 @@ from lantern.store import (
     scans_to_prune,
     schema_version,
     set_trusted,
+    warn_loose_directory,
     warn_loose_permissions,
     write_private_file,
+    _path_for_warning,
 )
 
 # DDL from Lantern 0.3.0 `connect()`, before `schema_version` existed.
@@ -647,6 +649,9 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             connect(self.path)
         self.assertIn("newer", str(ctx.exception))
+        self.assertIn("schema 99 vs 6", str(ctx.exception))
+        self.assertIn("Upgrade Lantern to open this file.", str(ctx.exception))
+        self.assertNotIn(self.path.name, str(ctx.exception))
         self.assertEqual(list(Path(self.tmp.name).glob("*.bak")), [])
 
         raw = sqlite3.connect(self.path)
@@ -910,6 +915,53 @@ class PrivateFileTests(unittest.TestCase):
         self.assertNotIn(real.name, str(ctx.exception))
         self.assertEqual(real.read_bytes(), b"leave-me")
         self.assertEqual(_mode(real), 0o644)
+
+    def test_loose_permission_warning_strips_controls_and_ansi(self):
+        shown = _path_for_warning(Path("loose\x1b[31m\x07db"))
+        self.assertEqual(shown, "loosedb")
+        self.assertNotIn("\x1b", shown)
+        self.assertNotIn("[31m", shown)
+        self.assertNotIn("\x07", shown)
+        if os.name == "nt":
+            return
+        path = Path(self.tmp.name) / "loose\x1b[31m\x07db"
+        path.write_bytes(b"x")
+        os.chmod(path, 0o644)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            warn_loose_permissions(path)
+        text = buf.getvalue()
+        self.assertIn("loosedb", text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("[31m", text)
+        self.assertNotIn("\x07", text)
+
+    def test_loose_directory_warning_strips_controls_and_ansi(self):
+        raw_name = "dir\x1b[31m\x07loose"
+        path = Path(self.tmp.name) / raw_name
+        buf = io.StringIO()
+        if os.name == "nt":
+            mode = stat.S_IFDIR | 0o755
+            stat_result = os.stat_result((mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            with (
+                mock.patch("lantern.store._posix_modes", return_value=True),
+                mock.patch.object(Path, "stat", return_value=stat_result),
+                mock.patch.object(Path, "resolve", side_effect=OSError("skip")),
+                contextlib.redirect_stderr(buf),
+            ):
+                warn_loose_directory(path)
+        else:
+            path.mkdir()
+            os.chmod(path, 0o755)
+            with contextlib.redirect_stderr(buf):
+                warn_loose_directory(path)
+        text = buf.getvalue()
+        self.assertIn("dirloose", text)
+        self.assertIn("is accessible by group or others", text)
+        self.assertNotIn(raw_name, text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("[31m", text)
+        self.assertNotIn("\x07", text)
 
     def test_warn_loose_permissions_does_not_raise(self):
         buf = io.StringIO()
