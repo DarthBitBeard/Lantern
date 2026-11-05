@@ -82,12 +82,6 @@ let currentScan = null;
 let currentDiff = null;
 let viewingId = null;
 
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
 function formatTime(iso) {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
@@ -143,16 +137,56 @@ function postJson(path, body) {
 
 function describeChange(change) {
   const parts = [];
-  if (change.old_ip && change.old_ip !== change.device.ip) parts.push(`moved from ${esc(change.old_ip)}`);
+  if (change.old_ip && change.old_ip !== change.device.ip) parts.push(`moved from ${change.old_ip}`);
   if (change.opened.length) parts.push(`opened ${change.opened.join(", ")}`);
   if (change.closed.length) parts.push(`closed ${change.closed.join(", ")}`);
-  return `${esc(change.device.ip)}: ${parts.join("; ") || "no change"}`;
+  return `${change.device.ip}: ${parts.join("; ") || "no change"}`;
+}
+
+function node(tag, props, children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value == null || value === false) continue;
+    if (key === "className") el.className = value;
+    else if (key === "text") el.textContent = String(value);
+    else if (key === "disabled") el.disabled = true;
+    else el.setAttribute(key, String(value));
+  }
+  for (const child of children || []) {
+    if (child == null || child === false) continue;
+    el.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return el;
+}
+
+function mount(el, children) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+  for (const child of children) {
+    if (child) el.appendChild(child);
+  }
+}
+
+const BADGE_CLASS = { critical: "critical", high: "high", medium: "medium", low: "low", info: "info" };
+const CRITICALITY_CLASS = { low: "low", medium: "medium", high: "high", critical: "critical" };
+
+function badge(value, allow) {
+  const raw = String(value ?? "");
+  // Own keys only: a value like "constructor" must not reach the class list.
+  const token = Object.prototype.hasOwnProperty.call(allow, raw) ? allow[raw] : "";
+  return node("span", { className: token ? `badge ${token}` : "badge", text: raw });
+}
+
+function stat(value, label, tone) {
+  return node("div", { className: tone ? `stat ${tone}` : "stat" }, [
+    node("b", { text: String(value) }),
+    node("span", { text: label }),
+  ]);
 }
 
 function renderSummary(scan, diff) {
   const el = $("summary");
   if (!scan) {
-    el.innerHTML = "";
+    mount(el, []);
     $("status").textContent = "No scans yet";
     return;
   }
@@ -160,16 +194,24 @@ function renderSummary(scan, diff) {
   const high = scan.devices.filter((d) => worstSeverity(d) === "high").length;
   const unknown = scan.devices.filter((d) => !d.trusted).length;
   const added = diff ? diff.added.length : 0;
-  el.innerHTML = `
-    <div class="stat"><b>${scan.devices.length}</b><span>devices</span></div>
-    <div class="stat ${added ? "warn" : ""}"><b>${added}</b><span>new since previous scan</span></div>
-    <div class="stat ${unknown ? "warn" : ""}"><b>${unknown}</b><span>unknown / untrusted</span></div>
-    <div class="stat ${critical ? "bad" : ""}"><b>${critical}</b><span>critical devices</span></div>
-    <div class="stat ${high ? "warn" : ""}"><b>${high}</b><span>high-risk devices</span></div>`;
-  if (scan.scope_name) el.innerHTML += `<p>Scope: ${esc(scan.scope_name)}</p>`;
+  const cards = [
+    stat(scan.devices.length, "devices"),
+    stat(added, "new since previous scan", added ? "warn" : ""),
+    stat(unknown, "unknown / untrusted", unknown ? "warn" : ""),
+    stat(critical, "critical devices", critical ? "bad" : ""),
+    stat(high, "high-risk devices", high ? "warn" : ""),
+  ];
+  if (scan.scope_name) {
+    cards.push(node("p", {}, ["Scope: ", String(scan.scope_name)]));
+  }
+  mount(el, cards);
   const which = viewingId === null ? "Latest" : `Scan #${scan.id}`;
   const scopeText = scan.scope_name ? ` | ${scan.scope_name}` : "";
   $("status").textContent = `${which} | ${scan.subnet}${scopeText} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}`;
+}
+
+function labeledLine(label, value) {
+  return node("p", {}, [node("strong", { text: label }), " ", value]);
 }
 
 function renderDiff(scan, diff) {
@@ -178,19 +220,21 @@ function renderDiff(scan, diff) {
     el.className = "diff calm";
     const why = scan ? "This is the first saved scan, so there is nothing to compare it with yet."
       : "Run two scans to see what changed. The demo does this for you.";
-    el.innerHTML = `<h2>What changed</h2><p>${why}</p>`;
+    mount(el, [node("h2", { text: "What changed" }), node("p", { text: why })]);
     return;
   }
   const calm = diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0;
   el.className = calm ? "diff calm" : "diff";
-  const added = diff.added.map((d) => esc(d.ip)).join(", ") || "none";
-  const removed = diff.removed.map((d) => esc(d.ip)).join(", ") || "none";
+  const added = diff.added.map((d) => d.ip).join(", ") || "none";
+  const removed = diff.removed.map((d) => d.ip).join(", ") || "none";
   const changedText = diff.changed.map(describeChange).join("; ") || "none";
-  el.innerHTML = `<h2>What changed since the previous scan</h2>
-    <p><strong>New devices:</strong> ${added}</p>
-    <p><strong>Devices gone:</strong> ${removed}</p>
-    <p><strong>Port changes:</strong> ${changedText}</p>
-    ${calm ? "<p>Nothing changed. Good news.</p>" : ""}`;
+  mount(el, [
+    node("h2", { text: "What changed since the previous scan" }),
+    labeledLine("New devices:", added),
+    labeledLine("Devices gone:", removed),
+    labeledLine("Port changes:", changedText),
+    calm ? node("p", { text: "Nothing changed. Good news." }) : null,
+  ]);
 }
 
 function deviceMatches(device) {
@@ -199,10 +243,17 @@ function deviceMatches(device) {
   if (filter === "unknown" && device.trusted) return false;
   if (filter === "trusted" && !device.trusted) return false;
   if (filter === "risky" && !["critical", "high"].includes(worstSeverity(device))) return false;
+  const tag = $("tag-filter").value;
+  const criticality = $("criticality-filter").value;
+  const tags = Array.isArray(device.tags) ? device.tags : [];
+  if (tag && !tags.includes(tag)) return false;
+  if (criticality && device.criticality !== criticality) return false;
   if (!q) return true;
   const identity = device.identity || {};
   const hay = [device.ip, device.mac, device.hostname, device.label, identity.name,
-    identity.model, identity.manufacturer, KIND_LABELS[device.kind], device.vendor]
+    identity.model, identity.manufacturer, KIND_LABELS[device.kind], device.vendor,
+    device.owner, device.location, device.notes, device.criticality]
+    .concat(tags)
     .concat(identity.names || [])
     .concat((device.open_ports || []).map((p) => String(p.port)))
     .filter(Boolean).join(" ").toLowerCase();
@@ -240,71 +291,138 @@ function identityLine(device) {
 
 function switchPortLine(device) {
   const where = device.switch_port;
-  if (!where) return "";
-  const shared = where.shared
-    ? ` (shared with ${esc(Math.max(1, (where.mac_count || 2) - 1))} other address(es): usually Wi-Fi or an unmanaged switch)`
-    : "";
-  return `<p>Switch: ${esc(where.switch_name || where.switch)}, ${esc(where.port)}${shared}</p>`;
+  if (!where) return null;
+  const name = where.switch_name || where.switch || "";
+  let text = `Switch: ${name}, ${where.port || ""}`;
+  if (where.shared) {
+    const others = Math.max(1, (where.mac_count || 2) - 1);
+    text += ` (shared with ${others} other address(es): usually Wi-Fi or an unmanaged switch)`;
+  }
+  return node("p", { text });
 }
 
 function renderDevice(device) {
-  const name = esc(displayName(device));
+  const mac = device.mac || "";
+  const name = displayName(device);
   const kind = KIND_LABELS[device.kind];
   const announced = identityLine(device);
   const worst = worstSeverity(device);
-  const ports = device.open_ports.map((p) =>
-    `<span class="port" ${p.banner ? `title="${esc(p.banner)}"` : ""}>${esc(p.port)}</span>`
-  ).join("") || "<span class='port'>none</span>";
-  const findings = (device.findings || []).map((f) => `
-    <li><span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>
-    <strong> ${esc(f.port)} ${esc(f.service)}:</strong> ${esc(f.title)}
-    <small>${esc(f.fix)}</small></li>`).join("") || "<li>No risky open ports found.</li>";
-  const trustBadge = device.trusted
-    ? `<span class="badge trusted">trusted</span>`
-    : `<span class="badge unknown">unknown</span>`;
-  const mac = device.mac || "";
-  const disabled = mac ? "" : "disabled";
-  const extra = [
-    device.label && device.hostname ? `<p>Hostname: ${esc(device.hostname)}</p>` : "",
-    device.owner ? `<p>Owner: ${esc(device.owner)}</p>` : "",
-    device.location ? `<p>Location: ${esc(device.location)}</p>` : "",
-    device.criticality ? `<p>Criticality: ${esc(device.criticality)}</p>` : "",
-    Array.isArray(device.tags) && device.tags.length
-      ? `<p>Tags: ${device.tags.map((tag) => esc(tag)).join(", ")}</p>`
-      : "",
-    device.notes ? `<p>Notes: ${esc(device.notes)}</p>` : "",
-    switchPortLine(device),
-  ].join("");
-  return `<article class="device ${device.trusted ? "" : "unknown"}">
-    <h2>${name} ${trustBadge}</h2>
-    ${kind ? `<p class="kind" title="${esc(device.kind_reason || "")}">${esc(kind)}${announced ? ` &middot; ${esc(announced)}` : ""}</p>` : ""}
-    <p class="meta">${esc(device.ip)}${mac ? ` &middot; ${esc(mac)}` : ""}${device.hostname ? ` &middot; ${esc(device.hostname)}` : ""}</p>
-    ${extra}
-    ${worst ? `<p>Worst risk: <span class="badge ${esc(worst)}">${esc(worst)}</span></p>` : ""}
-    <div class="ports">${ports}</div>
-    <ul class="findings">${findings}</ul>
-    <div class="trust-row">
-      <input name="label-${esc(mac || device.ip)}" data-label-for="${esc(mac)}" value="${esc(device.label || "")}" maxlength="80" placeholder="Label, e.g. Living room TV" ${disabled} aria-label="Label for ${esc(device.ip)}">
-      <button type="button" class="secondary" data-trust="${esc(mac)}" ${disabled}>Trust</button>
-      <button type="button" class="secondary" data-untrust="${esc(mac)}" ${disabled}>Mark unknown</button>
-    </div>
-    ${mac ? "" : "<p class='hint'>No MAC address, so this device cannot be trusted yet. It is tracked by IP only.</p>"}
-    ${isRandomizedMac(mac) ? "<p class='hint'>This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.</p>" : ""}
-  </article>`;
+  const ports = (device.open_ports || []).map((p) => {
+    const span = node("span", { className: "port", text: String(p.port) });
+    if (p.banner) span.setAttribute("title", String(p.banner));
+    return span;
+  });
+  const findings = (device.findings || []).map((f) => node("li", {}, [
+    badge(f.severity, BADGE_CLASS),
+    node("strong", { text: ` ${f.port} ${f.service || ""}:` }),
+    ` ${f.title || ""}`,
+    node("small", { text: f.fix || "" }),
+  ]));
+  const trust = device.trusted
+    ? node("span", { className: "badge trusted", text: "trusted" })
+    : node("span", { className: "badge unknown", text: "unknown" });
+  const children = [
+    node("h2", {}, [name, " ", trust]),
+  ];
+  if (kind) {
+    const kindText = announced ? `${kind} · ${announced}` : kind;
+    const kindNode = node("p", { className: "kind", text: kindText });
+    if (device.kind_reason) kindNode.setAttribute("title", String(device.kind_reason));
+    children.push(kindNode);
+  }
+  const meta = [device.ip, mac, device.hostname].filter(Boolean).join(" · ");
+  children.push(node("p", { className: "meta", text: meta }));
+  if (device.label && device.hostname) children.push(node("p", { text: `Hostname: ${device.hostname}` }));
+  if (device.owner) children.push(node("p", { text: `Owner: ${device.owner}` }));
+  if (device.location) children.push(node("p", { text: `Location: ${device.location}` }));
+  if (device.criticality) {
+    children.push(node("p", {}, [
+      "Criticality: ",
+      badge(device.criticality, CRITICALITY_CLASS),
+    ]));
+  }
+  if (Array.isArray(device.tags) && device.tags.length) {
+    children.push(node("p", { text: `Tags: ${device.tags.join(", ")}` }));
+  }
+  if (device.notes) children.push(node("p", { text: `Notes: ${device.notes}` }));
+  children.push(switchPortLine(device));
+  if (worst) {
+    children.push(node("p", {}, ["Worst risk: ", badge(worst, BADGE_CLASS)]));
+  }
+  children.push(node("div", { className: "ports" }, ports.length ? ports : [
+    node("span", { className: "port", text: "none" }),
+  ]));
+  children.push(node("ul", { className: "findings" }, findings.length ? findings : [
+    node("li", { text: "No risky open ports found." }),
+  ]));
+  const labelInput = node("input", {
+    name: `label-${mac || device.ip}`,
+    "data-label-for": mac,
+    value: device.label || "",
+    maxlength: "80",
+    placeholder: "Label, e.g. Living room TV",
+    "aria-label": `Label for ${device.ip}`,
+    disabled: !mac,
+  });
+  children.push(node("div", { className: "trust-row" }, [
+    labelInput,
+    node("button", {
+      type: "button", className: "secondary", "data-trust": mac, disabled: !mac, text: "Trust",
+    }),
+    node("button", {
+      type: "button", className: "secondary", "data-untrust": mac, disabled: !mac, text: "Mark unknown",
+    }),
+  ]));
+  if (!mac) {
+    children.push(node("p", {
+      className: "hint",
+      text: "No MAC address, so this device cannot be trusted yet. It is tracked by IP only.",
+    }));
+  }
+  if (isRandomizedMac(mac)) {
+    children.push(node("p", {
+      className: "hint",
+      text: "This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.",
+    }));
+  }
+  return node("article", { className: device.trusted ? "device" : "device unknown" }, children);
+}
+
+function fillTagChoices() {
+  const select = $("tag-filter");
+  const previous = select.value;
+  const tags = new Set();
+  for (const device of (currentScan && currentScan.devices) || []) {
+    for (const tag of device.tags || []) {
+      if (tag) tags.add(String(tag));
+    }
+  }
+  const options = [node("option", { value: "", text: "Any tag" })];
+  for (const tag of [...tags].sort((a, b) => a.localeCompare(b))) {
+    options.push(node("option", { value: tag, text: tag }));
+  }
+  mount(select, options);
+  const stillThere = options.some((option) => option.getAttribute("value") === previous);
+  select.value = stillThere ? previous : "";
 }
 
 function renderDevices() {
   const el = $("devices");
   if (!currentScan) {
-    el.innerHTML = `<div class="empty"><p>No scans yet.</p><p>Run the demo, or run a scan of your own network.</p></div>`;
+    mount(el, [node("div", { className: "empty" }, [
+      node("p", { text: "No scans yet." }),
+      node("p", { text: "Run the demo, or run a scan of your own network." }),
+    ])]);
     return;
   }
   const devices = currentScan.devices.filter(deviceMatches);
   if (!devices.length) {
-    el.innerHTML = `<div class="empty"><p>No devices match this filter.</p></div>`;
+    mount(el, [node("div", { className: "empty" }, [
+      node("p", { text: "No devices match this filter." }),
+    ])]);
     return;
   }
-  el.innerHTML = devices.map(renderDevice).join("");
+  mount(el, devices.map(renderDevice));
   bindDeviceActions(el);
 }
 
@@ -330,6 +448,7 @@ function showScan(scan, diff) {
   currentDiff = diff;
   renderSummary(currentScan, currentDiff);
   renderDiff(currentScan, currentDiff);
+  fillTagChoices();
   renderDevices();
   refreshMapIfShown();
   $("report-link").href = viewingId === null
@@ -356,14 +475,19 @@ async function saveTrust(mac, trusted, btn) {
 }
 
 function historyOption(scan) {
-  const scope = scan.scope_name ? ` ${esc(scan.scope_name)}` : "";
-  return `<option value="${esc(scan.id)}">#${esc(scan.id)} ${esc(formatTime(scan.started_at))}${scope} (${esc(scan.device_count)} devices)${scan.demo ? " demo" : ""}</option>`;
+  const scope = scan.scope_name ? ` ${scan.scope_name}` : "";
+  const demo = scan.demo ? " demo" : "";
+  const label = `#${scan.id} ${formatTime(scan.started_at)}${scope} (${scan.device_count} devices)${demo}`;
+  return node("option", { value: String(scan.id), text: label });
 }
 
 async function loadHistory() {
   const data = await api("/api/scans");
   const select = $("history");
-  select.innerHTML = `<option value="">Latest scan</option>` + data.scans.map(historyOption).join("");
+  mount(select, [
+    node("option", { value: "", text: "Latest scan" }),
+    ...data.scans.map(historyOption),
+  ]);
   select.value = viewingId === null ? "" : String(viewingId);
   if (select.value !== (viewingId === null ? "" : String(viewingId))) {
     // The selected scan no longer exists; fall back to latest.
@@ -494,6 +618,8 @@ $("report-link").addEventListener("click", async (event) => {
 
 $("search").addEventListener("input", () => { renderDevices(); refreshMapIfShown(); });
 $("filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
+$("tag-filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
+$("criticality-filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
 $("history").addEventListener("change", async (event) => {
   try {
     await loadScanById(event.target.value);
@@ -832,13 +958,16 @@ function selectMapSwitch(ip) {
   const up = parent
     ? `Uplink ${s.port_to_parent || "?"} to ${parent.name || parent.ip}, ${s.parent_port || "?"}`
     : (s.port_to_parent ? `Router on ${s.port_to_parent}` : "");
-  panel.innerHTML = `<article class="device">
-    <h2>${esc(s.name || s.ip)} <span class="badge">switch</span></h2>
-    <p class="meta">${esc(s.ip)}</p>
-    ${s.description ? `<p>${esc(s.description)}</p>` : ""}
-    ${up ? `<p>${esc(up)}</p>` : ""}
-    <p class="hint">This switch's management address did not show up in the scan, so it has no device card.</p>
-  </article>`;
+  mount(panel, [node("article", { className: "device" }, [
+    node("h2", {}, [s.name || s.ip, " ", node("span", { className: "badge", text: "switch" })]),
+    node("p", { className: "meta", text: s.ip || "" }),
+    s.description ? node("p", { text: s.description }) : null,
+    up ? node("p", { text: up }) : null,
+    node("p", {
+      className: "hint",
+      text: "This switch's management address did not show up in the scan, so it has no device card.",
+    }),
+  ])]);
 }
 
 function selectMapDevice(key) {
@@ -853,11 +982,10 @@ function selectMapDevice(key) {
 function showMapDetail(device) {
   const panel = $("map-detail");
   if (!device) {
-    panel.innerHTML = `<p class="hint">Select a device on the map to see its details.</p>`;
+    mount(panel, [node("p", { className: "hint", text: "Select a device on the map to see its details." })]);
     return;
   }
-  // renderDevice escapes every field, the same as the Devices tab.
-  panel.innerHTML = renderDevice(device);
+  mount(panel, [renderDevice(device)]);
   bindDeviceActions(panel);
 }
 

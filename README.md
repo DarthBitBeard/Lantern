@@ -137,7 +137,7 @@ Each scope is one private subnet (`subnet`) plus an optional `description`. A sc
 
 A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then tries a short TCP connect (ports 80, 443, 22, 445) on every address that did neither, so a host that blocks ping is still found and the Docker image, which has no `ping`, still discovers hosts. A refused connection counts as alive. It then TCP-connects to the risk ports on each live host, 8 hosts at a time. Expect roughly 15 to 40 seconds for a /24. A host that drops all of those ports and ignores ping is still missed. Without `--subnet`, the dashboard and `lantern scan` use the real prefix of the interface that reaches the network (a /23 is scanned whole), and fall back to the /24 around the address when the OS does not report one or the network is larger than 1024 addresses.
 
-From the dashboard you can also run a real scan or a demo scan, see the diff banner, search and filter devices, label a device and mark it trusted or unknown, browse scan history, and open the HTML report. Trust is stored by MAC address in the same SQLite file, so a trusted label survives later scans.
+From the dashboard you can also run a real scan or a demo scan, see the diff banner, search and filter devices, label a device and mark it trusted or unknown, browse scan history, and open the HTML report. The Devices tab narrows the cards already on the page by tag and by criticality, together with the search box and the trust filter. Those controls do not start a scan and do not write anything. Search also matches owner, location, tags, notes, and criticality. There is still no inventory editor on the dashboard. Trust is stored by MAC address in the same SQLite file, so a trusted label survives later scans.
 
 Run scans from a machine on your home network. A scan from inside a normal Docker container only sees the container network.
 
@@ -340,7 +340,7 @@ What this version does, and what it does not do.
 - **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](SECURITY.md#known-limitations).
 - **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
 - **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
-- **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
+- **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. Hostnames are stored as the device reports them, and the saved HTML report has no Content-Security-Policy of its own. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
 
 ## Versioning and compatibility
 
