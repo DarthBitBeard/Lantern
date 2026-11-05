@@ -1,7 +1,7 @@
 name: Windows package
 
-# Builds lantern.exe (PyInstaller, one file) and the per-user installer
-# (Inno Setup), then installs, runs, and uninstalls it on a clean runner.
+# Builds the portable lantern.exe (PyInstaller, one file), a one-folder
+# build for the per-user installer (Inno Setup), and the installer, then installs, runs, and uninstalls it on a clean runner.
 # The files are kept as workflow artifacts. Nothing is published or
 # released from here, and nothing scans a network.
 
@@ -44,26 +44,39 @@ jobs:
           $version = python -c "import lantern; print(lantern.__version__)"
           "LANTERN_VERSION=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      - name: Freeze lantern.exe
+      - name: Freeze lantern.exe (one file) and the installer's one-folder build
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install --require-hashes -r .github/requirements-pyinstaller.txt
-          python -m PyInstaller --noconfirm --clean --onefile --console --name lantern `
-            --icon "$PWD\packaging\windows\lantern.ico" --collect-data lantern `
-            --distpath build/exe --workpath build/pyi --specpath build/pyi `
+          $common = @('--noconfirm', '--clean', '--console', '--name', 'lantern',
+            '--icon', "$PWD\packaging\windows\lantern.ico", '--collect-data', 'lantern')
+          # Portable single file, attached to releases as lantern-<v>-windows-x64.exe.
+          python -m PyInstaller @common --onefile `
+            --distpath build/exe --workpath build/pyi-onefile --specpath build/pyi-onefile `
             packaging/windows/lantern_launcher.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # One folder (lantern.exe + _internal) for the installer: no
+          # self-extraction to %TEMP% on each run, which antivirus
+          # heuristics often flag.
+          python -m PyInstaller @common --onedir `
+            --distpath build/dir --workpath build/pyi-onedir --specpath build/pyi-onedir `
+            packaging/windows/lantern_launcher.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path build/dir/lantern/_internal)) { throw "one-folder build has no _internal folder" }
 
-      - name: Smoke-test lantern.exe outside the checkout
+      - name: Smoke-test both builds outside the checkout
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = (Resolve-Path build/exe/lantern.exe).Path
+          $exes = @((Resolve-Path build/exe/lantern.exe).Path, (Resolve-Path build/dir/lantern/lantern.exe).Path)
           Set-Location $env:RUNNER_TEMP
-          $out = & $exe --version
-          if ($out -ne "lantern $env:LANTERN_VERSION") { throw "unexpected --version: $out" }
-          & $exe demo --db "$env:RUNNER_TEMP\exe-demo.db" | Out-Null
-          if ($LASTEXITCODE) { throw "demo failed" }
-          if (-not (Test-Path "$env:RUNNER_TEMP\demo-report.html")) { throw "no demo report" }
+          foreach ($exe in $exes) {
+            Remove-Item -ErrorAction SilentlyContinue "$env:RUNNER_TEMP\exe-demo.db*", "$env:RUNNER_TEMP\demo-report.html"
+            $out = & $exe --version
+            if ($out -ne "lantern $env:LANTERN_VERSION") { throw "unexpected --version from ${exe}: $out" }
+            & $exe demo --db "$env:RUNNER_TEMP\exe-demo.db" | Out-Null
+            if ($LASTEXITCODE) { throw "demo failed: $exe" }
+            if (-not (Test-Path "$env:RUNNER_TEMP\demo-report.html")) { throw "no demo report: $exe" }
+          }
 
       - name: Build the installer
         run: |
@@ -73,7 +86,7 @@ jobs:
             "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "Inno Setup 6 is not on this runner image." }
-          & $iscc /Q "/DAppVersion=$env:LANTERN_VERSION" "/DExeDir=$PWD\build\exe" "/DOutDir=$PWD\build\installer" packaging\windows\lantern.iss
+          & $iscc /Q "/DAppVersion=$env:LANTERN_VERSION" "/DAppDir=$PWD\build\dir\lantern" "/DOutDir=$PWD\build\installer" packaging\windows\lantern.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem build/installer
 
@@ -89,6 +102,7 @@ jobs:
           if ($p.ExitCode) { Get-Content "$env:RUNNER_TEMP\install.log"; throw "installer exit $($p.ExitCode)" }
 
           if (-not (Test-Path "$app\lantern.exe")) { throw "lantern.exe not installed to $app" }
+          if (-not (Test-Path "$app\_internal")) { throw "_internal not installed to $app" }
           if (-not (Test-Path $data)) { throw "data folder $data missing" }
           foreach ($name in 'Lantern Dashboard','Lantern Command Prompt','Uninstall Lantern') {
             if (-not (Test-Path "$menu\$name.lnk")) { throw "Start Menu shortcut missing: $name" }
@@ -127,10 +141,9 @@ jobs:
             $scans = Invoke-RestMethod -Headers @{ 'X-Lantern-Token' = $token } http://127.0.0.1:8099/api/scans
             if ($scans.total -lt 2) { throw "expected the demo scans, got $($scans.total)" }
           } finally {
-            # A one-file exe runs as a launcher plus a child started from the
-            # same lantern.exe. Stop both, or the child keeps the file open
-            # and the uninstaller cannot remove it. (Closing the console
-            # window, as a user does, stops both.)
+            # Stop the whole process tree, so nothing keeps a file open
+            # and the uninstaller can remove everything. (Closing the
+            # console window, as a user does, does the same.)
             & taskkill.exe /PID $web.Id /T /F | Out-Null
             for ($i = 0; $i -lt 20 -and (Get-Process lantern -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 250 }
             if (Get-Process lantern -ErrorAction SilentlyContinue) { throw "lantern.exe processes still running" }
@@ -142,6 +155,7 @@ jobs:
           # The uninstaller copies itself to a temp folder and finishes there.
           for ($i = 0; $i -lt 30 -and (Test-Path "$app\lantern.exe"); $i++) { Start-Sleep -Milliseconds 500 }
           if (Test-Path "$app\lantern.exe") { throw "lantern.exe still installed after uninstall" }
+          if (Test-Path "$app\_internal") { throw "_internal left behind after uninstall" }
           if (Test-Path "$menu\Lantern Dashboard.lnk") { throw "Start Menu shortcut left behind" }
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if (($userPath -split ';') -contains $app) { throw "install folder still on the user PATH" }
