@@ -1438,3 +1438,98 @@ class FilterCapTests(unittest.TestCase):
                 v1._stream_json_items(1, [item])
         self.assertEqual(caught.exception.status, 413)
         self.assertEqual(caught.exception.code, "too_large")
+
+
+class FilteredBlobCapTests(unittest.TestCase):
+    """A filtered read refuses oversized blobs before json.loads sees them."""
+
+    def _database(self, devices, tagged_macs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "cap.db"
+        conn = connect(db)
+        try:
+            save_scan(conn, "10.2.0.0/24", devices)
+            from lantern.assets import set_asset
+            for mac in tagged_macs:
+                set_asset(conn, f"mac:{mac}", "mac", tags=["keep"])
+        finally:
+            conn.close()
+        return db
+
+    def _finding(self, title):
+        return [{"port": 80, "service": "s", "severity": "info", "title": title, "fix": ""}]
+
+    def _stored_bytes(self, device):
+        return (
+            len(device["ip"])
+            + len(device.get("mac") or "")
+            + len(device.get("hostname") or "")
+            + len(json.dumps(device.get("open_ports") or []))
+            + len(json.dumps(device.get("findings") or []))
+        )
+
+    def _refuse(self, db, cap):
+        import contextlib
+        from lantern import cli
+
+        seen = []
+        real_loads = json.loads
+
+        def wrapped(text, *args, **kwargs):
+            if isinstance(text, str):
+                seen.append(text)
+            return real_loads(text, *args, **kwargs)
+
+        conn = connect(db)
+        try:
+            with (
+                mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", cap),
+                mock.patch("lantern.v1.json.loads", wrapped),
+            ):
+                with self.assertRaises(v1.V1Error) as caught:
+                    v1.device_rows(conn, {"tag": ["keep"]}, private=False)
+                self.assertEqual(caught.exception.status, 413)
+                self.assertEqual(caught.exception.code, "too_large")
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main([
+                        "--db", str(db), "export", "--what", "devices",
+                        "--format", "json", "--tag", "keep",
+                    ])
+        finally:
+            conn.close()
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertIn("too large", err.getvalue().lower())
+        self.assertEqual(out.getvalue(), "")
+        self.assertNotIn("Traceback", err.getvalue())
+        return seen
+
+    def test_huge_matched_blob_is_refused_before_decode(self):
+        marker = "MATCHED-BLOB-" + ("M" * 4000)
+        mac = "aa:bb:cc:dd:ee:21"
+        device = _device("10.2.0.21", mac, hostname="hit", findings=self._finding(marker))
+        seen = self._refuse(self._database([device], [mac]), cap=500)
+        self.assertFalse(any(marker in text for text in seen))
+
+    def test_huge_excluded_blob_is_refused_before_decode(self):
+        marker = "EXCLUDED-BLOB-" + ("E" * 4000)
+        kept = _device("10.2.0.2", "aa:bb:cc:dd:ee:02", hostname="ok")
+        skipped = _device("10.2.0.9", "aa:bb:cc:dd:ee:09", findings=self._finding(marker))
+        seen = self._refuse(self._database([skipped, kept], [kept["mac"]]), cap=500)
+        self.assertFalse(any(marker in text for text in seen))
+
+    def test_many_matched_rows_stop_before_the_retained_cap(self):
+        marker = "ROW-" + ("R" * 300)
+        devices = []
+        macs = []
+        for host in range(1, 5):
+            mac = f"aa:bb:cc:dd:ee:{host:02x}"
+            macs.append(mac)
+            devices.append(_device(
+                f"10.2.0.{host}", mac, hostname="h", findings=self._finding(marker),
+            ))
+        cap = self._stored_bytes(devices[0]) + 10
+        seen = self._refuse(self._database(devices, macs), cap=cap)
+        decoded = sum(1 for text in seen if marker in text)
+        self.assertLess(decoded, len(devices))

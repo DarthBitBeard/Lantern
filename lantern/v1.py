@@ -612,6 +612,16 @@ def _router_for_scan(conn, scan_id: int, gateway_ip: str | None) -> tuple[str | 
         ).fetchone()
         if seen:
             return gateway_ip, False
+    oversized = conn.execute(
+        """
+        SELECT 1 FROM devices
+        WHERE scan_id = ? AND LENGTH(IFNULL(open_ports, '')) > ?
+        LIMIT 1
+        """,
+        (scan_id, MAX_V1_RESPONSE_BYTES),
+    ).fetchone()
+    if oversized:
+        raise V1Error(413, "too_large")
     best = None
     for ip, ports_json in conn.execute(
         "SELECT ip, open_ports FROM devices WHERE scan_id = ?",
@@ -629,39 +639,98 @@ def _router_for_scan(conn, scan_id: int, gateway_ip: str | None) -> tuple[str | 
     return None, False
 
 
-def _iter_stored_devices(conn, scan_id: int):
-    """One stored device at a time. The caller decides what to keep."""
-    cursor = conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings, identity"
-        " FROM devices WHERE scan_id = ?",
-        (scan_id,),
+def _stored_text_bytes(ip, mac, hostname, label, ports_len, findings_len, identity_len) -> int:
+    """Characters stored for one device, the same units SQLite ``LENGTH`` uses."""
+    return (
+        len(ip or "")
+        + len(mac or "")
+        + len(hostname or "")
+        + len(label or "")
+        + int(ports_len or 0)
+        + int(findings_len or 0)
+        + int(identity_len or 0)
     )
-    for ip, mac, hostname, label, ports_json, findings_json, identity_json in cursor:
-        findings = json.loads(findings_json or "[]")
-        try:
-            ports = json.loads(ports_json or "[]")
-        except ValueError:
-            ports = []
-        try:
-            identity = json.loads(identity_json) if identity_json else None
-        except ValueError:
-            identity = None
-        yield {
-            "ip": ip,
-            "mac": mac,
-            "hostname": hostname,
-            "label": label,
-            "open_ports": ports,
-            "findings": findings if isinstance(findings, list) else [],
-            "identity": identity,
-        }
+
+
+def _device_length_rows(conn, scan_id: int):
+    """Identity columns and JSON lengths. The JSON text itself is not read."""
+    return conn.execute(
+        """
+        SELECT id, ip, mac, hostname, label,
+               LENGTH(IFNULL(open_ports, '')),
+               LENGTH(IFNULL(findings, '')),
+               LENGTH(IFNULL(identity, ''))
+        FROM devices WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchall()
+
+
+def _decode_stored_device(conn, device_id, ip, mac, hostname, label) -> dict:
+    """Read one device's JSON after the caller has accepted its size."""
+    ports_json, findings_json, identity_json = conn.execute(
+        "SELECT open_ports, findings, identity FROM devices WHERE id = ?",
+        (device_id,),
+    ).fetchone()
+    findings = json.loads(findings_json or "[]")
+    try:
+        ports = json.loads(ports_json or "[]")
+    except ValueError:
+        ports = []
+    try:
+        identity = json.loads(identity_json) if identity_json else None
+    except ValueError:
+        identity = None
+    return {
+        "ip": ip,
+        "mac": mac,
+        "hostname": hostname,
+        "label": label,
+        "open_ports": ports,
+        "findings": findings if isinstance(findings, list) else [],
+        "identity": identity,
+    }
+
+
+def _asset_matches(ip, mac, assets: dict, tags: list[str], criticality: str | None) -> bool:
+    """Tag and criticality live on the asset row, not in the device JSON."""
+    try:
+        key, key_type = _device_identity({"ip": ip, "mac": mac})
+    except ValueError:
+        return False
+    asset = assets.get(f"{key_type}:{key}")
+    owned = set(asset["tags"]) if asset else set()
+    crit = asset["criticality"] if asset else None
+    if criticality is not None and crit != criticality:
+        return False
+    return all(tag in owned for tag in tags)
+
+
+def _iter_stored_devices(conn, scan_id: int, accept=None):
+    """One stored device at a time. The caller decides what to keep.
+
+    Each row is measured before its JSON is read. A row over the response
+    cap is a 413 even when ``accept`` would skip it. ``accept(ip, mac, stored)``
+    returns false to skip a row, or raises ``V1Error`` before that row is decoded.
+    """
+    for device_id, ip, mac, hostname, label, ports_len, findings_len, identity_len in _device_length_rows(conn, scan_id):
+        stored = _stored_text_bytes(
+            ip, mac, hostname, label, ports_len, findings_len, identity_len,
+        )
+        if stored > MAX_V1_RESPONSE_BYTES:
+            raise V1Error(413, "too_large")
+        if accept is not None and not accept(ip, mac, stored):
+            continue
+        yield _decode_stored_device(conn, device_id, ip, mac, hostname, label)
 
 
 def _matching_devices(conn, scan: dict, tags: list[str], criticality: str | None, *, private: bool):
     """Devices that match, without retaining the ones that do not.
 
-    More than ``MAX_V1_ROWS`` matches is a 413. The non-matching rows are
-    not kept.
+    The tag and criticality are decided from asset metadata. JSON is decoded
+    only for a match that still fits under the retained-byte cap and the row
+    cap. More than ``MAX_V1_ROWS`` matches, or more than
+    ``MAX_V1_RESPONSE_BYTES`` of stored match text, is a 413.
     """
     network = scan.get("network") or {}
     router, guessed = _router_for_scan(conn, scan["id"], network.get("gateway_ip"))
@@ -670,16 +739,23 @@ def _matching_devices(conn, scan: dict, tags: list[str], criticality: str | None
     trusted = get_trusted(conn)
     raw_matches = []
     shown = []
-    for device in _iter_stored_devices(conn, scan["id"]):
+    retained = 0
+
+    def accept(ip, mac, stored: int) -> bool:
+        nonlocal retained
+        if not _asset_matches(ip, mac, assets, tags, criticality):
+            return False
+        if len(shown) >= MAX_V1_ROWS or retained + stored > MAX_V1_RESPONSE_BYTES:
+            raise V1Error(413, "too_large")
+        retained += stored
+        return True
+
+    for device in _iter_stored_devices(conn, scan["id"], accept):
         _overlay_trust(device, trusted)
         device["kind"], device["kind_reason"] = classify(device, router, guessed)
         item = _device_dict(device, scan, assets, seen, private=private)
-        if not _matches(item, tags, criticality):
-            continue
         raw_matches.append(device)
         shown.append(item)
-        if len(shown) > MAX_V1_ROWS:
-            raise V1Error(413, "too_large")
     order = _sort_devices(shown)
     by_ip = {}
     for device in raw_matches:
@@ -693,8 +769,8 @@ def device_rows(conn, query: dict, *, private: bool) -> tuple[dict, list[dict]]:
 
     With no tag or criticality filter, a scan past the row cap is refused
     before it is loaded. With a filter, a scan past the cap is not loaded
-    whole: only matching devices are kept, and that selection has the same
-    row cap.
+    whole: rows are matched from asset metadata, JSON is decoded only for
+    matches that fit, and that selection keeps the row cap and the 32 MiB cap.
     """
     scan_id = _resolve_scan_id(conn, query)
     tags = _tags(query)
@@ -985,8 +1061,9 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
         tags = _tags(query)
         criticality = _criticality(query)
         # The unfiltered count and stored-text size run before any device is
-        # loaded. A tag or criticality filter skips that refusal; the caps
-        # are then applied to the devices that match, while they are built.
+        # loaded. A tag or criticality filter does not use that whole-scan
+        # refusal. It still refuses a single oversized row before decoding
+        # it, and refuses when the matches would pass the retained-byte cap.
         if (not tags and criticality is None) and _over_unfiltered_scan(conn, scan_id):
             raise V1Error(413, "too_large")
         if fmt == "json":
