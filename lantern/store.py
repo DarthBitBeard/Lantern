@@ -24,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -46,6 +47,10 @@ SCHEMA_VERSION = 6
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 _OTHERS_CAN_READ = stat.S_IRGRP | stat.S_IROTH
+# CSI and OSC sequences. ESC itself is also dropped with the other controls.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+)
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -67,11 +72,27 @@ def _decode_db_text(value: bytes) -> str:
     return value.decode("utf-8", errors="replace")
 
 
+class DatabaseSymlinkError(ValueError):
+    """The database path is a symlink. The message does not include a path."""
+
+
+class NewerSchemaError(ValueError):
+    """The file was written by a newer Lantern. The message does not include a path."""
+
+
+class CorruptScanError(ValueError):
+    """A stored scan row is not valid JSON. The message does not include a path."""
+
+
+_SYMLINK_MESSAGE = "Database path is a symlink. Lantern will not follow it."
+_NEWER_SCHEMA_MESSAGE = (
+    "Database schema is newer than this Lantern. Refusing to change it."
+)
+_CORRUPT_SCAN_MESSAGE = "The saved scan could not be read."
+
+
 def _newer_message(found: int, target: int) -> str:
-    return (
-        f"Database schema version {found} is newer than this Lantern "
-        f"(schema {target}). Refusing to change it. Upgrade Lantern to open this file."
-    )
+    return _NEWER_SCHEMA_MESSAGE
 
 
 def _require_migration_keys(migrations: dict[int, Migration], target: int) -> None:
@@ -121,6 +142,13 @@ def _posix_modes() -> bool:
     return os.name != "nt"
 
 
+def _path_for_warning(path: Path) -> str:
+    """Path text for stderr: no ANSI sequences and no control characters."""
+    from .assets import strip_for_text
+
+    return strip_for_text(_ANSI_RE.sub("", os.fspath(path)))
+
+
 def warn_loose_permissions(path: str | Path) -> None:
     """Warn on stderr when an existing file is group- or world-readable.
 
@@ -154,7 +182,8 @@ def warn_loose_permissions(path: str | Path) -> None:
         _warned_loose.add(key)
     try:
         print(
-            f"Warning: {file_path} is readable by group or others (mode {bits:04o}). "
+            f"Warning: {_path_for_warning(file_path)} is readable by group or others "
+            f"(mode {bits:04o}). "
             "Lantern will not change an existing file. "
             "Other local accounts can read this inventory.",
             file=sys.stderr,
@@ -197,7 +226,8 @@ def warn_loose_directory(path: str | Path) -> None:
         _warned_loose_dirs.add(key)
     try:
         print(
-            f"Warning: {dir_path} is accessible by group or others (mode {bits:04o}). "
+            f"Warning: {_path_for_warning(dir_path)} is accessible by group or others "
+            f"(mode {bits:04o}). "
             "Lantern will not change an existing directory.",
             file=sys.stderr,
         )
@@ -358,9 +388,7 @@ def _refuse_database_symlink(path: Path) -> None:
     The error does not include the link target.
     """
     if path.is_symlink():
-        raise ValueError(
-            f"Database path {path} is a symlink. Lantern will not follow it."
-        )
+        raise DatabaseSymlinkError(_SYMLINK_MESSAGE)
 
 
 def _prepare_database_file(db_path: str | Path) -> None:
@@ -597,7 +625,7 @@ def apply_migrations(
     if current == target:
         return current
     if current > target:
-        raise ValueError(_newer_message(current, target))
+        raise NewerSchemaError(_newer_message(current, target))
 
     source = _persistent_path(db_path)
     if source is not None and (current > 0 or _has_user_tables(conn)):
@@ -607,7 +635,7 @@ def apply_migrations(
     try:
         current = schema_version(conn)
         if current > target:
-            raise ValueError(_newer_message(current, target))
+            raise NewerSchemaError(_newer_message(current, target))
         for version in range(current + 1, target + 1):
             migrations[version](conn)
             _write_schema_version(conn, version)
@@ -724,14 +752,19 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
         "SELECT ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
         (scan_id,),
     ):
+        try:
+            ports = json.loads(open_ports)
+            found = json.loads(findings)
+        except json.JSONDecodeError as exc:
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE) from exc
         devices.append(
             {
                 "ip": ip,
                 "mac": mac,
                 "hostname": hostname,
                 "label": label,
-                "open_ports": json.loads(open_ports),
-                "findings": json.loads(findings),
+                "open_ports": ports,
+                "findings": found,
                 "identity": _load_identity(identity),
             }
         )

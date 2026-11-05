@@ -911,6 +911,21 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(real.read_bytes(), b"leave-me")
         self.assertEqual(_mode(real), 0o644)
 
+    def test_loose_permission_warning_strips_controls_and_ansi(self):
+        name = "loose\x1b[31m\x07db"
+        path = Path(self.tmp.name) / name
+        path.write_bytes(b"x")
+        os.chmod(path, 0o644)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            warn_loose_permissions(path)
+        text = buf.getvalue()
+        self.assertIn("loose", text)
+        self.assertIn("db", text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("[31m", text)
+        self.assertNotIn("\x07", text)
+
     def test_warn_loose_permissions_does_not_raise(self):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):

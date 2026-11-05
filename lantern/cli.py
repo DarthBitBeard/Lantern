@@ -38,6 +38,9 @@ from .scopes import (
     validate_scope_name,
 )
 from .store import (
+    CorruptScanError,
+    DatabaseSymlinkError,
+    NewerSchemaError,
     connect,
     delete_scans,
     list_scans,
@@ -398,13 +401,12 @@ def _err(message: str) -> int:
 def _database_open_message(exc: BaseException) -> str:
     """A fixed open-failure line. The exception text is not printed.
 
-    Two known cases stay distinct so the message is still useful, and
-    neither one repeats the database path.
+    The two special cases are chosen by exception type. Their messages
+    do not include a path.
     """
-    text = str(exc)
-    if "newer than this Lantern" in text:
+    if isinstance(exc, NewerSchemaError):
         return "Database schema is newer than this Lantern. Refusing to change it."
-    if "is a symlink" in text:
+    if isinstance(exc, DatabaseSymlinkError):
         return "Database path is a symlink. Lantern will not follow it."
     return "Cannot open database."
 
@@ -1250,8 +1252,13 @@ def main(argv=None) -> int:
         if web_bind.error:
             return _err(web_bind.error)
 
-    if args.command == "export" and not db_path.is_file():
-        return _err("No database file to export. This command does not create one.")
+    if args.command == "export":
+        try:
+            export_db_missing = not db_path.is_file()
+        except OSError as exc:
+            return _err(_database_open_message(exc))
+        if export_db_missing:
+            return _err("No database file to export. This command does not create one.")
 
     try:
         # connect() creates a missing parent at mode 0700. A mkdir here
@@ -1393,7 +1400,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                         topology=demo.demo_topology(second))
         new, diff = load_scan_with_diff(conn, id2)
         html_path = db_path.parent / "demo-report.html"
-        write_private_file(html_path, to_html(new, diff))
+        try:
+            write_private_file(html_path, to_html(new, diff))
+        except OSError:
+            return _err("Could not write the demo report.")
         print(f"Demo scan 1: {len(demo.demo_scan_1())} devices")
         print(f"Demo scan 2: {len(new['devices'])} devices")
         print(f"New devices: {[d['ip'] for d in diff['added']]}")
@@ -1509,7 +1519,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             scope_name = _one_scope_name(args)
         except ValueError as exc:
             return _err(str(exc))
-        scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scope_name=scope_name))
+        try:
+            scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scope_name=scope_name))
+        except CorruptScanError:
+            return _err("The saved scan could not be read.")
         if scan is None or diff is None:
             label = scope_name or (scan.get("scope_name") if scan else None)
             if label:
@@ -1529,7 +1542,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             scope_name = _one_scope_name(args)
         except ValueError as exc:
             return _err(str(exc))
-        scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, args.scan_id, scope_name=scope_name))
+        try:
+            scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, args.scan_id, scope_name=scope_name))
+        except CorruptScanError:
+            return _err("The saved scan could not be read.")
         if scan is None:
             if args.scan_id is not None:
                 if scope_name:

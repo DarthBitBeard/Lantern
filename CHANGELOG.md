@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Opening a database, or a later database failure, prints `Cannot open database.` or `Database error.` and does not include the file path or the raw database error. A newer schema and a symlink still have their own fixed messages, also without the path. The exit code is still 2.
+- Opening a database, or a later database failure, prints `Cannot open database.` or `Database error.` and does not include the file path or the raw database error. A newer schema and a symlink still have their own fixed messages, chosen by the kind of failure, also without the path. An unreadable export path, a demo report that cannot be written, and a saved scan whose JSON is corrupt exit 2 with a fixed message and no traceback. A loose-permission warning strips control and ANSI characters from the path it prints. The exit code is still 2.
 - A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
 
 ## 1.3.0 - 2026-11-05
