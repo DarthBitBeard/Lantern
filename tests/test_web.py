@@ -43,6 +43,13 @@ def tearDownModule():
     while _OFFLINE_PATCHES:
         _OFFLINE_PATCHES.pop().stop()
 
+# How long a test waits for a dashboard response. A 5 s limit expired on
+# slow Windows runners while a status line was still unread, first on
+# POST /api/demo and later on a plain GET /api/scans. It only bounds how
+# long a broken test hangs, so it is generous. Tests that check the
+# server's own timeouts use their own short socket limits.
+REQUEST_TIMEOUT = 30
+
 _TOKEN_RE = re.compile(r'<meta name="lantern-token" content="([^"]+)"')
 
 
@@ -81,7 +88,7 @@ class WebTests(unittest.TestCase):
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request((base or self.base) + path, method=method, data=data, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
@@ -952,12 +959,8 @@ class LanModeTests(unittest.TestCase):
         hdrs.update(headers or {})
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
-        # POST /api/demo writes two scans. A 5s urlopen timeout expired on a
-        # slow Windows runner while that response status line was still
-        # unread. Other calls in this helper stay at 5s.
-        timeout = 20 if method == "POST" and path.startswith("/api/demo") else 5
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
@@ -1742,7 +1745,7 @@ class LanMethodTests(unittest.TestCase):
             hdrs[webapp.TOKEN_HEADER] = self.token if token is None else token
         req = urllib.request.Request(self.base + "/api/scans", method=method, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
@@ -1803,7 +1806,7 @@ class StrictAuthTests(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, method=method, data=data, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
@@ -1896,14 +1899,14 @@ class StrictAuthTests(unittest.TestCase):
         port = server.server_address[1]
         threading.Thread(target=server.serve_forever, daemon=True).start()
         req = urllib.request.Request(f"http://127.0.0.1:{port}/", method="GET")
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             page = resp.read().decode()
         match = _TOKEN_RE.search(page)
         self.assertIsNotNone(match)
         token = match.group(1)
         self.assertEqual(token, server.RequestHandlerClass.api_token)
         status_req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status", method="GET")
-        with urllib.request.urlopen(status_req, timeout=5) as resp:
+        with urllib.request.urlopen(status_req, timeout=REQUEST_TIMEOUT) as resp:
             self.assertEqual(resp.status, 200)
 
     def test_fragment_handler_keeps_the_token_out_of_the_request(self):
