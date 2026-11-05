@@ -1109,7 +1109,13 @@ class LanternHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/"):
                 self._handle_api_get(parsed.path, query)
             elif parsed.path == "/favicon.ico":
-                self._send_bytes(204, b"", "image/x-icon", cache="max-age=86400")
+                # Browsers ask for this name. The artwork is the SVG, served
+                # with its own type. This redirect stays on this host.
+                self._send_bytes(
+                    302, b"", "text/plain; charset=utf-8",
+                    cache="max-age=86400",
+                    headers={"Location": "/favicon.svg"},
+                )
             else:
                 self._serve_static(parsed.path)
         except ValueError as exc:

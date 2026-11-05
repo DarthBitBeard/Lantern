@@ -56,7 +56,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_dashboard_assets_present(self):
         """pip install / Docker must ship lantern/web, not only .py files."""
-        for name in ("index.html", "styles.css", "app.js"):
+        for name in ("index.html", "styles.css", "app.js", "favicon.svg", "brand-lockup.svg"):
             self.assertTrue((WEB_DIR / name).is_file(), f"missing dashboard asset: {name}")
 
     def test_guess_subnet_private_or_none(self):

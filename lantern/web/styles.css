@@ -2,7 +2,7 @@
   --bg: #0f172a;
   --panel: #1e293b;
   --panel2: #243349;
-  --border: #475569;
+  --border: #94a3b8;
   --divider: #334155;
   --text: #e2e8f0;
   --muted: #94a3b8;
@@ -37,7 +37,8 @@ body[aria-busy="true"] { cursor: progress; }
   background: var(--bg);
   z-index: 1;
 }
-.brand { font-size: 1.4rem; font-weight: 800; letter-spacing: .02em; }
+.brand { display: flex; align-items: center; min-width: 0; }
+.brand-lockup { height: 2.4rem; width: auto; max-width: 100%; }
 .lamp { color: var(--amber); }
 .status { color: var(--muted); font-size: .9rem; }
 main { max-width: 1240px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
@@ -87,6 +88,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .diff p { margin: .25rem 0; overflow-wrap: anywhere; }
 .controls-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
 .controls-row input { flex: 1 1 220px; min-width: 0; }
+.controls-row label { display: flex; align-items: center; gap: .35rem; color: var(--muted); }
 .history-label { color: var(--muted); font-size: .9rem; display: flex; gap: .4rem; align-items: center; }
 .history-label select { max-width: 60vw; }
 .devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 1rem; }

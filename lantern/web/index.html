@@ -7,11 +7,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Lantern</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="lamp" aria-hidden="true">&#9679;</span> Lantern</div>
+  <div class="brand"><img class="brand-lockup" src="brand-lockup.svg" alt="Lantern" width="190" height="60"></div>
   <div id="status" class="status" aria-live="polite">Connecting&hellip;</div>
 </header>
 
@@ -49,13 +50,27 @@
   </nav>
 
   <section class="controls-row" aria-label="Device filters">
-    <input id="search" type="search" placeholder="Search devices, IPs, hostnames, or ports" aria-label="Search devices">
+    <input id="search" type="search" placeholder="Search name, IP, owner, tag, or notes" aria-label="Search devices">
     <select id="filter" aria-label="Filter devices">
       <option value="all">All devices</option>
       <option value="unknown">Unknown only</option>
       <option value="risky">Risky ports only</option>
       <option value="trusted">Trusted only</option>
     </select>
+    <label for="tag-filter">Tag
+      <select id="tag-filter">
+        <option value="">Any tag</option>
+      </select>
+    </label>
+    <label for="criticality-filter">Criticality
+      <select id="criticality-filter">
+        <option value="">Any criticality</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="critical">Critical</option>
+      </select>
+    </label>
     <label class="history-label" for="history">History
       <select id="history"><option value="">Latest scan</option></select>
     </label>
