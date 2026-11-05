@@ -308,3 +308,74 @@ class EngineNetworkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V1KindTests(unittest.TestCase):
+    """/api/v1 devices, diffs, and exports carry kind and identity (1.2.0)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.conn = store.connect(str(Path(tmp.name) / "v1.db"))
+        self.addCleanup(self.conn.close)
+
+    def _save(self, devices, network=None):
+        return store.save_scan(self.conn, demo.DEMO_SUBNET, devices, demo=True, network=network)
+
+    def _export(self, fmt):
+        from lantern import v1
+        body, *_ = v1.render_export(self.conn, {"what": ["devices"], "format": [fmt]}, private=False)
+        return body.decode("utf-8")
+
+    def _by_ip(self, items):
+        return {item["ip"]: item for item in items}
+
+    def test_devices_and_export_agree_on_kind_and_identity(self):
+        from lantern import v1
+        self._save(demo.demo_scan_1(), demo.DEMO_NETWORK)
+        self._save(demo.demo_scan_2(), demo.DEMO_NETWORK)
+        listed = self._by_ip(v1.devices_document(self.conn, {}, private=False)["items"])
+        exported = self._by_ip(json.loads(self._export("json"))["items"])
+        self.assertEqual(listed, exported)
+
+        self.assertEqual(listed["192.168.1.1"]["kind"], "router")
+        self.assertEqual(listed["192.168.1.30"]["kind"], "printer")
+        self.assertTrue(listed["192.168.1.30"]["kind_reason"])
+        printer = listed["192.168.1.30"]["identity"]
+        self.assertEqual(printer["model"], "LaserJet M110")
+        self.assertEqual(set(printer), set(identify.empty_identity()))
+        self.assertIsNone(listed["192.168.1.99"]["identity"])
+
+        diff = v1.diff_document(self.conn, {})
+        self.assertEqual([d["ip"] for d in diff["added"]], ["192.168.1.99"])
+        self.assertEqual(diff["added"][0]["kind"], listed["192.168.1.99"]["kind"])
+
+    def test_guessed_router_matches_between_list_and_streamed_export(self):
+        from lantern import v1
+        # No stored network (as for a scan saved before schema 5).
+        self._save(demo.demo_scan_1())
+        listed = self._by_ip(v1.devices_document(self.conn, {}, private=False)["items"])
+        exported = self._by_ip(json.loads(self._export("json"))["items"])
+        self.assertEqual(
+            {ip: (d["kind"], d["kind_reason"]) for ip, d in listed.items()},
+            {ip: (d["kind"], d["kind_reason"]) for ip, d in exported.items()},
+        )
+        self.assertEqual(listed["192.168.1.1"]["kind"], "router")
+        self.assertIn("router address", listed["192.168.1.1"]["kind_reason"])
+
+    def test_csv_appends_the_new_columns_after_the_1_0_columns(self):
+        import csv
+        import io
+        self._save(demo.demo_scan_1(), demo.DEMO_NETWORK)
+        rows = list(csv.reader(io.StringIO(self._export("csv"))))
+        header = rows[0]
+        self.assertEqual(
+            header[-5:],
+            ["kind", "kind_reason", "announced_name", "announced_model", "announced_manufacturer"],
+        )
+        self.assertEqual(header[header.index("finding_count") + 1], "kind")
+        printer = next(dict(zip(header, row)) for row in rows[1:] if row[header.index("ip")] == "192.168.1.30")
+        self.assertEqual(printer["kind"], "printer")
+        self.assertEqual(printer["announced_name"], "Office Printer")
+        self.assertEqual(printer["announced_model"], "LaserJet M110")
+        self.assertEqual(printer["announced_manufacturer"], "")
