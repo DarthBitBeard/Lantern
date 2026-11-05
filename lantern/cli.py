@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import json
 import os
@@ -16,7 +17,8 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from . import __version__, assets as assetlib, demo, engine
-from .engine import run_scan
+from .classify import annotate_scan
+from .engine import scan_subnet
 from .netutil import is_loopback_host
 from .discovery import (
     MAX_SCAN_HOSTS,
@@ -729,9 +731,10 @@ def _print_text_diff(diff: dict) -> None:
 
 
 def _prepare_report(conn, scan, diff):
-    """Attach current inventory fields for CLI report and diff output."""
+    """Attach current inventory fields and device kinds for CLI report and diff output."""
     assetlib.attach_assets(conn, scan)
     assetlib.attach_assets_to_diff(conn, diff)
+    annotate_scan(scan)
     return scan, diff
 
 
@@ -1211,8 +1214,8 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         return _cmd_asset(args, conn)
 
     if args.command == "demo":
-        save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True)
-        id2 = save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
+        save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True, network=demo.DEMO_NETWORK)
+        id2 = save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True, network=demo.DEMO_NETWORK)
         new, diff = load_scan_with_diff(conn, id2)
         html_path = db_path.parent / "demo-report.html"
         write_private_file(html_path, to_html(new, diff))
@@ -1249,12 +1252,21 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             f"({network.num_addresses} addresses)...",
                             file=sys.stderr,
                         )
+                    local_ip = engine.local_ipv4_in(network)
                     if fresh:
-                        for device in engine.scan_hosts(fresh, DEFAULT_PORTS):
-                            found[device["ip"]] = device
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            pending = pool.submit(engine.discover_identities, network, local_ip)
+                            for device in engine.scan_hosts(fresh, DEFAULT_PORTS):
+                                found[device["ip"]] = device
+                            identities = pending.result()
                         seen_hosts.update(fresh)
+                    else:
+                        identities = engine.discover_identities(network, local_ip)
                     devices = [found[ip] for ip in scope_hosts if ip in found]
-                    scan_id = save_scan(conn, subnet, devices, demo=False, scope_name=scope.name)
+                    info = engine.describe_network(network, devices, identities, local_ip)
+                    scan_id = save_scan(
+                        conn, subnet, devices, demo=False, scope_name=scope.name, network=info,
+                    )
                     ran.append(scope.name)
                     if args.format == "html":
                         scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope.name)
@@ -1269,10 +1281,12 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             subnet = str(network)
             if not args.demo and args.format == "text":
                 print(f"Scanning {subnet} ({network.num_addresses} addresses)...", file=sys.stderr)
-            devices = run_scan(subnet, DEFAULT_PORTS, demo_mode=args.demo)
+            devices, info = scan_subnet(subnet, DEFAULT_PORTS, demo_mode=args.demo)
         except ValueError as exc:
             return _err(str(exc))
-        scan_id = save_scan(conn, subnet, devices, demo=args.demo, scope_name=scope_name)
+        scan_id = save_scan(
+            conn, subnet, devices, demo=args.demo, scope_name=scope_name, network=info,
+        )
         scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scan_id, scope_name=scope_name))
         if args.format == "json":
             print(to_json(scan, diff))

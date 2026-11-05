@@ -17,6 +17,27 @@ from lantern.scopes import MAX_SCOPE_CONFIG_BYTES
 from lantern.store import connect, save_scan
 
 
+
+# Scans in these tests mock ping, ARP, and ports. The map's extra lookups
+# (SSDP/mDNS identities, the OS route table, this machine's address) are
+# stubbed here for the whole module, so no test can send discovery traffic.
+# A test that needs other values patches them again on top.
+_OFFLINE_PATCHES = []
+
+
+def setUpModule():
+    from lantern import engine as _engine
+
+    for name, value in (("discover_identities", {}), ("default_gateways", []), ("local_ipv4_in", None)):
+        patcher = mock.patch.object(_engine, name, return_value=value)
+        patcher.start()
+        _OFFLINE_PATCHES.append(patcher)
+
+
+def tearDownModule():
+    while _OFFLINE_PATCHES:
+        _OFFLINE_PATCHES.pop().stop()
+
 def _device(ip, mac=None):
     return {
         "ip": ip,
@@ -512,7 +533,7 @@ class AssetCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 2, err)
         with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(bogus), "--scope", "Lab-2")
         self.assertEqual(code, 2, err)
         self.assertIn("bogus", err)

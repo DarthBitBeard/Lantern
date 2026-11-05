@@ -16,6 +16,7 @@
   --radius-lg: .75rem;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
@@ -39,7 +40,7 @@ body[aria-busy="true"] { cursor: progress; }
 .brand { font-size: 1.4rem; font-weight: 800; letter-spacing: .02em; }
 .lamp { color: var(--amber); }
 .status { color: var(--muted); font-size: .9rem; }
-main { max-width: 1020px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
+main { max-width: 1240px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
 .controls, .summary, .diff { margin-bottom: 1rem; }
 .controls form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
 .controls label { font-size: .85rem; color: var(--muted); display: block; }
@@ -120,4 +121,59 @@ button:disabled { opacity: .55; cursor: wait; }
 @media (prefers-reduced-motion: no-preference) {
   button, .controls-row a { transition: filter .15s ease; }
   button:not(:disabled):hover, .controls-row a:hover { filter: brightness(1.08); }
+}
+
+/* Card: device kind and what the device announced about itself */
+.device .kind { margin: .25rem 0 0; color: var(--amber); font-size: .85rem; overflow-wrap: anywhere; }
+
+/* Devices / Map tabs */
+.tabs { display: flex; gap: .25rem; margin: 0 0 1rem; border-bottom: 1px solid var(--divider); }
+.tabs button[role="tab"] {
+  background: transparent; color: var(--muted); border: 0; border-bottom: 3px solid transparent;
+  border-radius: 0; padding: .55rem .9rem; font-weight: 700;
+}
+.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--amber); }
+.tabs button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* Map */
+.map-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: 1rem; align-items: start; }
+.map-canvas { background: var(--panel); border-radius: var(--radius-lg); padding: .75rem; min-width: 0; }
+.map-svg { width: 100%; }
+.map-drawing { display: block; width: 100%; height: auto; max-height: 78vh; }
+.map-detail .device { margin: 0; }
+.map-detail > .hint { background: var(--panel); border-radius: var(--radius-lg); padding: 1rem; margin: 0; }
+.map-trunk { stroke: var(--border); stroke-width: 2; }
+.map-link { stroke: var(--divider); stroke-width: 1.2; }
+.map-link.dim { opacity: .25; }
+.map-hub circle { fill: var(--border); }
+.map-hub-label { fill: var(--muted); font-size: 12px; font-weight: 700; }
+.map-node { cursor: pointer; }
+.map-node .map-dot { fill: var(--panel2); stroke-width: 3; }
+.map-node.untrusted .map-dot { stroke-dasharray: 5 3; }
+.map-node.sev-critical .map-dot { stroke: var(--red); fill: #3b1219; }
+.map-node.sev-high .map-dot { stroke: var(--orange); fill: #3a1d0f; }
+.map-node.sev-medium .map-dot { stroke: var(--amber); fill: #3a2f0f; }
+.map-node.sev-low .map-dot { stroke: var(--blue); fill: #0f2a3a; }
+.map-node.sev-info .map-dot, .map-node.sev-none .map-dot { stroke: var(--green); fill: #0f2a1c; }
+.map-virtual .map-dot { stroke: var(--muted); stroke-dasharray: 4 4; }
+.map-node .map-you { fill: none; stroke: var(--amber); stroke-width: 2; }
+.map-glyph { fill: var(--text); font-size: 11px; font-weight: 800; pointer-events: none; }
+.map-label { fill: var(--text); font-size: 11px; pointer-events: none; }
+.map-sublabel { fill: var(--muted); font-size: 10px; pointer-events: none; }
+.map-node.dim { opacity: .25; }
+.map-node.selected .map-dot { stroke-width: 5; filter: brightness(1.4); }
+.map-node:focus { outline: none; }
+.map-node:focus-visible .map-dot { stroke: var(--text); stroke-width: 5; }
+.map-legend { display: flex; flex-wrap: wrap; gap: .4rem 1rem; list-style: none; padding: 0; margin: .5rem 0 0; color: var(--muted); font-size: .85rem; }
+.map-legend li { display: flex; align-items: center; gap: .35rem; }
+.swatch { display: inline-block; width: .9rem; height: .9rem; border-radius: 50%; border: 3px solid var(--muted); }
+.swatch.sev-critical { border-color: var(--red); }
+.swatch.sev-high { border-color: var(--orange); }
+.swatch.sev-medium { border-color: var(--amber); }
+.swatch.sev-low { border-color: var(--blue); }
+.swatch.sev-none { border-color: var(--green); }
+.swatch.untrusted { border-style: dashed; }
+@media (max-width: 900px) {
+  .map-layout { grid-template-columns: minmax(0, 1fr); }
+  .map-drawing { max-height: none; }
 }

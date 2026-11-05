@@ -15,6 +15,27 @@ from unittest import mock
 from lantern import cli, engine
 
 
+
+# Scans in these tests mock ping, ARP, and ports. The map's extra lookups
+# (SSDP/mDNS identities, the OS route table, this machine's address) are
+# stubbed here for the whole module, so no test can send discovery traffic.
+# A test that needs other values patches them again on top.
+_OFFLINE_PATCHES = []
+
+
+def setUpModule():
+    from lantern import engine as _engine
+
+    for name, value in (("discover_identities", {}), ("default_gateways", []), ("local_ipv4_in", None)):
+        patcher = mock.patch.object(_engine, name, return_value=value)
+        patcher.start()
+        _OFFLINE_PATCHES.append(patcher)
+
+
+def tearDownModule():
+    while _OFFLINE_PATCHES:
+        _OFFLINE_PATCHES.pop().stop()
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -329,7 +350,7 @@ class CliTests(unittest.TestCase):
     def test_scan_scope_uses_config_and_does_not_probe(self):
         path = self._write_scopes('[scopes.lab]\nsubnet = "10.9.9.8/24"\ndescription = "bench"\n')
         with mock.patch.object(cli, "guess_subnet", side_effect=AssertionError("should not guess")), \
-                mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+                mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
             code, out, err = self.run_cli("scan", "--config", str(path), "--format", "json")
         self.assertEqual(code, 0, err)
         scan = json.loads(out)
@@ -340,7 +361,7 @@ class CliTests(unittest.TestCase):
 
     def test_scan_scope_refuses_unsafe_config_before_probing(self):
         path = self._write_scopes('[scopes.bad]\nsubnet = "8.8.8.0/24"\n')
-        with mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+        with mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")):
             code, _, err = self.run_cli("scan", "--config", str(path), "--scope", "bad")
         self.assertEqual(code, 2)
         self.assertIn("private", err)
@@ -350,7 +371,7 @@ class CliTests(unittest.TestCase):
             '[scopes.home]\nsubnet = "192.168.4.0/24"\n'
             '[scopes.lab]\nsubnet = "10.4.0.0/24"\n'
         )
-        with mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+        with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "lab", "--format", "json",
             )
@@ -358,7 +379,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(out)["subnet"], "10.4.0.0/24")
         self.assertEqual(run_scan.call_args.args[0], "10.4.0.0/24")
 
-        with mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+        with mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")):
             code, _, err = self.run_cli("scan", "--config", str(path))
             self.assertEqual(code, 2)
             self.assertIn("--scope", err)
@@ -380,7 +401,7 @@ class CliTests(unittest.TestCase):
         previous = os.getcwd()
         os.chdir(self.tmp.name)
         try:
-            with mock.patch.object(cli, "run_scan", return_value=[]) as run_scan:
+            with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
                 code, out, err = self.run_cli("scan", "--scope", "lab", "--format", "json")
         finally:
             os.chdir(previous)
@@ -479,7 +500,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("scope home", out)
         self.assertNotIn("10.50.0.10", out)
 
-        with mock.patch.object(cli, "run_scan", return_value=[self._device("192.168.50.10")]):
+        with mock.patch.object(cli, "scan_subnet", return_value=([self._device("192.168.50.10")], {})):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "home", "--format", "json",
             )
@@ -522,7 +543,7 @@ class CliTests(unittest.TestCase):
             name="wide.toml",
         )
         public = self._write_scopes('[scopes.bad]\nsubnet = "8.8.8.0/24"\n', name="public.toml")
-        with mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+        with mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")):
             code, _, err = self.run_cli("scan", "--config", str(path), "--all", "--scope", "home")
             self.assertEqual(code, 2)
             self.assertIn("not both", err)
@@ -543,7 +564,7 @@ class CliTests(unittest.TestCase):
     def test_all_refuses_non_rfc1918_before_probe(self):
         path = self._write_scopes('[scopes.zero]\nsubnet = "0.0.0.0/24"\n', name="zero.toml")
         with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(path), "--all")
         self.assertEqual(code, 2, err)
         self.assertIn("10.0.0.0/8", err)
@@ -566,7 +587,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(scan_hosts.call_count, 2)
         with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")):
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")):
             code, _, err = self.run_cli("scan", "--config", str(refused), "--all")
         self.assertEqual(code, 2, err)
         self.assertIn("1025 unique addresses", err)
@@ -575,7 +596,7 @@ class CliTests(unittest.TestCase):
     def test_case_variant_scope_flags_scan_once(self):
         path = self._two_scopes()
         with mock.patch.object(engine, "scan_hosts", return_value=[]) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "home", "--scope", "HOME",
             )
@@ -590,15 +611,15 @@ class CliTests(unittest.TestCase):
 
     def test_history_diff_and_report_use_the_stored_scope_spelling(self):
         path = self._write_scopes('[scopes.Lab-2]\nsubnet = "10.50.0.0/24"\n', name="lab2.toml")
-        with mock.patch.object(cli, "run_scan", return_value=[self._device("10.50.0.10")]):
+        with mock.patch.object(cli, "scan_subnet", return_value=([self._device("10.50.0.10")], {})):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "LAB-2", "--format", "json",
             )
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["scope_name"], "Lab-2")
-        with mock.patch.object(cli, "run_scan", return_value=[
+        with mock.patch.object(cli, "scan_subnet", return_value=([
             self._device("10.50.0.10"), self._device("10.50.0.11"),
-        ]):
+        ], {})):
             code, _, err = self.run_cli("scan", "--config", str(path), "--scope", "lab-2")
         self.assertEqual(code, 0, err)
 
@@ -770,7 +791,7 @@ class CliTests(unittest.TestCase):
             name="overlap.toml",
         )
         with mock.patch.object(engine, "scan_hosts", side_effect=AssertionError("probed")) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("probed")) as run_scan:
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("probed")) as run_scan:
             code, _, err = self.run_cli("scan", "--config", str(many), "--all")
             self.assertEqual(code, 2, err)
             self.assertIn("40960 unique addresses", err)
@@ -793,7 +814,7 @@ class CliTests(unittest.TestCase):
         args = ["scan", "--config", str(path)]
         args.extend(["--scope", "home"] * 20)
         with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli(*args)
         self.assertEqual(code, 0, err)
         self.assertIn("Scopes ran: home", out)
@@ -818,7 +839,7 @@ class CliTests(unittest.TestCase):
             return []
 
         with mock.patch.object(engine, "scan_hosts", side_effect=fake) as scan_hosts, \
-                mock.patch.object(cli, "run_scan", side_effect=AssertionError("full scan")):
+                mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("full scan")):
             code, out, err = self.run_cli("scan", "--config", str(path), "--all")
         self.assertEqual(code, 0, err)
         self.assertEqual(scan_hosts.call_count, 1)
@@ -839,10 +860,10 @@ class CliTests(unittest.TestCase):
 
         def fake(subnet, ports=None, demo_mode=False):
             if subnet.startswith("192.168.50."):
-                return home_rounds.pop(0)
-            return [self._device("10.50.0.10")]
+                return home_rounds.pop(0), {}
+            return [self._device("10.50.0.10")], {}
 
-        with mock.patch.object(cli, "run_scan", side_effect=fake):
+        with mock.patch.object(cli, "scan_subnet", side_effect=fake):
             code, out, err = self.run_cli(
                 "scan", "--config", str(path), "--scope", "home", "--format", "json",
             )

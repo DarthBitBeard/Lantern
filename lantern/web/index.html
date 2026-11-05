@@ -43,6 +43,11 @@
 
   <section id="diff" class="diff" aria-label="What changed"></section>
 
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Views">
+    <button type="button" role="tab" id="tab-devices" aria-controls="devices" aria-selected="true">Devices</button>
+    <button type="button" role="tab" id="tab-map" aria-controls="map" aria-selected="false" tabindex="-1">Map</button>
+  </nav>
+
   <section class="controls-row" aria-label="Device filters">
     <input id="search" type="search" placeholder="Search devices, IPs, hostnames, or ports" aria-label="Search devices">
     <select id="filter" aria-label="Filter devices">
@@ -57,7 +62,20 @@
     <a id="report-link" href="/api/report?format=html" target="_blank" rel="noopener">Open HTML report</a>
   </section>
 
-  <section id="devices" class="devices" aria-label="Devices"></section>
+  <section id="devices" class="devices" role="tabpanel" aria-labelledby="tab-devices"></section>
+
+  <section id="map" class="map" role="tabpanel" aria-labelledby="tab-map" hidden>
+    <div class="map-layout">
+      <div class="map-canvas">
+        <div id="map-svg" class="map-svg"></div>
+        <ul id="map-legend" class="map-legend" aria-label="Map legend"></ul>
+        <p class="hint" id="map-note">Lines show what each device reaches through the router, grouped by device type. They are not cables: a scan cannot see switches or which Wi-Fi access point a device uses.</p>
+      </div>
+      <aside id="map-detail" class="map-detail" aria-live="polite">
+        <p class="hint">Select a device on the map to see its details.</p>
+      </aside>
+    </div>
+  </section>
 
   <footer>
     <p id="exposure-note">Local only. No cloud, no accounts, no tracking. Data stays in one SQLite file on this machine. Keep this page on localhost or behind Tailscale. Never expose it to the internet.</p>

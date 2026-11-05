@@ -38,7 +38,7 @@ from pathlib import Path
 # the asset table, which is not tied to a scan id. Schema 4 adds an index on
 # the device table and changes no rows. The package version stays put until a
 # release; the schema version moves only when the tables or indexes change.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -535,11 +535,29 @@ def _migration_4_device_ip_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_5_network_map(conn: sqlite3.Connection) -> None:
+    """Schema 5: what the network map needs.
+
+    `scans` gains the gateway the scan saw (address and MAC) and this
+    machine's own address in the subnet. `devices` gains `identity`, the
+    JSON a device announced over SSDP or mDNS (see `identify.py`). Older
+    rows keep NULL in every new column, and no row is rewritten.
+    """
+    scan_columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+    for column in ("gateway_ip", "gateway_mac", "local_ip"):
+        if column not in scan_columns:
+            conn.execute(f"ALTER TABLE scans ADD COLUMN {column} TEXT")
+    device_columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
+    if "identity" not in device_columns:
+        conn.execute("ALTER TABLE devices ADD COLUMN identity TEXT")
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
     3: _migration_3_assets,
     4: _migration_4_device_ip_index,
+    5: _migration_5_network_map,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -617,21 +635,29 @@ def save_scan(
     devices: list[dict],
     demo: bool = False,
     scope_name: str | None = None,
+    network: dict | None = None,
 ) -> int:
     """Store one scan snapshot and return its id. All-or-nothing.
 
     ``scope_name`` is the named scope that produced the scan, or None for
-    ``--subnet``, auto-detect, and demo scans.
+    ``--subnet``, auto-detect, and demo scans. ``network`` holds what the
+    scan learned about the subnet itself: ``gateway_ip``, ``gateway_mac``,
+    and ``local_ip`` (each may be None).
     """
+    network = network or {}
     with conn:
         cur = conn.execute(
-            "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
-            (_now(), subnet, 1 if demo else 0, scope_name),
+            "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                _now(), subnet, 1 if demo else 0, scope_name,
+                network.get("gateway_ip"), network.get("gateway_mac"), network.get("local_ip"),
+            ),
         )
         scan_id = cur.lastrowid
         conn.executemany(
-            "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings, identity)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     scan_id,
@@ -641,6 +667,7 @@ def save_scan(
                     device.get("label"),
                     json.dumps(device.get("open_ports", [])),
                     json.dumps(device.get("findings", [])),
+                    json.dumps(device["identity"]) if device.get("identity") else None,
                 )
                 for device in devices
             ],
@@ -656,16 +683,28 @@ def ip_sort_key(ip: str):
         return (1, ip)
 
 
+def _load_identity(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
     """Load one scan with its devices, or None if the id is unknown."""
     row = conn.execute(
-        "SELECT started_at, subnet, demo, scope_name FROM scans WHERE id = ?", (scan_id,)
+        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip"
+        " FROM scans WHERE id = ?",
+        (scan_id,),
     ).fetchone()
     if not row:
         return None
     devices = []
-    for ip, mac, hostname, label, open_ports, findings in conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
+    for ip, mac, hostname, label, open_ports, findings, identity in conn.execute(
+        "SELECT ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
         (scan_id,),
     ):
         devices.append(
@@ -676,6 +715,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
                 "label": label,
                 "open_ports": json.loads(open_ports),
                 "findings": json.loads(findings),
+                "identity": _load_identity(identity),
             }
         )
     devices.sort(key=lambda d: ip_sort_key(d["ip"]))
@@ -685,6 +725,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
         "subnet": row[1],
         "demo": bool(row[2]),
         "scope_name": row[3],
+        "network": {"gateway_ip": row[4], "gateway_mac": row[5], "local_ip": row[6]},
         "devices": devices,
     }
 

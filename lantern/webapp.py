@@ -58,6 +58,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
 from . import __version__, assets as assetlib, demo, engine
+from .classify import annotate_scan
 from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .netutil import is_loopback_host
 from .ports import DEFAULT_PORTS
@@ -184,10 +185,10 @@ class _SubnetGuess:
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock."""
     try:
-        devices = engine.run_scan(subnet, DEFAULT_PORTS)
+        devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS)
         conn = connect(db_path)
         try:
-            scan_id = save_scan(conn, subnet, devices, demo=False)
+            scan_id = save_scan(conn, subnet, devices, demo=False, network=network)
         finally:
             conn.close()
         job.finish(scan_id)
@@ -216,6 +217,7 @@ def _load_view(conn, scan_id: int | None = None) -> tuple[dict | None, dict | No
     scan, diff = load_scan_with_diff(conn, scan_id)
     assetlib.attach_assets(conn, scan)
     assetlib.attach_assets_to_diff(conn, diff)
+    annotate_scan(scan)
     return scan, diff
 
 
@@ -1367,8 +1369,8 @@ class LanternHandler(BaseHTTPRequestHandler):
     def _handle_demo(self) -> None:
         conn = self._db()
         try:
-            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True)
-            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True)
+            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True, network=demo.DEMO_NETWORK)
+            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True, network=demo.DEMO_NETWORK)
             scan, diff = _load_view(conn)
             self._send_json(200, {"scan_id": scan["id"], "scan": scan, "diff": diff})
         finally:
