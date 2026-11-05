@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
+- A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. Ctrl-C then exits with status 130 and does not print a traceback. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
+- A tag or criticality filter on devices is applied before the 100000-row and 32 MiB caps. A small selection from a large scan is returned. The same scan with no filter is still refused. The caps still apply to the devices that match, and an over-limit result is a complete error, not a partial body.
 
 ## 1.3.0 - 2026-11-05
 

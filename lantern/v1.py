@@ -497,6 +497,13 @@ def _overlay_trust(device: dict, trusted: dict) -> None:
 
 def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], criticality: str | None):
     """Yield API device dicts one at a time, in export sort order."""
+    if (tags or criticality is not None) and _over_unfiltered_scan(conn, scan_id):
+        scan = _scan_header(conn, scan_id)
+        if scan is None:
+            raise V1Error(404, "not_found")
+        for item in _matching_devices(conn, scan, tags, criticality, private=private):
+            yield item
+        return
     started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip = conn.execute(
         "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip"
         " FROM scans WHERE id = ?",
@@ -561,15 +568,150 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
             yield shown
 
 
-def device_rows(conn, query: dict, *, private: bool) -> tuple[dict, list[dict]]:
-    """Return the scan and every matching device, before pagination."""
-    scan_id = _resolve_scan_id(conn, query)
-    _too_many(_count_devices(conn, scan_id))
-    scan = _load_trusted_scan(conn, scan_id)
+def _over_unfiltered_scan(conn, scan_id: int) -> bool:
+    """True when the whole scan is already past a device cap.
+
+    This is the cheap check used before a scan is loaded. A tag or
+    criticality filter does not use it as a refusal: the caps then apply
+    to the devices that match.
+    """
+    count, raw = _device_blob_stats(conn, scan_id)
+    return count > MAX_V1_ROWS or raw > MAX_V1_RESPONSE_BYTES
+
+
+def _scan_header(conn, scan_id: int) -> dict | None:
+    """Scan fields without its device rows."""
+    row = conn.execute(
+        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip"
+        " FROM scans WHERE id = ?",
+        (scan_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": scan_id,
+        "started_at": row[0],
+        "subnet": row[1],
+        "demo": bool(row[2]),
+        "scope_name": row[3],
+        "network": {"gateway_ip": row[4], "gateway_mac": row[5], "local_ip": row[6]},
+        "devices": [],
+    }
+
+
+def _router_for_scan(conn, scan_id: int, gateway_ip: str | None) -> tuple[str | None, bool]:
+    """Pick the router without keeping every device.
+
+    One row is read at a time and discarded. The stored gateway wins when
+    that address is in the scan.
+    """
+    if gateway_ip:
+        seen = conn.execute(
+            "SELECT 1 FROM devices WHERE scan_id = ? AND ip = ? LIMIT 1",
+            (scan_id, gateway_ip),
+        ).fetchone()
+        if seen:
+            return gateway_ip, False
+    best = None
+    for ip, ports_json in conn.execute(
+        "SELECT ip, open_ports FROM devices WHERE scan_id = ?",
+        (scan_id,),
+    ):
+        try:
+            ports = json.loads(ports_json or "[]")
+        except ValueError:
+            continue
+        key = gateway_score(ip, (port.get("port") for port in ports if isinstance(port, dict)))
+        if key is not None and (best is None or key < best):
+            best = key
+    if best:
+        return best[2], True
+    return None, False
+
+
+def _iter_stored_devices(conn, scan_id: int):
+    """One stored device at a time. The caller decides what to keep."""
+    cursor = conn.execute(
+        "SELECT ip, mac, hostname, label, open_ports, findings, identity"
+        " FROM devices WHERE scan_id = ?",
+        (scan_id,),
+    )
+    for ip, mac, hostname, label, ports_json, findings_json, identity_json in cursor:
+        findings = json.loads(findings_json or "[]")
+        try:
+            ports = json.loads(ports_json or "[]")
+        except ValueError:
+            ports = []
+        try:
+            identity = json.loads(identity_json) if identity_json else None
+        except ValueError:
+            identity = None
+        yield {
+            "ip": ip,
+            "mac": mac,
+            "hostname": hostname,
+            "label": label,
+            "open_ports": ports,
+            "findings": findings if isinstance(findings, list) else [],
+            "identity": identity,
+        }
+
+
+def _matching_devices(conn, scan: dict, tags: list[str], criticality: str | None, *, private: bool):
+    """Devices that match, without retaining the ones that do not.
+
+    More than ``MAX_V1_ROWS`` matches is a 413. The non-matching rows are
+    not kept.
+    """
+    network = scan.get("network") or {}
+    router, guessed = _router_for_scan(conn, scan["id"], network.get("gateway_ip"))
     assets = _assets(conn)
     seen = _seen_bounds(conn)
+    trusted = get_trusted(conn)
+    raw_matches = []
+    shown = []
+    for device in _iter_stored_devices(conn, scan["id"]):
+        _overlay_trust(device, trusted)
+        device["kind"], device["kind_reason"] = classify(device, router, guessed)
+        item = _device_dict(device, scan, assets, seen, private=private)
+        if not _matches(item, tags, criticality):
+            continue
+        raw_matches.append(device)
+        shown.append(item)
+        if len(shown) > MAX_V1_ROWS:
+            raise V1Error(413, "too_large")
+    order = _sort_devices(shown)
+    by_ip = {}
+    for device in raw_matches:
+        by_ip.setdefault(device["ip"], device)
+    scan["devices"] = [by_ip[item["ip"]] for item in order if item["ip"] in by_ip]
+    return order
+
+
+def device_rows(conn, query: dict, *, private: bool) -> tuple[dict, list[dict]]:
+    """Return the scan and every matching device, before pagination.
+
+    With no tag or criticality filter, a scan past the row cap is refused
+    before it is loaded. With a filter, a scan past the cap is not loaded
+    whole: only matching devices are kept, and that selection has the same
+    row cap.
+    """
+    scan_id = _resolve_scan_id(conn, query)
     tags = _tags(query)
     criticality = _criticality(query)
+    filtered = bool(tags) or criticality is not None
+    if filtered and _over_unfiltered_scan(conn, scan_id):
+        scan = _scan_header(conn, scan_id)
+        if scan is None:
+            raise V1Error(404, "not_found")
+        return scan, _matching_devices(conn, scan, tags, criticality, private=private)
+    if not filtered:
+        _too_many(_count_devices(conn, scan_id))
+    scan = _load_trusted_scan(conn, scan_id)
+    if scan is None:
+        raise V1Error(404, "not_found")
+    assets = _assets(conn)
+    seen = _seen_bounds(conn)
     rows = []
     for device in scan["devices"]:
         shown = _device_dict(device, scan, assets, seen, private=private)
@@ -840,8 +982,12 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
         return body, fmt, scan_id, what, fmt
     if what == "devices":
         scan_id = _resolve_scan_id(conn, query)
-        count, raw = _device_blob_stats(conn, scan_id)
-        if count > MAX_V1_ROWS or raw > MAX_V1_RESPONSE_BYTES:
+        tags = _tags(query)
+        criticality = _criticality(query)
+        # The unfiltered count and stored-text size run before any device is
+        # loaded. A tag or criticality filter skips that refusal; the caps
+        # are then applied to the devices that match, while they are built.
+        if (not tags and criticality is None) and _over_unfiltered_scan(conn, scan_id):
             raise V1Error(413, "too_large")
         if fmt == "json":
             body = _stream_json_items(
@@ -1002,11 +1148,14 @@ def _during_export_write():
 def _reraise_termination(signum: int) -> None:
     """Finish a catchable signal after the owned files are gone.
 
-    Handlers are already restored. A callable previous handler runs
-    (Python turns SIGINT into KeyboardInterrupt). The default action is
-    delivered again so the process still stops. SIGKILL, a power loss,
-    and Windows TerminateProcess never enter this function.
+    SIGINT exits with status 130. Python's default SIGINT handler raises
+    KeyboardInterrupt, which prints a traceback, so it is not called.
+    SIGTERM still uses the restored handler, or the default action when
+    that handler is SIG_DFL. SIGKILL, a power loss, and Windows
+    TerminateProcess never enter this function.
     """
+    if signum == getattr(signal, "SIGINT", None):
+        raise SystemExit(130)
     try:
         previous = signal.getsignal(signum)
     except (ValueError, OSError):

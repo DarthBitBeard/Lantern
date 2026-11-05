@@ -391,6 +391,20 @@ class PathTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(dest.read_bytes(), b"from-thread")
 
+    def test_sigint_exits_130_without_a_traceback(self):
+        dest = self.root / "sigint.json"
+
+        def stop(*args, **kwargs):
+            raise v1.ExportInterrupted(signal.SIGINT)
+
+        with mock.patch("lantern.v1.os.write", stop):
+            with self.assertRaises(SystemExit) as caught:
+                v1.write_export_file(str(dest), b"new", force=False)
+        self.assertEqual(caught.exception.code, 130)
+        self.assertFalse(dest.exists())
+        self.assertFalse(issubclass(v1.ExportInterrupted, Exception))
+        self.assertTrue(issubclass(v1.ExportInterrupted, BaseException))
+
     def test_sigterm_and_sigint_remove_owned_files_only(self):
         if os.name == "nt":
             self.skipTest(
@@ -452,6 +466,7 @@ class PathTests(unittest.TestCase):
             self.assertEqual(proc.stdout.readline(), b"ready\n")
             os.kill(proc.pid, sig)
             code = proc.wait(timeout=10)
+            err = proc.stderr.read().decode("utf-8", "replace")
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
@@ -466,6 +481,10 @@ class PathTests(unittest.TestCase):
                 proc.stderr.close()
             ready.close()
         self.assertNotEqual(code, 0)
+        self.assertNotIn("Traceback", err)
+        if sig == signal.SIGINT:
+            self.assertEqual(code, 130)
+            self.assertNotIn("KeyboardInterrupt", err)
         owned = [
             path for path in folder.glob(".lantern-export-*")
             if path.name != ".lantern-export-sentinel"
@@ -1254,3 +1273,168 @@ class CliExportTests(unittest.TestCase):
         self.assertNotIn("Traceback", out)
         self.assertNotIn("secret-boom", err)
         self.assertNotIn("secret-boom", out)
+
+    def test_export_interrupted_is_not_swallowed(self):
+        # Fails if ExportInterrupted becomes an Exception: the CLI catches
+        # Exception and would turn the signal into "Server error."
+        self.assertFalse(issubclass(v1.ExportInterrupted, Exception))
+        self.assertTrue(issubclass(v1.ExportInterrupted, BaseException))
+        conn = connect(self.db)
+        try:
+            save_scan(conn, "192.168.50.0/24", [_device("192.168.50.10")])
+        finally:
+            conn.close()
+        dest = self.root / "out.json"
+        from lantern import cli
+        with mock.patch(
+            "lantern.v1.write_export_file",
+            side_effect=v1.ExportInterrupted(signal.SIGINT),
+        ):
+            with self.assertRaises(v1.ExportInterrupted):
+                cli.main([
+                    "--db", self.db, "export", "--what", "devices",
+                    "--format", "json", "--output", str(dest),
+                ])
+        self.assertFalse(dest.exists())
+
+
+class FilterCapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "test.db"
+        self._plant()
+        self.server = make_server(self.db, port=0)
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        status, body, _ = self._request("/")
+        match = re.search(r'<meta name="lantern-token" content="([^"]+)"', body)
+        self.token = match.group(1)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def _request(self, path, token=None):
+        headers = {}
+        if token:
+            headers["X-Lantern-Token"] = token
+        req = urllib.request.Request(self.base + path, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode(), resp.headers
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode(), exc.headers
+
+    def _plant(self):
+        conn = connect(self.db)
+        try:
+            devices = []
+            for i, host in enumerate((2, 3, 4, 10, 11)):
+                devices.append(_device(
+                    f"192.168.50.{host}",
+                    f"aa:bb:cc:dd:ee:{host:02x}",
+                    hostname="ü" if host == 2 else f"h{host}",
+                ))
+            save_scan(conn, "192.168.50.0/24", devices)
+            from lantern.assets import set_asset
+            set_asset(conn, "mac:aa:bb:cc:dd:ee:02", "mac", tags=["web"], criticality="high")
+            set_asset(conn, "mac:aa:bb:cc:dd:ee:03", "mac", tags=["web"], criticality="low")
+            set_asset(conn, "mac:aa:bb:cc:dd:ee:04", "mac", tags=["other"], criticality="high")
+            set_asset(conn, "mac:aa:bb:cc:dd:ee:0a", "mac", tags=["web"], criticality="high")
+        finally:
+            conn.close()
+
+    def test_a_small_filter_is_not_refused_with_the_rest_of_the_scan(self):
+        with mock.patch.object(v1, "MAX_V1_ROWS", 3):
+            status, body, _ = self._request("/api/v1/devices", token=self.token)
+            self.assertEqual(status, 413, body[:200])
+            self.assertEqual(json.loads(body)["error"]["code"], "too_large")
+            self.assertNotIn("<html", body.lower())
+
+            with mock.patch("lantern.v1.load_scan", side_effect=AssertionError("loaded whole scan")):
+                status, body, _ = self._request(
+                    "/api/v1/devices?tag=web&criticality=high", token=self.token,
+                )
+            self.assertEqual(status, 200, body[:300])
+            data = json.loads(body)
+            self.assertEqual([item["ip"] for item in data["items"]], ["192.168.50.2", "192.168.50.10"])
+            self.assertEqual(data["total"], 2)
+
+            status, body, _ = self._request("/api/v1/devices?tag=web", token=self.token)
+            self.assertEqual(status, 200, body[:300])
+            self.assertEqual(json.loads(body)["total"], 3)
+
+            status, body, _ = self._request("/api/v1/devices?tag=missing", token=self.token)
+            self.assertEqual(status, 200, body[:200])
+            self.assertEqual(json.loads(body)["total"], 0)
+            self.assertEqual(json.loads(body)["items"], [])
+
+            with mock.patch.object(v1, "MAX_V1_ROWS", 2):
+                status, body, _ = self._request("/api/v1/devices?tag=web", token=self.token)
+            self.assertEqual(status, 413, body[:200])
+            self.assertEqual(json.loads(body)["error"]["code"], "too_large")
+            self.assertNotIn("192.168.50.2", body)
+
+            status, body, headers = self._request(
+                "/api/v1/export?what=devices&format=json&tag=web&criticality=high",
+                token=self.token,
+            )
+            self.assertEqual(status, 200, body[:300])
+            self.assertEqual(headers["Content-Length"], str(len(body.encode())))
+            exported = json.loads(body)
+            self.assertEqual([item["ip"] for item in exported["items"]], ["192.168.50.2", "192.168.50.10"])
+
+            status, body, _ = self._request(
+                "/api/v1/export?what=devices&format=json", token=self.token,
+            )
+            self.assertEqual(status, 413, body[:200])
+            self.assertEqual(json.loads(body)["error"]["code"], "too_large")
+
+        from lantern import cli
+        import contextlib
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(v1, "MAX_V1_ROWS", 3):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main([
+                    "--db", str(self.db), "export", "--what", "devices",
+                    "--format", "json", "--tag", "web", "--criticality", "high",
+                ])
+            self.assertEqual(code, 0, err.getvalue())
+            self.assertEqual(
+                [item["ip"] for item in json.loads(out.getvalue())["items"]],
+                ["192.168.50.2", "192.168.50.10"],
+            )
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main([
+                    "--db", str(self.db), "export", "--what", "devices", "--format", "json",
+                ])
+            self.assertEqual(code, 2, err.getvalue())
+            self.assertIn("too large", err.getvalue().lower())
+            self.assertEqual(out.getvalue(), "")
+
+    def test_pagination_still_sorts_the_filtered_page(self):
+        with mock.patch.object(v1, "MAX_V1_ROWS", 4):
+            status, body, _ = self._request(
+                "/api/v1/devices?tag=web&limit=1&offset=1", token=self.token,
+            )
+        self.assertEqual(status, 200, body[:200])
+        data = json.loads(body)
+        self.assertEqual(data["total"], 3)
+        self.assertEqual([item["ip"] for item in data["items"]], ["192.168.50.3"])
+
+    def test_encoded_cap_counts_utf8_bytes(self):
+        item = {"h": "ü"}
+        body = v1._stream_json_items(1, [item])
+        self.assertGreater(len("ü".encode()), 1)
+        self.assertIn(b"\\u00fc", body)
+        with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", len(body) + 20):
+            self.assertEqual(v1._stream_json_items(1, [item]), body)
+        with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", len(body) - 1):
+            with self.assertRaises(v1.V1Error) as caught:
+                v1._stream_json_items(1, [item])
+        self.assertEqual(caught.exception.status, 413)
+        self.assertEqual(caught.exception.code, "too_large")
