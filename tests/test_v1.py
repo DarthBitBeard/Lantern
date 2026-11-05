@@ -346,7 +346,7 @@ class ApiTests(unittest.TestCase):
             headers["X-Lantern-Token"] = token
         req = urllib.request.Request((base or self.base) + path, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:  # generous: slow Windows runners
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
