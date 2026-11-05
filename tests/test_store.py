@@ -32,6 +32,7 @@ from lantern.store import (
     set_trusted,
     warn_loose_permissions,
     write_private_file,
+    _path_for_warning,
 )
 
 # DDL from Lantern 0.3.0 `connect()`, before `schema_version` existed.
@@ -912,16 +913,21 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(_mode(real), 0o644)
 
     def test_loose_permission_warning_strips_controls_and_ansi(self):
-        name = "loose\x1b[31m\x07db"
-        path = Path(self.tmp.name) / name
+        shown = _path_for_warning(Path("loose\x1b[31m\x07db"))
+        self.assertEqual(shown, "loosedb")
+        self.assertNotIn("\x1b", shown)
+        self.assertNotIn("[31m", shown)
+        self.assertNotIn("\x07", shown)
+        if os.name == "nt":
+            return
+        path = Path(self.tmp.name) / "loose\x1b[31m\x07db"
         path.write_bytes(b"x")
         os.chmod(path, 0o644)
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             warn_loose_permissions(path)
         text = buf.getvalue()
-        self.assertIn("loose", text)
-        self.assertIn("db", text)
+        self.assertIn("loosedb", text)
         self.assertNotIn("\x1b", text)
         self.assertNotIn("[31m", text)
         self.assertNotIn("\x07", text)
