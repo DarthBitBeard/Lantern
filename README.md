@@ -156,6 +156,19 @@ python3 -m lantern asset clear aa:bb:cc:dd:ee:ff --field notes
 
 These fields appear in the CLI, in `report`, and in `diff`. The dashboard does not show them yet; that view arrives in M4. Owner, location, and notes are personal data. They are stored only in the local database, which is created mode 0600. The dashboard page does not include them. `/api/v1/devices` and `/api/v1/diffs` return them to a caller with the token. `lantern export` and `/api/v1/export` leave them out unless you ask. They are included in reports and diffs you may share. HTML output escapes them.
 
+## Network map
+
+The dashboard's **Map** tab draws the latest scan, or the one picked in History: the router in the middle, and every device around it grouped by kind (servers, computers, printers, cameras, TVs and speakers, smart-home gear, phones, and so on). Each circle is colored by its worst finding, and a dashed ring means the device is not trusted yet. The computer running Lantern has an amber ring. Click or tab to a device to see its full card beside the map, with the same trust and label controls as the Devices tab. The search box and filter dim everything that does not match.
+
+Where the names come from:
+- **Router:** this computer's default route, when it is inside the scanned subnet. Otherwise the host that answers DNS and has a web page at a router address (`.1` or `.254`), and the legend says it was guessed.
+- **Device kind:** open ports, the hostname, a randomized MAC, and what the device announces about itself. Hover a device to see the reason.
+- **Friendly names and models:** SSDP (UPnP) and mDNS (Bonjour), for example "Living Room TV, Chromecast" or "Lexmark B2338dw". Only the name, model, manufacturer, device type, and service types are kept. Serial numbers and other TXT fields are ignored. Every value is cleaned of control characters and cut to 80 characters.
+
+The lines show what each device reaches through the router, grouped by kind. They are not cables. A scan cannot see switches, and it cannot see which Wi-Fi access point a device uses. Mapping the real switch ports needs the switches themselves to answer (SNMP with LLDP and MAC tables). That needs credentials you would give Lantern, so it is planned as a separate, opt-in feature.
+
+Scans saved before 1.1.0 still draw. They have no stored router or names, so the router is guessed and devices are grouped by ports and hostnames only.
+
 ## Export and `/api/v1`
 
 `lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
@@ -185,7 +198,8 @@ An `--output` file is created mode 0600 on macOS and Linux. On Windows those mod
 - Private RFC1918 subnets only (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and the scope must sit fully inside one of them. Public addresses, loopback, link-local, `0.0.0.0/8`, `240.0.0.0/4`, `192.0.0.0/24`, the TEST-NET blocks, and `198.18.0.0/15` are refused.
 - At most 1024 unique addresses in one run (a /22), normally a /24. Repeated scope names and overlapping ranges do not raise that total.
 - A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused. Several scopes in one run still share the 1024 unique-address cap.
-- No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
+- No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting to a scanned port are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
+- To name devices, each scan also sends one SSDP search (`239.255.255.250:1900`) and one mDNS query (`224.0.0.251:5353`) on the local link, with a multicast TTL of 1, and listens for 2.5 seconds. These are the same discovery messages phones and computers send all the time. When a device answers SSDP with a description URL, Lantern fetches that one XML file only from the device that answered, only over plain HTTP inside the scanned subnet, with a 2-second timeout and a 64 KiB cap, and refuses any document with a DTD. Replies from outside the subnet are ignored.
 - Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
 - The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set, and warns on stderr if that directory is looser than 0700 (for example 0755). For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
 

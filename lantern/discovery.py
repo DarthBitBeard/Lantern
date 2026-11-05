@@ -370,6 +370,84 @@ def arp_table() -> dict[str, str]:
     return table
 
 
+_ROUTE_TOKEN_RE = re.compile(r"\S+")
+
+
+def _ipv4_or_none(text: str) -> str | None:
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        return None
+
+
+def parse_default_gateways(text: str) -> list[str]:
+    """Default-route gateways from routing-table output, in the order listed.
+
+    Understands `route print -4` (Windows, any display language: the
+    columns are numbers), `ip -4 route show default` and `/proc/net/route`
+    (Linux), and `netstat -rn` (macOS and BSD). "On-link" and other
+    non-address gateways are skipped, as is 0.0.0.0.
+    """
+    found: list[str] = []
+
+    def add(candidate: str | None) -> None:
+        if candidate and candidate != "0.0.0.0" and candidate not in found:
+            found.append(candidate)
+
+    for line in text.splitlines():
+        tokens = _ROUTE_TOKEN_RE.findall(line)
+        if not tokens:
+            continue
+        # Linux `ip route`: default via 192.168.1.1 dev eth0 ...
+        if tokens[0] == "default" and "via" in tokens:
+            index = tokens.index("via")
+            if index + 1 < len(tokens):
+                add(_ipv4_or_none(tokens[index + 1]))
+            continue
+        # macOS/BSD `netstat -rn`: default 192.168.1.1 UGScg en0
+        if tokens[0] == "default" and len(tokens) >= 2:
+            add(_ipv4_or_none(tokens[1]))
+            continue
+        # Windows `route print -4`: 0.0.0.0 0.0.0.0 <gateway> <interface> <metric>
+        if len(tokens) >= 3 and tokens[0] == "0.0.0.0" and tokens[1] == "0.0.0.0":
+            add(_ipv4_or_none(tokens[2]))
+            continue
+        # /proc/net/route: Iface Destination Gateway Flags ... in little-endian hex.
+        if len(tokens) >= 3 and tokens[1] == "00000000" and re.fullmatch(r"[0-9A-Fa-f]{8}", tokens[2]):
+            raw = int(tokens[2], 16)
+            add(_ipv4_or_none(socket.inet_ntoa(raw.to_bytes(4, "little"))))
+    return found
+
+
+def default_gateways(system: str | None = None) -> list[str]:
+    """This machine's IPv4 default gateways. Best effort; never raises."""
+    system = (system or platform.system()).lower()
+    if system == "windows":
+        return parse_default_gateways(_run_text(["route", "print", "-4"]))
+    if system == "linux":
+        proc_route = Path("/proc/net/route")
+        try:
+            if proc_route.is_file():
+                found = parse_default_gateways(proc_route.read_text(errors="ignore"))
+                if found:
+                    return found
+        except Exception:
+            pass
+        return parse_default_gateways(_run_text(["ip", "-4", "route", "show", "default"]))
+    return parse_default_gateways(_run_text(["netstat", "-rn", "-f", "inet"]))
+
+
+def local_ipv4_in(network: ipaddress.IPv4Network) -> str | None:
+    """This machine's own address inside `network`, if it has one."""
+    for candidate in _local_ipv4_candidates():
+        try:
+            if ipaddress.IPv4Address(candidate) in network:
+                return candidate
+        except ValueError:
+            continue
+    return None
+
+
 def reverse_hostname(ip: str) -> str | None:
     """Best-effort reverse DNS. Returns None on failure or after a short wait.
 

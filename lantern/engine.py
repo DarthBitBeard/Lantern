@@ -3,7 +3,8 @@
 This lives apart from the command line so the dashboard can use it without
 importing `cli`. Tests that stop a scan from touching the network patch the
 names in this module (`ping_host`, `tcp_alive`, `arp_table`, `scan_host`,
-`reverse_hostname`, or `scan_hosts` itself).
+`reverse_hostname`, `discover_identities`, `default_gateways`, or
+`scan_hosts` itself).
 """
 
 from __future__ import annotations
@@ -12,7 +13,17 @@ import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 
 from . import demo
-from .discovery import arp_table, ping_host, reverse_hostname, tcp_alive, validate_subnet
+from .classify import likely_gateway
+from .discovery import (
+    arp_table,
+    default_gateways,
+    local_ipv4_in,
+    ping_host,
+    reverse_hostname,
+    tcp_alive,
+    validate_subnet,
+)
+from .identify import discover_identities
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .scanner import scan_host
 
@@ -67,13 +78,62 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
         return list(pool.map(lambda ip: scan_one(ip, macs, ports), ordered))
 
 
+def describe_network(network, devices: list[dict], identities: dict | None = None,
+                     local_ip: str | None = None) -> dict:
+    """Attach SSDP/mDNS identities to `devices` and work out the gateway.
+
+    The gateway is this machine's default route when that address is inside
+    `network` (and was seen by the scan). Otherwise it is the scanned host
+    that looks most like a router (see `classify.likely_gateway`), or None.
+    Returns {gateway_ip, gateway_mac, local_ip}.
+    """
+    identities = identities or {}
+    for device in devices:
+        identity = identities.get(device.get("ip"))
+        if identity:
+            device["identity"] = identity
+    seen = {d.get("ip"): d for d in devices}
+    gateway = None
+    try:
+        for candidate in default_gateways():
+            if candidate in seen and ipaddress.IPv4Address(candidate) in network:
+                gateway = candidate
+                break
+    except Exception:
+        gateway = None
+    if gateway is None:
+        gateway = likely_gateway(devices)
+    return {
+        "gateway_ip": gateway,
+        "gateway_mac": (seen.get(gateway) or {}).get("mac") if gateway else None,
+        "local_ip": local_ip,
+    }
+
+
+def scan_subnet(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> tuple[list[dict], dict]:
+    """Scan one private subnet. Returns (devices, network info for `save_scan`).
+
+    SSDP and mDNS run alongside the ping and port sweep, so they add little
+    or no time. Raises ValueError for an invalid or unsafe subnet. Never
+    touches the network in demo mode.
+    """
+    if demo_mode:
+        return demo.demo_scan_1(), dict(demo.DEMO_NETWORK)
+    network = validate_subnet(subnet_text)
+    hosts = [str(ip) for ip in network.hosts()]
+    local_ip = local_ipv4_in(network)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        identities = pool.submit(discover_identities, network, local_ip)
+        devices = scan_hosts(hosts, ports)
+        found = identities.result()
+    return devices, describe_network(network, devices, found, local_ip)
+
+
 def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
     """Discover live hosts on one private subnet and port-scan each.
 
-    Raises ValueError for an invalid or unsafe subnet. Never touches the
-    network in demo mode.
+    The devices only; `scan_subnet` also returns the gateway and this
+    machine's address. Raises ValueError for an invalid or unsafe subnet.
+    Never touches the network in demo mode.
     """
-    if demo_mode:
-        return demo.demo_scan_1()
-    network = validate_subnet(subnet_text)
-    return scan_hosts([str(ip) for ip in network.hosts()], ports)
+    return scan_subnet(subnet_text, ports, demo_mode)[0]

@@ -200,7 +200,10 @@ function deviceMatches(device) {
   if (filter === "trusted" && !device.trusted) return false;
   if (filter === "risky" && !["critical", "high"].includes(worstSeverity(device))) return false;
   if (!q) return true;
-  const hay = [device.ip, device.mac, device.hostname, device.label]
+  const identity = device.identity || {};
+  const hay = [device.ip, device.mac, device.hostname, device.label, identity.name,
+    identity.model, identity.manufacturer, KIND_LABELS[device.kind]]
+    .concat(identity.names || [])
     .concat((device.open_ports || []).map((p) => String(p.port)))
     .filter(Boolean).join(" ").toLowerCase();
   return hay.includes(q);
@@ -214,8 +217,29 @@ function isRandomizedMac(mac) {
   return Boolean(first) && (parseInt(first[1], 16) & 2) === 2;
 }
 
+const KIND_LABELS = {
+  router: "Router", network: "Network gear", computer: "Computer", server: "Server",
+  nas: "Storage (NAS)", printer: "Printer", camera: "Camera", media: "TV / media",
+  smart_home: "Smart home", phone: "Phone / tablet", other: "Other device", unknown: "Unknown",
+};
+
+function displayName(device) {
+  const identity = device.identity || {};
+  return device.label || identity.name || device.hostname || device.ip;
+}
+
+function identityLine(device) {
+  const identity = device.identity || {};
+  const parts = [identity.manufacturer, identity.model]
+    .filter((v, i, all) => v && all.indexOf(v) === i);
+  if (identity.name && identity.name !== displayName(device)) parts.unshift(identity.name);
+  return parts.join(" · ");
+}
+
 function renderDevice(device) {
-  const name = esc(device.label || device.hostname || device.ip);
+  const name = esc(displayName(device));
+  const kind = KIND_LABELS[device.kind];
+  const announced = identityLine(device);
   const worst = worstSeverity(device);
   const ports = device.open_ports.map((p) =>
     `<span class="port" ${p.banner ? `title="${esc(p.banner)}"` : ""}>${esc(p.port)}</span>`
@@ -241,6 +265,7 @@ function renderDevice(device) {
   ].join("");
   return `<article class="device ${device.trusted ? "" : "unknown"}">
     <h2>${name} ${trustBadge}</h2>
+    ${kind ? `<p class="kind" title="${esc(device.kind_reason || "")}">${esc(kind)}${announced ? ` &middot; ${esc(announced)}` : ""}</p>` : ""}
     <p class="meta">${esc(device.ip)}${mac ? ` &middot; ${esc(mac)}` : ""}${device.hostname ? ` &middot; ${esc(device.hostname)}` : ""}</p>
     ${extra}
     ${worst ? `<p>Worst risk: <span class="badge ${esc(worst)}">${esc(worst)}</span></p>` : ""}
@@ -268,6 +293,10 @@ function renderDevices() {
     return;
   }
   el.innerHTML = devices.map(renderDevice).join("");
+  bindDeviceActions(el);
+}
+
+function bindDeviceActions(el) {
   el.querySelectorAll("[data-trust]").forEach((btn) => {
     btn.addEventListener("click", () => saveTrust(btn.dataset.trust, true, btn));
   });
@@ -290,13 +319,17 @@ function showScan(scan, diff) {
   renderSummary(currentScan, currentDiff);
   renderDiff(currentScan, currentDiff);
   renderDevices();
+  refreshMapIfShown();
   $("report-link").href = viewingId === null
     ? "/api/report?format=html"
     : `/api/report?format=html&scan_id=${encodeURIComponent(viewingId)}`;
 }
 
 async function saveTrust(mac, trusted, btn) {
-  const input = document.querySelector(`[data-label-for="${CSS.escape(mac)}"]`);
+  // The same device can be on a card and in the map's detail panel. Use the
+  // label box next to the button that was pressed.
+  const card = btn.closest("article");
+  const input = (card || document).querySelector(`[data-label-for="${CSS.escape(mac)}"]`);
   const label = input ? input.value.trim() : "";
   btn.disabled = true;
   try {
@@ -447,8 +480,8 @@ $("report-link").addEventListener("click", async (event) => {
   }
 });
 
-$("search").addEventListener("input", renderDevices);
-$("filter").addEventListener("change", renderDevices);
+$("search").addEventListener("input", () => { renderDevices(); refreshMapIfShown(); });
+$("filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
 $("history").addEventListener("change", async (event) => {
   try {
     await loadScanById(event.target.value);
@@ -457,6 +490,258 @@ $("history").addEventListener("change", async (event) => {
     setMessage(err.message, true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Map tab: the router in the middle, devices grouped by kind around it.
+// Built with DOM calls and textContent only, so no device-supplied text is
+// ever parsed as markup. Lines mean "reached through the router", not cables.
+// ---------------------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const MAP_KIND_ORDER = ["network", "server", "nas", "computer", "phone", "media",
+  "smart_home", "camera", "printer", "other", "unknown"];
+const MAP_GLYPH = {
+  router: "R", network: "N", computer: "PC", server: "SV", nas: "NAS", printer: "PR",
+  camera: "CAM", media: "TV", smart_home: "IoT", phone: "PH", other: "?", unknown: "?",
+};
+let mapSelected = null;
+
+function svgEl(name, attrs, text) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attrs || {})) el.setAttribute(key, String(value));
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function shortText(value, max) {
+  const text = String(value || "");
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function deviceKey(device) {
+  return device.mac || device.ip;
+}
+
+function mapLayout(devices, gatewayIp) {
+  const router = devices.find((d) => d.ip === gatewayIp) || null;
+  const others = devices.filter((d) => d !== router);
+  const known = new Set(MAP_KIND_ORDER);
+  const kindOf = (d) => (known.has(d.kind) ? d.kind : (d.kind ? "other" : "unknown"));
+  const groups = MAP_KIND_ORDER
+    .map((kind) => ({ kind, items: others.filter((d) => kindOf(d) === kind) }))
+    .filter((g) => g.items.length);
+  const total = Math.max(1, others.length);
+  const hubRadius = 120;
+  const ringStart = 230;
+  const ringGap = 92; // node plus its two label lines
+  const nodeGap = 104; // arc length between neighbours: room for a 20-character label
+  const minSpan = groups.length > 1 ? 0.35 : Math.PI * 2;
+  // Give small groups a minimum wedge, then scale everything back to a circle.
+  const raw = groups.map((g) => Math.max((g.items.length / total) * Math.PI * 2, minSpan));
+  const scale = (Math.PI * 2) / raw.reduce((a, b) => a + b, 0);
+  const placed = [];
+  const hubs = [];
+  let angle = -Math.PI / 2;
+  let maxRadius = ringStart;
+  groups.forEach((group, gi) => {
+    const span = raw[gi] * scale;
+    const mid = angle + span / 2;
+    hubs.push({ kind: group.kind, count: group.items.length,
+      x: Math.cos(mid) * hubRadius, y: Math.sin(mid) * hubRadius, angle: mid });
+    let index = 0;
+    let ring = 0;
+    while (index < group.items.length) {
+      const radius = ringStart + ring * ringGap;
+      const fit = Math.max(1, Math.floor((span * radius) / nodeGap));
+      const row = group.items.slice(index, index + fit);
+      // Odd rings sit half a slot over, so labels do not stack on the ring inside.
+      const shift = ring % 2 ? 0.5 : 0;
+      row.forEach((device, i) => {
+        const slot = Math.min(row.length, fit);
+        const a = row.length === 1 && !shift ? mid : angle + span * ((i + 0.5 + shift) / (slot + shift));
+        placed.push({ device, kind: group.kind, x: Math.cos(a) * radius, y: Math.sin(a) * radius, hub: gi });
+      });
+      maxRadius = Math.max(maxRadius, radius);
+      index += row.length;
+      ring += 1;
+    }
+    angle += span;
+  });
+  return { router, hubs, placed, radius: maxRadius + 70 };
+}
+
+function mapNode(device, x, y, kind, network) {
+  const worst = worstSeverity(device) || "none";
+  const isRouter = kind === "router";
+  const isLocal = Boolean(network.local_ip) && device.ip === network.local_ip;
+  const classes = ["map-node", `sev-${worst}`, device.trusted ? "trusted" : "untrusted"];
+  if (!deviceMatches(device)) classes.push("dim");
+  if (mapSelected === deviceKey(device)) classes.push("selected");
+  const label = displayName(device);
+  const g = svgEl("g", {
+    class: classes.join(" "), transform: `translate(${x.toFixed(1)} ${y.toFixed(1)})`,
+    tabindex: 0, role: "button",
+    "aria-label": `${KIND_LABELS[device.kind] || "Device"} ${label} ${device.ip}, worst risk ${worst}`,
+  });
+  g.dataset.key = deviceKey(device);
+  const r = isRouter ? 30 : 20;
+  if (isLocal) g.appendChild(svgEl("circle", { class: "map-you", r: r + 7 }));
+  g.appendChild(svgEl("circle", { class: "map-dot", r }));
+  g.appendChild(svgEl("text", { class: "map-glyph", "text-anchor": "middle", dy: "0.35em" },
+    MAP_GLYPH[isRouter ? "router" : (device.kind || "unknown")] || "?"));
+  g.appendChild(svgEl("text", { class: "map-label", "text-anchor": "middle", y: r + 15 }, shortText(label, 20)));
+  if (isLocal) {
+    g.appendChild(svgEl("text", { class: "map-sublabel", "text-anchor": "middle", y: r + 28 }, "this computer"));
+  } else if (label !== device.ip) {
+    g.appendChild(svgEl("text", { class: "map-sublabel", "text-anchor": "middle", y: r + 28 }, device.ip));
+  }
+  const reason = device.kind_reason ? ` - ${device.kind_reason}` : "";
+  g.appendChild(svgEl("title", {}, `${label} (${device.ip})${reason}`));
+  return g;
+}
+
+// Draw only while the Map tab is open; showTab draws it when it opens.
+function refreshMapIfShown() {
+  if (!$("map").hidden) renderMap();
+}
+
+function renderMap() {
+  const holder = $("map-svg");
+  if (!holder) return;
+  holder.textContent = "";
+  $("map-legend").textContent = "";
+  if (!currentScan || !currentScan.devices.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = currentScan ? "This scan found no devices." : "No scans yet. Run the demo or a scan to draw the map.";
+    holder.appendChild(p);
+    showMapDetail(null);
+    return;
+  }
+  const network = currentScan.network || {};
+  const layout = mapLayout(currentScan.devices, network.gateway_ip);
+  const size = layout.radius * 2;
+  const svg = svgEl("svg", {
+    viewBox: `${-layout.radius} ${-layout.radius} ${size} ${size}`,
+    class: "map-drawing", role: "group",
+    "aria-label": `Network map of ${currentScan.subnet}, ${currentScan.devices.length} devices`,
+  });
+  const lines = svgEl("g", { class: "map-lines" });
+  const nodes = svgEl("g", { class: "map-nodes" });
+  svg.append(lines, nodes);
+
+  for (const hub of layout.hubs) {
+    lines.appendChild(svgEl("line", { class: "map-trunk", x1: 0, y1: 0, x2: hub.x.toFixed(1), y2: hub.y.toFixed(1) }));
+  }
+  for (const item of layout.placed) {
+    const hub = layout.hubs[item.hub];
+    const cls = deviceMatches(item.device) ? "map-link" : "map-link dim";
+    lines.appendChild(svgEl("line", {
+      class: cls, x1: hub.x.toFixed(1), y1: hub.y.toFixed(1), x2: item.x.toFixed(1), y2: item.y.toFixed(1),
+    }));
+  }
+  for (const hub of layout.hubs) {
+    const g = svgEl("g", { class: "map-hub", transform: `translate(${hub.x.toFixed(1)} ${hub.y.toFixed(1)})` });
+    g.appendChild(svgEl("circle", { r: 6 }));
+    const cos = Math.cos(hub.angle);
+    const anchor = cos < -0.3 ? "end" : (cos > 0.3 ? "start" : "middle");
+    const dx = anchor === "end" ? -10 : (anchor === "start" ? 10 : 0);
+    const dy = anchor === "middle" ? (Math.sin(hub.angle) < 0 ? -12 : 20) : 4;
+    g.appendChild(svgEl("text", { class: "map-hub-label", "text-anchor": anchor, x: dx, y: dy },
+      `${KIND_LABELS[hub.kind] || hub.kind} (${hub.count})`));
+    nodes.appendChild(g);
+  }
+  if (layout.router) {
+    nodes.appendChild(mapNode(layout.router, 0, 0, "router", network));
+  } else {
+    const g = svgEl("g", { class: "map-node map-virtual" });
+    g.appendChild(svgEl("circle", { class: "map-dot", r: 30 }));
+    g.appendChild(svgEl("text", { class: "map-glyph", "text-anchor": "middle", dy: "0.35em" }, "?"));
+    g.appendChild(svgEl("text", { class: "map-label", "text-anchor": "middle", y: 46 }, "Router not found"));
+    g.appendChild(svgEl("text", { class: "map-sublabel", "text-anchor": "middle", y: 59 }, currentScan.subnet));
+    nodes.appendChild(g);
+  }
+  for (const item of layout.placed) nodes.appendChild(mapNode(item.device, item.x, item.y, item.kind, network));
+
+  svg.addEventListener("click", (event) => {
+    const node = event.target.closest("[data-key]");
+    if (node) selectMapDevice(node.dataset.key);
+  });
+  svg.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const node = event.target.closest("[data-key]");
+    if (!node) return;
+    event.preventDefault();
+    selectMapDevice(node.dataset.key);
+  });
+  holder.appendChild(svg);
+  renderMapLegend(network);
+  const selected = currentScan.devices.find((d) => deviceKey(d) === mapSelected);
+  showMapDetail(selected || null);
+}
+
+function renderMapLegend(network) {
+  const legend = $("map-legend");
+  const items = [
+    ["sev-critical", "Critical risk"], ["sev-high", "High risk"], ["sev-medium", "Medium risk"],
+    ["sev-low", "Low risk"], ["sev-none", "No risky ports"], ["untrusted", "Dashed ring: not trusted yet"],
+  ];
+  if (network.gateway_guessed) items.push(["", "Router guessed from its ports and address"]);
+  for (const [cls, text] of items) {
+    const li = document.createElement("li");
+    if (cls) {
+      const swatch = document.createElement("span");
+      swatch.className = `swatch ${cls}`;
+      li.appendChild(swatch);
+    }
+    li.appendChild(document.createTextNode(text));
+    legend.appendChild(li);
+  }
+}
+
+function selectMapDevice(key) {
+  mapSelected = key;
+  document.querySelectorAll("#map-svg .map-node").forEach((node) => {
+    node.classList.toggle("selected", node.dataset.key === key);
+  });
+  const device = currentScan && currentScan.devices.find((d) => deviceKey(d) === key);
+  showMapDetail(device || null);
+}
+
+function showMapDetail(device) {
+  const panel = $("map-detail");
+  if (!device) {
+    panel.innerHTML = `<p class="hint">Select a device on the map to see its details.</p>`;
+    return;
+  }
+  // renderDevice escapes every field, the same as the Devices tab.
+  panel.innerHTML = renderDevice(device);
+  bindDeviceActions(panel);
+}
+
+function showTab(name) {
+  const mapOn = name === "map";
+  $("tab-devices").setAttribute("aria-selected", String(!mapOn));
+  $("tab-map").setAttribute("aria-selected", String(mapOn));
+  $("tab-devices").tabIndex = mapOn ? -1 : 0;
+  $("tab-map").tabIndex = mapOn ? 0 : -1;
+  $("devices").hidden = mapOn;
+  $("map").hidden = !mapOn;
+  try { sessionStorage.setItem("lantern-tab", name); } catch (err) { /* storage blocked */ }
+  if (mapOn) renderMap();
+}
+
+$("tab-devices").addEventListener("click", () => showTab("devices"));
+$("tab-map").addEventListener("click", () => showTab("map"));
+$("tabs").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const next = $("tab-map").getAttribute("aria-selected") === "true" ? "devices" : "map";
+  showTab(next);
+  $(next === "map" ? "tab-map" : "tab-devices").focus();
+});
+try {
+  if (sessionStorage.getItem("lantern-tab") === "map") showTab("map");
+} catch (err) { /* storage blocked */ }
 
 async function startDashboard() {
   try {
