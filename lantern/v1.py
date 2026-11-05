@@ -24,6 +24,7 @@ from . import __version__
 from .assets import CRITICALITIES, normalize_mac, strip_for_text
 from .classify import annotate_scan, classify, gateway_score
 from .identify import empty_identity, identity_is_empty
+from .vendors import is_private_mac, lookup as vendor_lookup
 from .ports import SEVERITY_RANK
 from .store import (
     diff_scans,
@@ -69,6 +70,8 @@ _DEVICE_COLUMNS = (
     "first_seen", "last_seen", "open_ports", "finding_count",
     # Added in 1.2.0, after every 1.0 column so positional readers keep working.
     "kind", "kind_reason", "announced_name", "announced_model", "announced_manufacturer",
+    # Added in 1.3.0.
+    "vendor", "private_mac",
 )
 _FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
@@ -390,6 +393,11 @@ def _public_identity(raw) -> dict | None:
     return shown
 
 
+def _vendor(device: dict) -> str | None:
+    found = vendor_lookup(device.get("mac"))
+    return found["vendor"] if found else None
+
+
 def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private: bool) -> dict:
     key, key_type = _device_identity(device)
     asset = assets.get(f"{key_type}:{key}")
@@ -412,6 +420,8 @@ def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private:
         "kind": device.get("kind") or "unknown",
         "kind_reason": device.get("kind_reason"),
         "identity": _public_identity(device.get("identity")),
+        "vendor": _vendor(device),
+        "private_mac": is_private_mac(device.get("mac")),
     }
     if private:
         body["owner"] = asset["owner"] if asset else None
@@ -771,6 +781,8 @@ def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
         "announced_name": (device["identity"] or {}).get("name"),
         "announced_model": (device["identity"] or {}).get("model"),
         "announced_manufacturer": (device["identity"] or {}).get("manufacturer"),
+        "vendor": device["vendor"],
+        "private_mac": device["private_mac"],
     }
     columns = [name for name in _DEVICE_COLUMNS if private or name not in _PRIVATE]
     return _project_rows(columns, [values])[0]

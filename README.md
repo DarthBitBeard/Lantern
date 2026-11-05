@@ -162,7 +162,8 @@ The dashboard's **Map** tab draws the latest scan, or the one picked in History:
 
 Where the names come from:
 - **Router:** this computer's default route, when it is inside the scanned subnet. Otherwise the host that answers DNS and has a web page at a router address (`.1` or `.254`), and the legend says it was guessed.
-- **Device kind:** open ports, the hostname, a randomized MAC, and what the device announces about itself. Hover a device to see the reason.
+- **Device kind:** open ports, the hostname, a randomized MAC, who made the network card, and what the device announces about itself. Hover a device to see the reason.
+- **Vendor:** the maker of the network card, from the first half of the MAC address (for example Synology, Ubiquiti, Brother, Espressif, Apple). Lantern looks it up in a copy of the IEEE public registry of MAC prefixes that ships with it; nothing is looked up online. A vendor that only makes one kind of thing (network storage, cameras, printers, network gear, smart-home chips, speakers) is a strong hint about the kind; a maker of phones or PC network cards only fills in when nothing else does. A randomized ("private Wi-Fi") address has no vendor, because its bits are made up by the device. The vendor shows on device cards, in search, in text output for unnamed devices, and in JSON reports.
 - **Friendly names and models:** SSDP (UPnP) and mDNS (Bonjour), for example "Living Room TV, Chromecast" or "Lexmark B2338dw". Only the name, model, manufacturer, device type, and service types are kept. Serial numbers and other TXT fields are ignored. Every value is cleaned of control characters and cut to 80 characters.
 
 The lines in this view show what each device reaches through the router, grouped by kind. They are not cables: a scan alone cannot see switches, or which Wi-Fi access point a device uses. For that, see the switch map below.
@@ -209,6 +210,8 @@ When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every
 Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields when the caller has the token. The diff uses the same device shape as `/api/v1/devices`.
 
 Since 1.2.0, each device in `/api/v1/devices`, `/api/v1/diffs`, and the JSON export also has `kind` (one of `router`, `network`, `computer`, `server`, `nas`, `printer`, `camera`, `media`, `smart_home`, `phone`, `other`, `unknown`), `kind_reason` (one plain-English sentence), and `identity`. `identity` is what the device announced over SSDP or mDNS (`name`, `model`, `manufacturer`, `device_type`, `services`, `names`, `sources`), or `null` when it announced nothing. The device CSV adds `kind`, `kind_reason`, `announced_name`, `announced_model`, and `announced_manufacturer` after every 1.0 column, so readers that go by column position keep working. These are the same kinds as on the dashboard's map.
+
+Since 1.3.0, devices also have `vendor` (the network card's maker, or `null`) and `private_mac` (true for a randomized address). The device CSV adds `vendor` and `private_mac` after the 1.2.0 columns.
 
 ```bash
 TOKEN=the-token-from-the-page-or-startup-link
@@ -364,3 +367,5 @@ The mark at the top is original vector artwork for this project. The wordmark ou
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+`lantern/data/oui.tsv.gz` is built from the IEEE Registration Authority public listing of MAC address assignments (MA-L, MA-M, MA-S), keeping only each prefix and organization name. IEEE does not assert copyright in that listing or restrict its distribution. `tools/update_oui.py` rebuilds it from IEEE directly, and a monthly workflow (`.github/workflows/oui-refresh.yml`) opens a pull request when it changes.

@@ -33,8 +33,9 @@ include = ["lantern*"]
 
 # Dashboard HTML/CSS/JS must ship with the package. Without this, `pip install`
 # and the Docker image serve a 404 for the UI even though the API still starts.
+# data/ holds the MAC vendor table (see tools/update_oui.py).
 [tool.setuptools.package-data]
-lantern = ["web/*"]
+lantern = ["web/*", "data/*"]
 
 # One place for the version: `lantern.__version__`.
 [tool.setuptools.dynamic]

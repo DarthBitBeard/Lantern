@@ -220,7 +220,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Lantern local data (scan results, never commit)
-data/
+/data/
 .DS_Store
 
 # Copy written beside a database before a schema upgrade (<file>.v0.bak)
