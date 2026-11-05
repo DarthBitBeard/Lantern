@@ -582,12 +582,13 @@ const fs = require("fs");
 const vm = require("vm");
 const app = fs.readFileSync(process.argv[1], "utf8");
 const elements = {};
-const fetches = [];
+const listeners = {};
+const network = [];
 function make(tag) {
   const node = {
     tagName: String(tag || "div").toUpperCase(),
     children: [], className: "", textContent: "", value: "", disabled: false,
-    attributes: {},
+    hidden: true, attributes: {},
     addEventListener() {},
     getAttribute(name) { return node.attributes[name] || ""; },
     setAttribute(name, value) { node.attributes[name] = String(value); },
@@ -602,8 +603,20 @@ function make(tag) {
   return node;
 }
 function el(id) {
-  if (!elements[id]) elements[id] = Object.assign(make("div"), { id, value: "" });
+  if (!elements[id]) {
+    elements[id] = Object.assign(make("div"), {
+      id,
+      value: "",
+      addEventListener(type, fn) {
+        listeners[id] = listeners[id] || {};
+        listeners[id][type] = fn;
+      },
+    });
+  }
   return elements[id];
+}
+function note(kind, method, url) {
+  network.push(kind + " " + (method || "GET") + " " + url);
 }
 const context = {
   sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
@@ -611,18 +624,31 @@ const context = {
     getElementById: el,
     createElement: make,
     createTextNode(text) { return { nodeType: 3, textContent: String(text) }; },
-    querySelector() { return { getAttribute() { return ""; } }; },
+    // Strict mode, no stored token: startup does not call the API.
+    querySelector() { return { getAttribute() { return "strict"; } }; },
     body: { setAttribute() {} },
   },
   window: { open() {} },
   history: { replaceState() {} },
   URL: { createObjectURL: () => "blob:test" },
-  fetch: async (path) => { fetches.push(path); return { ok: true, status: 200, json: async () => ({}), text: async () => "" }; },
+  fetch: async (path, opts) => {
+    note("fetch", opts && opts.method, path);
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  },
+  XMLHttpRequest: function XMLHttpRequest() {
+    note("xhr", "OPEN", "");
+    this.open = (method, url) => note("xhr", method, url);
+    this.send = () => {};
+  },
   console,
 };
 context.window.location = { hash: "", pathname: "/", search: "" };
 vm.createContext(context);
 vm.runInContext(app, context);
+if (network.length) {
+  console.error("startup called the network", network);
+  process.exit(2);
+}
 const ada = {
   ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
   owner: "Ada", location: "Rack A", tags: ["web"], notes: "patched tuesday",
@@ -633,31 +659,72 @@ const bob = {
   owner: "Bob", location: "Desk", tags: ["iot"], notes: "spare",
   criticality: "low", open_ports: [], findings: [],
 };
-context.currentScan = { devices: [ada, bob] };
+function allText(node) {
+  if (!node) return "";
+  let out = node.nodeType === 3 ? (node.textContent || "") : (node.textContent || "");
+  for (const child of node.children || []) out += "\n" + allText(child);
+  return out;
+}
+function cards() {
+  return allText(elements.devices);
+}
+function fire(id, type) {
+  const fn = listeners[id] && listeners[id][type];
+  if (typeof fn !== "function") {
+    console.error("missing " + id + " " + type);
+    process.exit(11);
+  }
+  const before = network.length;
+  fn({ preventDefault() {} });
+  if (network.length !== before) {
+    console.error(id + " " + type, network.slice(before));
+    process.exit(12);
+  }
+}
+// `let currentScan` is not a property of the sandbox. showScan assigns it.
+context.showScan({
+  id: 1, subnet: "10.1.0.0/24", started_at: "2026-11-05T00:00:00Z", demo: true,
+  devices: [ada, bob],
+}, null);
+if (network.length) {
+  console.error("showScan called the network", network);
+  process.exit(3);
+}
+if (!cards().includes("10.1.0.2") || !cards().includes("10.1.0.3")) {
+  console.error(cards());
+  process.exit(4);
+}
 elements.search.value = "ada";
-if (!context.deviceMatches(ada) || context.deviceMatches(bob)) process.exit(2);
-elements.search.value = "rack a";
-if (!context.deviceMatches(ada)) process.exit(3);
-elements.search.value = "patched";
-if (!context.deviceMatches(ada)) process.exit(4);
-elements.search.value = "web";
-if (!context.deviceMatches(ada) || context.deviceMatches(bob)) process.exit(5);
+fire("search", "input");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("search", cards());
+  process.exit(5);
+}
 elements.search.value = "";
 elements["tag-filter"].value = "web";
-elements["criticality-filter"].value = "high";
-elements.filter.value = "unknown";
-if (!context.deviceMatches(ada) || context.deviceMatches(bob)) process.exit(6);
+fire("tag-filter", "change");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("tag", cards());
+  process.exit(6);
+}
 elements["criticality-filter"].value = "low";
-if (context.deviceMatches(ada)) process.exit(7);
+fire("criticality-filter", "change");
+if (cards().includes("10.1.0.2") || cards().includes("10.1.0.3") || !cards().includes("No devices match")) {
+  console.error("criticality", cards());
+  process.exit(7);
+}
 elements["tag-filter"].value = "";
 elements["criticality-filter"].value = "";
-elements.filter.value = "all";
-if (!context.deviceMatches(ada) || !context.deviceMatches(bob)) process.exit(8);
-elements["tag-filter"].value = "missing";
-if (context.deviceMatches(ada) || context.deviceMatches(bob)) process.exit(9);
-const before = fetches.length;
-context.renderDevices();
-if (fetches.length !== before) process.exit(10);
+elements.search.value = "patched";
+fire("search", "input");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("notes search", cards());
+  process.exit(8);
+}
+if (network.length) {
+  console.error(network);
+  process.exit(9);
+}
 """
         proc = subprocess.run(
             [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
