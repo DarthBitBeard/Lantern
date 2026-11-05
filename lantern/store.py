@@ -92,7 +92,10 @@ _CORRUPT_SCAN_MESSAGE = "The saved scan could not be read."
 
 
 def _newer_message(found: int, target: int) -> str:
-    return _NEWER_SCHEMA_MESSAGE
+    return (
+        f"{_NEWER_SCHEMA_MESSAGE} "
+        f"(schema {found} vs {target}). Upgrade Lantern to open this file."
+    )
 
 
 def _require_migration_keys(migrations: dict[int, Migration], target: int) -> None:

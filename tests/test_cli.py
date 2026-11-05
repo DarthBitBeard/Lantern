@@ -286,14 +286,16 @@ class CliTests(unittest.TestCase):
         other = Path(self.tmp.name) / "dispatch-marker-77c1" / "secret-dispatch.db"
         with mock.patch(
             "lantern.cli._dispatch",
-            side_effect=sqlite3.OperationalError(f"corrupt at {other}"),
+            side_effect=sqlite3.DatabaseError(
+                f"database disk image is malformed at {other}"
+            ),
         ):
             code, out, err = self.run_cli("history")
         self.assertEqual(code, 2)
         self.assertIn("Database error.", err)
         self.assertNotIn("dispatch-marker-77c1", err)
         self.assertNotIn("secret-dispatch.db", err)
-        self.assertNotIn("corrupt at", err)
+        self.assertNotIn("database disk image is malformed", err)
         self.assertNotIn(str(self.db), err)
         self.assertNotIn(self.tmp.name, err)
         self.assertEqual(out, "")
@@ -347,6 +349,8 @@ class CliTests(unittest.TestCase):
             "Database schema is newer than this Lantern. Refusing to change it.",
             text,
         )
+        self.assertIn("schema 99 vs 6", text)
+        self.assertIn("Upgrade Lantern to open this file.", text)
         self.assertNotIn(marker, text)
         self.assertNotIn("secret-newer.db", text)
         self.assertNotIn("Traceback", text)

@@ -399,13 +399,14 @@ def _err(message: str) -> int:
 
 
 def _database_open_message(exc: BaseException) -> str:
-    """A fixed open-failure line. The exception text is not printed.
+    """A fixed open-failure line. Raw database text is not printed.
 
-    The two special cases are chosen by exception type. Their messages
-    do not include a path.
+    The two special cases are chosen by exception type. A newer schema
+    uses the store message, which names the schema numbers and has no path.
     """
     if isinstance(exc, NewerSchemaError):
-        return "Database schema is newer than this Lantern. Refusing to change it."
+        # The store message names the schema numbers and has no path.
+        return str(exc)
     if isinstance(exc, DatabaseSymlinkError):
         return "Database path is a symlink. Lantern will not follow it."
     return "Cannot open database."
