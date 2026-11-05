@@ -2,7 +2,9 @@
   --bg: #0f172a;
   --panel: #1e293b;
   --panel2: #243349;
-  --border: #475569;
+  --border: #94a3b8;
+  /* Map lines and mode buttons keep the quieter slate, so uplinks (muted) stay distinct. */
+  --map-line: #475569;
   --divider: #334155;
   --text: #e2e8f0;
   --muted: #94a3b8;
@@ -37,8 +39,8 @@ body[aria-busy="true"] { cursor: progress; }
   background: var(--bg);
   z-index: 1;
 }
-.brand { font-size: 1.4rem; font-weight: 800; letter-spacing: .02em; }
-.lamp { color: var(--amber); }
+.brand { display: flex; align-items: center; min-width: 0; }
+.brand-lockup { height: 2.4rem; width: auto; max-width: 100%; }
 .status { color: var(--muted); font-size: .9rem; }
 main { max-width: 1240px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
 .controls, .summary, .diff { margin-bottom: 1rem; }
@@ -87,8 +89,9 @@ button:disabled { opacity: .55; cursor: wait; }
 .diff p { margin: .25rem 0; overflow-wrap: anywhere; }
 .controls-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
 .controls-row input { flex: 1 1 220px; min-width: 0; }
+.controls-row label { display: flex; align-items: center; gap: .35rem; color: var(--muted); }
 .history-label { color: var(--muted); font-size: .9rem; display: flex; gap: .4rem; align-items: center; }
-.history-label select { max-width: 60vw; }
+.history-label select { max-width: 60vw; min-width: 0; }
 .devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 1rem; }
 .device { background: var(--panel); border-radius: var(--radius-lg); padding: 1rem; border: 1px solid transparent; min-width: 0; }
 .device.unknown { border-color: var(--orange); }
@@ -115,7 +118,7 @@ button:disabled { opacity: .55; cursor: wait; }
   .controls form { flex-direction: column; align-items: stretch; }
   .controls input[type="text"] { width: 100%; }
   .history-label { width: 100%; }
-  .history-label select { flex: 1; max-width: none; }
+  .history-label select { flex: 1; max-width: none; min-width: 0; }
   .controls-row a { width: 100%; text-align: center; }
 }
 @media (prefers-reduced-motion: no-preference) {
@@ -142,7 +145,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .map-drawing { display: block; width: 100%; height: auto; max-height: 78vh; }
 .map-detail .device { margin: 0; }
 .map-detail > .hint { background: var(--panel); border-radius: var(--radius-lg); padding: 1rem; margin: 0; }
-.map-trunk { stroke: var(--border); stroke-width: 2; }
+.map-trunk { stroke: var(--map-line); stroke-width: 2; }
 .map-link { stroke: var(--divider); stroke-width: 1.2; }
 .map-link.dim { opacity: .25; }
 .map-link.shared { stroke-dasharray: 4 4; }
@@ -153,9 +156,9 @@ button:disabled { opacity: .55; cursor: wait; }
 .map-switch:focus { outline: none; }
 .map-switch:focus-visible rect { stroke: var(--text); stroke-width: 4; }
 .map-mode { display: flex; gap: .4rem; margin: 0 0 .5rem; }
-.map-mode button { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); border-radius: var(--radius); padding: .3rem .7rem; cursor: pointer; }
+.map-mode button { background: var(--panel2); color: var(--muted); border: 1px solid var(--map-line); border-radius: var(--radius); padding: .3rem .7rem; cursor: pointer; }
 .map-mode button[aria-pressed="true"] { color: var(--text); border-color: var(--text); }
-.map-hub circle { fill: var(--border); }
+.map-hub circle { fill: var(--map-line); }
 .map-hub-label { fill: var(--muted); font-size: 12px; font-weight: 700; }
 .map-node { cursor: pointer; }
 .map-node .map-dot { fill: var(--panel2); stroke-width: 3; }

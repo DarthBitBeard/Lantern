@@ -508,11 +508,230 @@ class WebTests(unittest.TestCase):
             else:
                 self.assertEqual(status, 404, path)
                 self.assertNotIn("[project]", body)
-        status, _, _ = self.request("/favicon.ico")
-        self.assertEqual(status, 204)
+        status, body, headers = self.request("/favicon.ico")
+        self.assertEqual(status, 200)
+        self.assertIn("<svg", body)
+        self.assertIn("image/svg+xml", headers["Content-Type"])
+        self.assertGreater(len(body), 100)
         status, body, headers = self.request("/", method="HEAD")
         self.assertEqual((status, body), (200, ""))
         self.assertGreater(int(headers["Content-Length"]), 0)
+
+    def test_favicon_redirects_to_artwork_and_csp_stays(self):
+        status, page, headers = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Security-Policy"), webapp.CSP)
+        self.assertIn('href="favicon.svg"', page)
+        self.assertIn('src="brand-lockup.svg"', page)
+        self.assertIn('alt="Lantern"', page)
+        self.assertIn('id="tag-filter"', page)
+        self.assertIn('id="criticality-filter"', page)
+        req = urllib.request.Request(self.base + "/favicon.ico")
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            opener.open(req, timeout=REQUEST_TIMEOUT)
+            self.fail("favicon.ico did not redirect")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 302)
+            self.assertEqual(exc.headers.get("Location"), "/favicon.svg")
+        status, body, headers = self.request("/favicon.svg")
+        self.assertEqual(status, 200)
+        self.assertIn("image/svg+xml", headers["Content-Type"])
+        self.assertIn("<svg", body)
+        self.assertEqual(headers["Content-Security-Policy"], webapp.SVG_CSP)
+        self.assertIn("default-src 'none'", webapp.SVG_CSP)
+
+    def test_border_contrast_meets_the_panel_backgrounds(self):
+        css = (webapp.WEB_DIR / "styles.css").read_text(encoding="utf-8")
+
+        def color(name):
+            match = re.search(rf"--{name}:\s*(#[0-9a-fA-F]{{6}})", css)
+            self.assertIsNotNone(match, name)
+            return match.group(1)
+
+        def channel(value):
+            value = value / 255
+            if value <= 0.04045:
+                return value / 12.92
+            return ((value + 0.055) / 1.055) ** 2.4
+
+        def luminance(hex_color):
+            red, green, blue = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+            return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+        def ratio(left, right):
+            lighter, darker = sorted((luminance(left), luminance(right)), reverse=True)
+            return (lighter + 0.05) / (darker + 0.05)
+
+        border = color("border")
+        for name in ("bg", "panel", "panel2"):
+            self.assertGreaterEqual(ratio(border, color(name)), 3, name)
+
+    def test_dashboard_filters_stay_on_the_loaded_cards(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        source = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("innerHTML", source)
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const app = fs.readFileSync(process.argv[1], "utf8");
+const elements = {};
+const listeners = {};
+const network = [];
+function make(tag) {
+  const node = {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [], className: "", textContent: "", value: "", disabled: false,
+    hidden: true, attributes: {},
+    addEventListener() {},
+    getAttribute(name) { return node.attributes[name] || ""; },
+    setAttribute(name, value) { node.attributes[name] = String(value); },
+    appendChild(child) { node.children.push(child); return child; },
+    removeChild(child) {
+      node.children = node.children.filter((item) => item !== child);
+      return child;
+    },
+    get firstChild() { return node.children[0] || null; },
+    querySelectorAll() { return []; },
+  };
+  return node;
+}
+function el(id) {
+  if (!elements[id]) {
+    elements[id] = Object.assign(make("div"), {
+      id,
+      value: "",
+      addEventListener(type, fn) {
+        listeners[id] = listeners[id] || {};
+        listeners[id][type] = fn;
+      },
+    });
+  }
+  return elements[id];
+}
+function note(kind, method, url) {
+  network.push(kind + " " + (method || "GET") + " " + url);
+}
+const context = {
+  sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  document: {
+    getElementById: el,
+    createElement: make,
+    createTextNode(text) { return { nodeType: 3, textContent: String(text) }; },
+    // Strict mode, no stored token: startup does not call the API.
+    querySelector() { return { getAttribute() { return "strict"; } }; },
+    body: { setAttribute() {} },
+  },
+  window: { open() {} },
+  history: { replaceState() {} },
+  URL: { createObjectURL: () => "blob:test" },
+  fetch: async (path, opts) => {
+    note("fetch", opts && opts.method, path);
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  },
+  XMLHttpRequest: function XMLHttpRequest() {
+    note("xhr", "OPEN", "");
+    this.open = (method, url) => note("xhr", method, url);
+    this.send = () => {};
+  },
+  console,
+};
+context.window.location = { hash: "", pathname: "/", search: "" };
+vm.createContext(context);
+vm.runInContext(app, context);
+if (network.length) {
+  console.error("startup called the network", network);
+  process.exit(2);
+}
+const ada = {
+  ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
+  owner: "Ada", location: "Rack A", tags: ["web"], notes: "patched tuesday",
+  criticality: "high", open_ports: [{ port: 80 }], findings: [{ severity: "high" }],
+};
+const bob = {
+  ip: "10.1.0.3", mac: "aa:bb:cc:dd:ee:03", hostname: "phone", trusted: true,
+  owner: "Bob", location: "Desk", tags: ["iot"], notes: "spare",
+  criticality: "low", open_ports: [], findings: [],
+};
+function allText(node) {
+  if (!node) return "";
+  let out = node.nodeType === 3 ? (node.textContent || "") : (node.textContent || "");
+  for (const child of node.children || []) out += "\n" + allText(child);
+  return out;
+}
+function cards() {
+  return allText(elements.devices);
+}
+function fire(id, type) {
+  const fn = listeners[id] && listeners[id][type];
+  if (typeof fn !== "function") {
+    console.error("missing " + id + " " + type);
+    process.exit(11);
+  }
+  const before = network.length;
+  fn({ preventDefault() {} });
+  if (network.length !== before) {
+    console.error(id + " " + type, network.slice(before));
+    process.exit(12);
+  }
+}
+// `let currentScan` is not a property of the sandbox. showScan assigns it.
+context.showScan({
+  id: 1, subnet: "10.1.0.0/24", started_at: "2026-11-05T00:00:00Z", demo: true,
+  devices: [ada, bob],
+}, null);
+if (network.length) {
+  console.error("showScan called the network", network);
+  process.exit(3);
+}
+if (!cards().includes("10.1.0.2") || !cards().includes("10.1.0.3")) {
+  console.error(cards());
+  process.exit(4);
+}
+elements.search.value = "ada";
+fire("search", "input");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("search", cards());
+  process.exit(5);
+}
+elements.search.value = "";
+elements["tag-filter"].value = "web";
+fire("tag-filter", "change");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("tag", cards());
+  process.exit(6);
+}
+elements["criticality-filter"].value = "low";
+fire("criticality-filter", "change");
+if (cards().includes("10.1.0.2") || cards().includes("10.1.0.3") || !cards().includes("No devices match")) {
+  console.error("criticality", cards());
+  process.exit(7);
+}
+elements["tag-filter"].value = "";
+elements["criticality-filter"].value = "";
+elements.search.value = "patched";
+fire("search", "input");
+if (!cards().includes("10.1.0.2") || cards().includes("10.1.0.3")) {
+  console.error("notes search", cards());
+  process.exit(8);
+}
+if (network.length) {
+  console.error(network);
+  process.exit(9);
+}
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
 
 class HostAllowlistTests(unittest.TestCase):
@@ -2055,22 +2274,34 @@ const fs = require("fs");
 const vm = require("vm");
 const app = fs.readFileSync(process.argv[1], "utf8");
 const elements = {};
+function make(tag) {
+  const node = {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [], className: "", textContent: "", value: "", disabled: false,
+    attributes: {}, dataset: {},
+    addEventListener() {},
+    getAttribute(name) { return node.attributes[name] || ""; },
+    setAttribute(name, value) { node.attributes[name] = String(value); },
+    appendChild(child) { node.children.push(child); return child; },
+    removeChild(child) {
+      node.children = node.children.filter((item) => item !== child);
+      return child;
+    },
+    get firstChild() { return node.children[0] || null; },
+    querySelectorAll() { return []; },
+  };
+  return node;
+}
 function el(id) {
-  if (!elements[id]) {
-    elements[id] = {
-      id, hidden: true, textContent: "", value: "", className: "",
-      innerHTML: "", href: "", disabled: false,
-      addEventListener() {},
-      getAttribute() { return ""; },
-      querySelectorAll() { return []; },
-    };
-  }
+  if (!elements[id]) elements[id] = Object.assign(make("div"), { id });
   return elements[id];
 }
 const context = {
   sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
   document: {
     getElementById: el,
+    createElement: make,
+    createTextNode(text) { return { nodeType: 3, textContent: String(text) }; },
     querySelector() { return { getAttribute() { return ""; } }; },
     body: { setAttribute() {} },
   },
@@ -2091,31 +2322,84 @@ context.window.location = { hash: "", pathname: "/", search: "" };
 vm.createContext(context);
 vm.runInContext(app, context);
 const payload = "<script>alert(1)</script>";
-const html = context.renderDevice({
+const allow = new Set(["device", "unknown", "kind", "meta", "ports", "port", "findings",
+  "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary"]);
+function walk(node, visit) {
+  if (!node) return;
+  if (node.nodeType === 3) { visit(node); return; }
+  visit(node);
+  for (const child of node.children || []) walk(child, visit);
+}
+function texts(node) {
+  const found = [];
+  walk(node, (item) => {
+    if (item.nodeType === 3) found.push(item.textContent || "");
+    else if (item.textContent) found.push(item.textContent);
+    if (item.attributes) found.push(...Object.values(item.attributes));
+  });
+  return found.join("\n");
+}
+const card = context.renderDevice({
   ip: "192.168.50.10",
   mac: "aa:bb:cc:dd:ee:10",
   hostname: payload + "hostname",
   label: payload + "label",
   owner: payload + "owner",
+  location: payload + "location",
+  criticality: payload + "criticality",
+  vendor: payload + "vendor",
+  kind: "camera",
+  kind_reason: payload + "reason",
+  identity: {
+    name: payload + "name", model: payload + "model", manufacturer: payload + "maker",
+    device_type: payload + "type", names: [payload + "names"],
+  },
+  switch_port: { switch_name: payload + "switch", port: payload + "port", shared: true, mac_count: 3 },
   tags: [payload + "tag"],
   notes: payload + "notes",
   trusted: false,
   open_ports: [{ port: 80, banner: payload + "banner" }],
-  findings: [],
+  findings: [{ port: 23, service: "telnet", severity: payload + "severity", title: payload + "title", fix: payload + "fix" }],
 });
-if (html.includes("<script>")) process.exit(2);
-for (const field of ["hostname", "label", "owner", "tag", "notes", "banner"]) {
-  if (!html.includes("&lt;script&gt;alert(1)&lt;/script&gt;" + field)) {
+const classes = [];
+walk(card, (item) => {
+  if (item.tagName === "SCRIPT") process.exit(2);
+  if (item.className) classes.push(item.className);
+});
+const shown = texts(card);
+if (shown.includes("&lt;script&gt;")) process.exit(2);
+for (const field of ["hostname", "label", "owner", "tag", "notes", "banner", "location",
+  "criticality", "reason", "name", "model", "maker", "switch", "port", "title", "fix"]) {
+  if (!shown.includes(payload + field)) {
     console.error("missing " + field);
     process.exit(3);
   }
 }
+for (const cls of classes) {
+  for (const token of cls.split(/\s+/)) {
+    if (token && !allow.has(token)) {
+      console.error("class " + token);
+      process.exit(6);
+    }
+  }
+}
+const base = { ip: "192.168.50.11", mac: "aa:bb:cc:dd:ee:11", trusted: false, open_ports: [], findings: [], kind: "nas" };
+// The network card's maker shows when the device did not name its own maker, and not twice.
+const bare = texts(context.renderDevice({ ...base, vendor: "Vendorco" }));
+if (!bare.includes("Vendorco")) { console.error("vendor missing"); process.exit(7); }
+const named = texts(context.renderDevice({ ...base, vendor: "Vendorco", identity: { manufacturer: "Acme", model: "X1" } }));
+if (named.includes("Vendorco") || !named.includes("Acme")) { console.error("vendor shown beside the maker"); process.exit(7); }
+// A value that names an Object.prototype member is not a badge class.
+const proto = context.renderDevice({ ...base, findings: [{ port: 23, service: "t", severity: "constructor", title: "t", fix: "f" }] });
+walk(proto, (item) => {
+  if (item.className && /function|native/.test(item.className)) { console.error(item.className); process.exit(8); }
+});
 context.renderSummary({
   id: 1, devices: [], subnet: "192.168.50.0/24",
   scope_name: payload + "scope", started_at: "2026-10-28T00:00:00Z", demo: false,
 }, null);
-const summary = elements.summary.innerHTML;
-if (summary.includes("<script>") || !summary.includes("&lt;script&gt;alert(1)&lt;/script&gt;scope")) {
+const summary = texts(elements.summary);
+if (summary.includes("&lt;script&gt;") || !summary.includes(payload + "scope")) {
   console.error(summary);
   process.exit(4);
 }
@@ -2123,8 +2407,8 @@ const option = context.historyOption({
   id: 3, started_at: "2026-10-28T00:00:00Z", device_count: 1, demo: false,
   scope_name: payload + "scope",
 });
-if (option.includes("<script>") || !option.includes("&lt;script&gt;alert(1)&lt;/script&gt;scope")) {
-  console.error(option);
+if (option.tagName !== "OPTION" || !(option.textContent || "").includes(payload + "scope")) {
+  console.error(option.textContent);
   process.exit(5);
 }
 """
@@ -2149,15 +2433,30 @@ function load(mode) {
   const listeners = {};
   const calls = [];
   const state = { polls: 0 };
+  function make(tag) {
+    const node = {
+      tagName: String(tag || "div").toUpperCase(),
+      children: [], className: "", textContent: "", value: "", disabled: false,
+      hidden: true, attributes: {}, dataset: {},
+      addEventListener() {},
+      getAttribute(name) { return node.attributes[name] || ""; },
+      setAttribute(name, value) { node.attributes[name] = String(value); },
+      appendChild(child) { node.children.push(child); return child; },
+      removeChild(child) {
+        node.children = node.children.filter((item) => item !== child);
+        return child;
+      },
+      get firstChild() { return node.children[0] || null; },
+      querySelectorAll() { return []; },
+    };
+    return node;
+  }
   function el(id) {
     if (!elements[id]) {
-      elements[id] = {
-        id, hidden: true, textContent: "", value: "", className: "",
-        innerHTML: "", href: "", disabled: false,
+      elements[id] = Object.assign(make("div"), {
+        id,
         addEventListener(type, fn) { listeners[id + ":" + type] = fn; },
-        getAttribute() { return ""; },
-        querySelectorAll() { return []; },
-      };
+      });
     }
     return elements[id];
   }
@@ -2172,6 +2471,8 @@ function load(mode) {
     sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     document: {
       getElementById: el,
+      createElement: make,
+      createTextNode(text) { return { nodeType: 3, textContent: String(text) }; },
       querySelector() { return { getAttribute() { return ""; } }; },
       body: { setAttribute() {} },
     },
