@@ -1,7 +1,8 @@
 name: Windows package
 
 # Builds the portable lantern.exe (PyInstaller, one file), a one-folder
-# build for the per-user installer (Inno Setup), and the installer, then installs, runs, and uninstalls it on a clean runner.
+# build for the per-user installer (Inno Setup), and the installer, then
+# installs, runs, and uninstalls it on a clean runner.
 # The files are kept as workflow artifacts. Nothing is published or
 # released from here, and nothing scans a network.
 
@@ -10,6 +11,9 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Pull requests opened by a workflow (the monthly vendor-table refresh)
+  # do not trigger other workflows, so that job starts this one by hand.
+  workflow_dispatch:
 
 concurrency:
   group: winpkg-${{ github.workflow }}-${{ github.ref }}
