@@ -36,9 +36,10 @@ from pathlib import Path
 # Schema 1 is the Lantern 0.3.0 tables (scans, devices, trusted_devices)
 # plus this version table. Schema 2 adds scans.scope_name. Schema 3 adds
 # the asset table, which is not tied to a scan id. Schema 4 adds an index on
-# the device table and changes no rows. The package version stays put until a
+# the device table and changes no rows. Schema 5 adds the gateway and device
+# identities for the map; schema 6 adds scans.topology (the switch map). The package version stays put until a
 # release; the schema version moves only when the tables or indexes change.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -552,12 +553,25 @@ def _migration_5_network_map(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE devices ADD COLUMN identity TEXT")
 
 
+def _migration_6_topology(conn: sqlite3.Connection) -> None:
+    """Schema 6: `scans.topology`, the switch map for that scan (JSON).
+
+    Filled only when switches were queried (see `topology.py`). It holds
+    switch names, port names, and MAC-to-port placements, never the SNMP
+    community. Older rows keep NULL.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+    if "topology" not in columns:
+        conn.execute("ALTER TABLE scans ADD COLUMN topology TEXT")
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
     3: _migration_3_assets,
     4: _migration_4_device_ip_index,
     5: _migration_5_network_map,
+    6: _migration_6_topology,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -636,22 +650,25 @@ def save_scan(
     demo: bool = False,
     scope_name: str | None = None,
     network: dict | None = None,
+    topology: dict | None = None,
 ) -> int:
     """Store one scan snapshot and return its id. All-or-nothing.
 
     ``scope_name`` is the named scope that produced the scan, or None for
     ``--subnet``, auto-detect, and demo scans. ``network`` holds what the
     scan learned about the subnet itself: ``gateway_ip``, ``gateway_mac``,
-    and ``local_ip`` (each may be None).
+    and ``local_ip`` (each may be None). ``topology`` is the switch map
+    from `topology.map_switches`, when switches were queried.
     """
     network = network or {}
     with conn:
         cur = conn.execute(
-            "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 _now(), subnet, 1 if demo else 0, scope_name,
                 network.get("gateway_ip"), network.get("gateway_mac"), network.get("local_ip"),
+                json.dumps(topology) if topology else None,
             ),
         )
         scan_id = cur.lastrowid
@@ -696,7 +713,7 @@ def _load_identity(raw: str | None) -> dict | None:
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
     """Load one scan with its devices, or None if the id is unknown."""
     row = conn.execute(
-        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip"
+        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology"
         " FROM scans WHERE id = ?",
         (scan_id,),
     ).fetchone()
@@ -726,8 +743,19 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
         "demo": bool(row[2]),
         "scope_name": row[3],
         "network": {"gateway_ip": row[4], "gateway_mac": row[5], "local_ip": row[6]},
+        "topology": _load_identity(row[7]),
         "devices": devices,
     }
+
+
+def set_topology(conn: sqlite3.Connection, scan_id: int, topology: dict | None) -> bool:
+    """Attach (or clear) a switch map on an existing scan. False if the id is unknown."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE scans SET topology = ? WHERE id = ?",
+            (json.dumps(topology) if topology else None, scan_id),
+        )
+    return cur.rowcount == 1
 
 
 def latest_scan_id(conn: sqlite3.Connection, scope_name: str | None = None) -> int | None:

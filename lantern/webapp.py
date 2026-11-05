@@ -57,7 +57,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from . import __version__, assets as assetlib, demo, engine
+from . import __version__, assets as assetlib, demo, engine, topology
 from .classify import annotate_scan
 from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .netutil import is_loopback_host
@@ -182,13 +182,22 @@ class _SubnetGuess:
             return self._value
 
 
-def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool) -> None:
-    """Scan and save on a background thread, record the outcome, free the scan lock."""
+def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
+                  switches: tuple | None = None) -> None:
+    """Scan and save on a background thread, record the outcome, free the scan lock.
+
+    ``switches`` is (switch addresses, SNMP community) from `lantern web
+    --switch`, or None. The switch map is built after the sweep.
+    """
     try:
         devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS)
+        topo = None
+        if switches:
+            ips, community = switches
+            topo = topology.map_switches(ips, community, devices, network.get("gateway_mac"))
         conn = connect(db_path)
         try:
-            scan_id = save_scan(conn, subnet, devices, demo=False, network=network)
+            scan_id = save_scan(conn, subnet, devices, demo=False, network=network, topology=topo)
         finally:
             conn.close()
         job.finish(scan_id)
@@ -218,6 +227,7 @@ def _load_view(conn, scan_id: int | None = None) -> tuple[dict | None, dict | No
     assetlib.attach_assets(conn, scan)
     assetlib.attach_assets_to_diff(conn, diff)
     annotate_scan(scan)
+    topology.annotate_topology(scan)
     return scan, diff
 
 
@@ -649,6 +659,9 @@ class LanternHandler(BaseHTTPRequestHandler):
     # make_server gives each server its own job record.
     scan_job = None
     subnet_guess = None
+    # (switch addresses, SNMP community) from --switch, or None. Never sent
+    # to a client.
+    switch_config = None
     # Fail closed until make_server fills these in for this process.
     api_token = ""
     allowed_hosts = frozenset()
@@ -1369,8 +1382,11 @@ class LanternHandler(BaseHTTPRequestHandler):
     def _handle_demo(self) -> None:
         conn = self._db()
         try:
-            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True, network=demo.DEMO_NETWORK)
-            save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True, network=demo.DEMO_NETWORK)
+            first, second = demo.demo_scan_1(), demo.demo_scan_2()
+            save_scan(conn, demo.DEMO_SUBNET, first, demo=True, network=demo.DEMO_NETWORK,
+                      topology=demo.demo_topology(first))
+            save_scan(conn, demo.DEMO_SUBNET, second, demo=True, network=demo.DEMO_NETWORK,
+                      topology=demo.demo_topology(second))
             scan, diff = _load_view(conn)
             self._send_json(200, {"scan_id": scan["id"], "scan": scan, "diff": diff})
         finally:
@@ -1399,7 +1415,7 @@ class LanternHandler(BaseHTTPRequestHandler):
         try:
             threading.Thread(
                 target=_run_scan_job,
-                args=(self.scan_job, self.db_path, subnet, bool(self.debug)),
+                args=(self.scan_job, self.db_path, subnet, bool(self.debug), self.switch_config),
                 name="lantern-scan",
                 daemon=True,
             ).start()
@@ -1599,6 +1615,7 @@ def make_server(
     header_timeout: float = HEADER_DEADLINE_SECONDS,
     write_timeout: float = REQUEST_TIMEOUT_SECONDS,
     write_deadline: float = WRITE_DEADLINE_SECONDS,
+    switches: tuple | None = None,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -1664,6 +1681,7 @@ def make_server(
             "lan_bound": bool(lan_bound),
             "strict_auth": bool(strict_auth),
             "scan_job": _ScanJob(),
+            "switch_config": tuple(switches) if switches else None,
             "subnet_guess": _SubnetGuess(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
@@ -1705,6 +1723,7 @@ def serve(
     lan_bound: bool = False,
     strict_auth: bool = False,
     open_url: str | None = None,
+    switches: tuple | None = None,
 ) -> None:
     server = make_server(
         db_path,
@@ -1715,6 +1734,7 @@ def serve(
         api_token=api_token,
         lan_bound=lan_bound,
         strict_auth=strict_auth,
+        switches=switches,
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass

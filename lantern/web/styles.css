@@ -145,6 +145,16 @@ button:disabled { opacity: .55; cursor: wait; }
 .map-trunk { stroke: var(--border); stroke-width: 2; }
 .map-link { stroke: var(--divider); stroke-width: 1.2; }
 .map-link.dim { opacity: .25; }
+.map-link.shared { stroke-dasharray: 4 4; }
+.map-trunk.uplink { stroke: var(--muted); stroke-width: 3; }
+.map-trunk.loose { stroke-dasharray: 6 6; }
+.map-switch { cursor: pointer; }
+.map-switch rect { fill: var(--panel2); stroke: var(--muted); stroke-width: 2; }
+.map-switch:focus { outline: none; }
+.map-switch:focus-visible rect { stroke: var(--text); stroke-width: 4; }
+.map-mode { display: flex; gap: .4rem; margin: 0 0 .5rem; }
+.map-mode button { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); border-radius: var(--radius); padding: .3rem .7rem; cursor: pointer; }
+.map-mode button[aria-pressed="true"] { color: var(--text); border-color: var(--text); }
 .map-hub circle { fill: var(--border); }
 .map-hub-label { fill: var(--muted); font-size: 12px; font-weight: 700; }
 .map-node { cursor: pointer; }

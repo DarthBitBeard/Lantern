@@ -41,7 +41,16 @@ def scan_to_dict(scan: dict, diff: dict | None = None) -> dict:
         "device_count": len(devices),
         "devices": devices,
         "diff": _diff_for_report(diff),
+        **_switch_map(scan),
     }
+
+
+def _switch_map(scan: dict) -> dict:
+    """`switch_map` (switches and the router's port) when switches were read."""
+    topo = scan.get("topology")
+    if not topo:
+        return {}
+    return {"switch_map": {"switches": topo.get("switches") or [], "router": topo.get("router")}}
 
 
 def describe_change(change: dict) -> str:

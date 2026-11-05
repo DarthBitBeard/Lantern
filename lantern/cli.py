@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import errno
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
-from . import __version__, assets as assetlib, demo, engine
+from . import __version__, assets as assetlib, demo, engine, topology
 from .classify import annotate_scan
 from .engine import scan_subnet
 from .netutil import is_loopback_host
@@ -41,8 +42,11 @@ from .store import (
     delete_scans,
     list_scans,
     load_scan_with_diff,
+    latest_scan_id,
+    load_scan,
     save_scan,
     scans_to_prune,
+    set_topology,
     write_private_file,
 )
 from .v1 import ExportPathError
@@ -52,6 +56,149 @@ DEFAULT_DB = Path("data/lantern.db")
 
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", default=argparse.SUPPRESS, help="SQLite file, default data/lantern.db")
+
+
+SNMP_COMMUNITY_FILE_ENV = "LANTERN_SNMP_COMMUNITY_FILE"
+SNMP_COMMUNITY_ENV = "LANTERN_SNMP_COMMUNITY"
+
+
+def _add_switch_args(p) -> None:
+    p.add_argument(
+        "--switch", action="append", default=[], metavar="IP",
+        help="A managed switch to read over SNMPv2c (read-only) for the switch map: "
+             "which port each device is on. Repeatable, up to 16. Private addresses only.",
+    )
+    p.add_argument(
+        "--snmp-community-file", metavar="PATH",
+        help=f"File holding the switches' read-only SNMP community. Default: {SNMP_COMMUNITY_FILE_ENV}, "
+             f"else {SNMP_COMMUNITY_ENV}. Never stored or printed.",
+    )
+
+
+def resolve_switches(args, environ, *, suffix: str) -> tuple[list[str], str] | None:
+    """(switch addresses, community) from --switch, or None when no switch was named.
+
+    The community comes from --snmp-community-file, then
+    LANTERN_SNMP_COMMUNITY_FILE, then LANTERN_SNMP_COMMUNITY. There is no
+    prompt: on Windows a hidden prompt reads the console even when stdin is
+    redirected, so a script could hang on it. Raises ValueError, never with
+    the community in the message.
+    """
+    raw = getattr(args, "switch", None) or []
+    if not raw:
+        if getattr(args, "snmp_community_file", None):
+            raise ValueError("--snmp-community-file needs at least one --switch.")
+        return None
+    ips: list[str] = []
+    for item in raw:
+        ip = topology.validate_switch(item)
+        if ip not in ips:
+            ips.append(ip)
+    if len(ips) > topology.MAX_SWITCHES:
+        raise ValueError(f"At most {topology.MAX_SWITCHES} switches per run.")
+    flag_path = getattr(args, "snmp_community_file", None)
+    path = flag_path or environ.get(SNMP_COMMUNITY_FILE_ENV)
+    if path:
+        label = "--snmp-community-file" if flag_path else SNMP_COMMUNITY_FILE_ENV
+        text = read_private_file(path, label, suffix=suffix)
+    elif environ.get(SNMP_COMMUNITY_ENV):
+        text = environ[SNMP_COMMUNITY_ENV]
+    else:
+        raise ValueError(
+            "--switch needs the SNMP community: use --snmp-community-file, "
+            f"{SNMP_COMMUNITY_FILE_ENV}, or {SNMP_COMMUNITY_ENV}."
+        )
+    return ips, topology.validate_community(text)
+
+
+def _port_sort_key(name: str):
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name or "")]
+
+
+def _print_topology(scan: dict, topo: dict) -> None:
+    """The switch map as an indented tree, for `topology` and `scan --switch`."""
+    devices = {(d.get("mac") or "").lower(): d for d in scan.get("devices") or [] if d.get("mac")}
+    switches = topo.get("switches") or []
+    answered = [s for s in switches if not s.get("error")]
+    locations = topo.get("locations") or {}
+    print(f"Switch map: {len(answered)} of {len(switches)} switch(es) answered.")
+    children: dict = {}
+    for s in answered:
+        children.setdefault(s.get("parent"), []).append(s)
+    placed: dict = {}
+    for mac, where in locations.items():
+        placed.setdefault((where["switch"], where["port"]), []).append(mac)
+
+    def show(switch: dict, indent: str, lead: str) -> None:
+        name = switch.get("name") or switch["ip"]
+        if switch.get("parent"):
+            up = f", uplink {switch.get('port_to_parent') or '?'}"
+        elif switch.get("port_to_parent"):
+            up = f", router on {switch['port_to_parent']}"
+        else:
+            up = ""
+        print(f"{lead}{name} ({switch['ip']}){up}")
+        rows = []
+        for (ip, port), macs in placed.items():
+            if ip != switch["ip"]:
+                continue
+            labels = []
+            for mac in sorted(macs):
+                device = devices.get(mac) or {}
+                label = device.get("label") or device.get("hostname") or ""
+                labels.append(f"{device.get('ip', mac)}{(' ' + label) if label else ''}")
+            where = locations[macs[0]]
+            note = (f" (shared: {where['mac_count']} addresses, likely a Wi-Fi access point "
+                    "or unmanaged switch)") if where.get("shared") else ""
+            rows.append((port, f"{indent}  {port}{note}: " + ", ".join(labels), None))
+        for child in children.get(switch["ip"], []):
+            rows.append((child.get("parent_port") or "", None, child))
+        for port, line, child in sorted(rows, key=lambda r: _port_sort_key(r[0])):
+            if child is None:
+                print(line)
+            else:
+                show(child, indent + "  ", f"{indent}  {port or '?'} -> ")
+
+    for root_switch in children.get(None, []):
+        show(root_switch, "  ", "  ")
+    for s in switches:
+        if s.get("error"):
+            print(f"  {s['ip']}: {s['error']}")
+    switch_ips = {s["ip"] for s in switches}
+    gateway = (scan.get("network") or {}).get("gateway_ip")
+    loose = [d for mac, d in devices.items()
+             if mac not in locations and d.get("ip") not in switch_ips and d.get("ip") != gateway]
+    if answered and loose:
+        print(f"  Not seen on a switch port: {len(loose)} device(s) (Wi-Fi through the router, "
+              "an unmanaged switch, or a switch Lantern did not read).")
+
+
+def _cmd_topology(args, conn) -> int:
+    try:
+        config = resolve_switches(args, os.environ, suffix="Nothing was queried.")
+    except ValueError as exc:
+        return _err(str(exc))
+    if config is None:
+        return _err("Name at least one switch with --switch.")
+    scan_id = args.scan_id if args.scan_id is not None else latest_scan_id(conn)
+    scan = load_scan(conn, scan_id) if scan_id is not None else None
+    if scan is None:
+        print("No saved scan. Run `lantern scan` first.", file=sys.stderr)
+        return 1
+    if scan["demo"]:
+        return _err(f"Scan {scan['id']} is demo data. Run a real scan first.")
+    ips, community = config
+    if args.format == "text":
+        print(f"Reading {len(ips)} switch(es) over SNMP...", file=sys.stderr)
+    topo = topology.map_switches(ips, community, scan["devices"],
+                                 (scan.get("network") or {}).get("gateway_mac"))
+    set_topology(conn, scan["id"], topo)
+    if args.format == "json":
+        print(json.dumps({"scan_id": scan["id"], **topo}, indent=2))
+    else:
+        print(f"Scan {scan['id']} ({scan['subnet']}):")
+        _print_topology(scan, topo)
+    return 0 if any(not s.get("error") for s in topo["switches"]) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,6 +223,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_p.add_argument("--demo", action="store_true", help="Use fake demo data, no network scan.")
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
+    _add_switch_args(scan_p)
+
+    topo_p = sub.add_parser(
+        "topology",
+        help="Read managed switches over SNMP (read-only) and attach the switch map to a saved scan.",
+    )
+    _add_db_arg(topo_p)
+    _add_switch_args(topo_p)
+    topo_p.add_argument("--scan-id", type=int, help="Scan to attach the map to. Default: the latest scan.")
+    topo_p.add_argument("--format", choices=["text", "json"], default="text")
 
     scopes_p = sub.add_parser("scopes", help="List named scan scopes from a TOML file. Does not scan.")
     scopes_p.add_argument("--config", help="TOML file, default ./lantern.toml.")
@@ -181,6 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
              "Unspecified addresses and zone ids are rejected.",
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
+    _add_switch_args(web_p)
     web_p.add_argument(
         "--open",
         action="store_true",
@@ -414,77 +572,66 @@ def _token_open_flags() -> int:
     return flags
 
 
-def _read_token_file(path: str) -> str:
-    """Read a regular token file. The error does not include the contents.
+def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYTES,
+                      suffix: str = "Refusing to start.") -> str:
+    """Read a small secret file and return its stripped text. Errors never include the contents.
 
     Symlinks are refused. A FIFO or other non-regular file is refused
-    without a blocking read. Files larger than 4 KiB are refused. On POSIX,
-    a mode other than 0400 or 0600 (any group or other bit) is refused.
-    Docker's 0444 secret mount is not accepted: the host file must be
-    mode 0400 and owned by the user that runs Lantern.
+    without a blocking read. Files larger than `max_bytes` are refused. On
+    POSIX, a mode other than 0400 or 0600 (any group or other bit) is
+    refused. The error messages name `label` (an environment variable or
+    flag) and end with `suffix`.
     """
     file_path = Path(path)
+    size_text = f"{max_bytes // 1024} KiB"
     try:
         if file_path.is_symlink():
-            raise ValueError(
-                f"{TOKEN_FILE_ENV} must be a regular file, not a symlink. "
-                "Refusing to start."
-            )
+            raise ValueError(f"{label} must be a regular file, not a symlink. {suffix}")
     except OSError as exc:
-        raise ValueError(
-            f"Cannot read {TOKEN_FILE_ENV} ({file_path}): {exc.strerror or exc}. "
-            "Refusing to start."
-        ) from exc
+        raise ValueError(f"Cannot read {label} ({file_path}): {exc.strerror or exc}. {suffix}") from exc
     try:
         fd = os.open(file_path, _token_open_flags())
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise ValueError(
-                f"{TOKEN_FILE_ENV} must be a regular file, not a symlink. "
-                "Refusing to start."
-            ) from exc
+            raise ValueError(f"{label} must be a regular file, not a symlink. {suffix}") from exc
         # A FIFO with no writer can fail open immediately under O_NONBLOCK
         # (ENXIO) instead of returning a descriptor. That is still a refusal,
         # and it must not block.
         if exc.errno == errno.ENXIO:
-            raise ValueError(
-                f"{TOKEN_FILE_ENV} must be a regular file. Refusing to start."
-            ) from exc
-        raise ValueError(
-            f"Cannot read {TOKEN_FILE_ENV} ({file_path}): {exc.strerror or exc}. "
-            "Refusing to start."
-        ) from exc
+            raise ValueError(f"{label} must be a regular file. {suffix}") from exc
+        raise ValueError(f"Cannot read {label} ({file_path}): {exc.strerror or exc}. {suffix}") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError(
-                f"{TOKEN_FILE_ENV} must be a regular file. Refusing to start."
-            )
+            raise ValueError(f"{label} must be a regular file. {suffix}")
         if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
             mode = stat.S_IMODE(info.st_mode)
             raise ValueError(
-                f"{TOKEN_FILE_ENV} is readable by group or others (mode {mode:04o}). "
-                "Use mode 0400, owned by the user that runs Lantern. "
-                "Refusing to start."
+                f"{label} is readable by group or others (mode {mode:04o}). "
+                f"Use mode 0400, owned by the user that runs Lantern. {suffix}"
             )
-        if info.st_size > MAX_TOKEN_FILE_BYTES:
-            raise ValueError(
-                f"{TOKEN_FILE_ENV} is larger than 4 KiB. Refusing to start."
-            )
-        blob = os.read(fd, MAX_TOKEN_FILE_BYTES + 1)
+        if info.st_size > max_bytes:
+            raise ValueError(f"{label} is larger than {size_text}. {suffix}")
+        blob = os.read(fd, max_bytes + 1)
     finally:
         os.close(fd)
-    if len(blob) > MAX_TOKEN_FILE_BYTES:
-        raise ValueError(
-            f"{TOKEN_FILE_ENV} is larger than 4 KiB. Refusing to start."
-        )
+    if len(blob) > max_bytes:
+        raise ValueError(f"{label} is larger than {size_text}. {suffix}")
     try:
         text = blob.decode("utf-8")
     except UnicodeError as exc:
-        raise ValueError(
-            f"{TOKEN_FILE_ENV} is not valid UTF-8. Refusing to start."
-        ) from exc
-    token = text.strip()
+        raise ValueError(f"{label} is not valid UTF-8. {suffix}") from exc
+    return text.strip()
+
+
+def _read_token_file(path: str) -> str:
+    """Read a regular token file. The error does not include the contents.
+
+    Docker's 0444 secret mount is not accepted: the host file must be
+    mode 0400 and owned by the user that runs Lantern. See
+    `read_private_file` for the other checks.
+    """
+    token = read_private_file(path, TOKEN_FILE_ENV)
     from .webapp import api_token_error
 
     if api_token_error(token):
@@ -735,6 +882,7 @@ def _prepare_report(conn, scan, diff):
     assetlib.attach_assets(conn, scan)
     assetlib.attach_assets_to_diff(conn, diff)
     annotate_scan(scan)
+    topology.annotate_topology(scan)
     return scan, diff
 
 
@@ -1165,6 +1313,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(web_bind.error)
         if getattr(args, "open", False) and web_bind.lan_bound:
             return _err("--open works only with a loopback bind (the default 127.0.0.1).")
+        try:
+            switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
+        except ValueError as exc:
+            return _err(str(exc))
         conn.close()
         if web_bind.warning:
             print(web_bind.warning, file=sys.stderr, flush=True)
@@ -1201,6 +1353,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 kwargs["open_url"] = one_time_open_link(args.host, args.port, "").split("#", 1)[0]
         if web_bind.lan_bound or web_bind.strict_auth:
             kwargs["api_token"] = web_bind.token
+        if switches:
+            kwargs["switches"] = switches
+            print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
+                  file=sys.stderr, flush=True)
         try:
             serve(db_path, **kwargs)
         except OSError as exc:
@@ -1214,8 +1370,11 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         return _cmd_asset(args, conn)
 
     if args.command == "demo":
-        save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_1(), demo=True, network=demo.DEMO_NETWORK)
-        id2 = save_scan(conn, demo.DEMO_SUBNET, demo.demo_scan_2(), demo=True, network=demo.DEMO_NETWORK)
+        first, second = demo.demo_scan_1(), demo.demo_scan_2()
+        save_scan(conn, demo.DEMO_SUBNET, first, demo=True, network=demo.DEMO_NETWORK,
+                  topology=demo.demo_topology(first))
+        id2 = save_scan(conn, demo.DEMO_SUBNET, second, demo=True, network=demo.DEMO_NETWORK,
+                        topology=demo.demo_topology(second))
         new, diff = load_scan_with_diff(conn, id2)
         html_path = db_path.parent / "demo-report.html"
         write_private_file(html_path, to_html(new, diff))
@@ -1227,9 +1386,18 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         print(f"HTML report: {html_path}")
         return 0
 
+    if args.command == "topology":
+        return _cmd_topology(args, conn)
+
     if args.command == "scan":
         names = _scope_names(args)
         multi = bool(getattr(args, "all", False) or len(names) > 1)
+        try:
+            switches = resolve_switches(args, os.environ, suffix="Nothing was scanned.")
+        except ValueError as exc:
+            return _err(str(exc))
+        if switches and args.demo:
+            return _err("--switch does not work with --demo; the demo has its own switch map.")
         if multi:
             try:
                 chosen = _scopes_to_scan(args)
@@ -1238,6 +1406,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             ran: list[str] = []
             failed: list[tuple[str, str]] = []
             saved: list[tuple[dict, dict | None]] = []
+            stored: list[tuple[int, list[dict], dict]] = []
             seen_hosts: set[str] = set()
             found: dict[str, dict] = {}
             for scope in chosen:
@@ -1267,12 +1436,24 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                     scan_id = save_scan(
                         conn, subnet, devices, demo=False, scope_name=scope.name, network=info,
                     )
+                    stored.append((scan_id, devices, info))
                     ran.append(scope.name)
                     if args.format == "html":
                         scan, diff = load_scan_with_diff(conn, scan_id, scope_name=scope.name)
                         saved.append(_prepare_report(conn, scan, diff))
                 except Exception as exc:
                     failed.append((scope.name, str(exc) or exc.__class__.__name__))
+            if switches and stored:
+                # One read of the switches serves every scope: their tables
+                # cover all VLANs. Each scan gets the tree for its own devices.
+                ips, community = switches
+                if args.format != "json":
+                    print(f"Reading {len(ips)} switch(es) over SNMP...", file=sys.stderr)
+                results = topology.query_switches(ips, community)
+                for scan_id, devices, info in stored:
+                    tree = topology.build_topology(results, devices, info.get("gateway_mac"))
+                    tree["taken_at"] = topology.now_text()
+                    set_topology(conn, scan_id, tree)
             _print_scope_summary(ran, failed, args.format, saved)
             return 1 if failed else 0
         try:
@@ -1284,8 +1465,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             devices, info = scan_subnet(subnet, DEFAULT_PORTS, demo_mode=args.demo)
         except ValueError as exc:
             return _err(str(exc))
+        topo = None
+        if switches:
+            ips, community = switches
+            if args.format == "text":
+                print(f"Reading {len(ips)} switch(es) over SNMP...", file=sys.stderr)
+            topo = topology.map_switches(ips, community, devices, info.get("gateway_mac"))
+        elif args.demo:
+            topo = demo.demo_topology(devices)
         scan_id = save_scan(
-            conn, subnet, devices, demo=args.demo, scope_name=scope_name, network=info,
+            conn, subnet, devices, demo=args.demo, scope_name=scope_name, network=info, topology=topo,
         )
         scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scan_id, scope_name=scope_name))
         if args.format == "json":
@@ -1294,6 +1483,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             print(to_html(scan, diff))
         else:
             _print_text_scan(scan, diff)
+            if scan.get("topology"):
+                print()
+                _print_topology(scan, scan["topology"])
         return 0
 
     if args.command == "diff":

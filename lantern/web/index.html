@@ -67,6 +67,10 @@
   <section id="map" class="map" role="tabpanel" aria-labelledby="tab-map" hidden>
     <div class="map-layout">
       <div class="map-canvas">
+        <div id="map-mode" class="map-mode" role="group" aria-label="Group the map" hidden>
+          <button type="button" data-mode="switch" aria-pressed="true">By switch</button>
+          <button type="button" data-mode="kind" aria-pressed="false">By device type</button>
+        </div>
         <div id="map-svg" class="map-svg"></div>
         <ul id="map-legend" class="map-legend" aria-label="Map legend"></ul>
         <p class="hint" id="map-note">Lines show what each device reaches through the router, grouped by device type. They are not cables: a scan cannot see switches or which Wi-Fi access point a device uses.</p>
