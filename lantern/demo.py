@@ -50,3 +50,53 @@ def demo_scan_2():
         _device("192.168.1.99", "de:ad:be:ef:00:99", None, None, [23, 80])
     )
     return devices
+
+
+def _demo_switches(devices: list[dict]) -> list[dict]:
+    """What two managed switches would report, in `topology.query_switch` form.
+
+    Living room switch: the router on port 1, the media server on port 2,
+    a Wi-Fi access point on port 4 (the TV, two phones, and any new device),
+    and the office switch on port 8. Office switch: the desktop on port 3
+    and the printer on port 5.
+    """
+    macs = {d["ip"]: d["mac"] for d in devices}
+    wifi = [macs["192.168.1.40"], "3a:11:22:33:44:01", "3a:11:22:33:44:02"]
+    if "192.168.1.99" in macs:
+        wifi.append(macs["192.168.1.99"])
+    office_side = [macs["192.168.1.10"], macs["192.168.1.30"], "aa:bb:cc:00:00:30"]
+    living_side = [macs["192.168.1.1"], macs["192.168.1.20"], "aa:bb:cc:00:00:20", *wifi]
+    return [
+        {
+            "ip": "192.168.1.2", "name": "Living room switch", "description": "Example 8-port managed switch",
+            "macs": ["aa:bb:cc:00:00:20"], "error": None,
+            "ports": {
+                1: {"name": "Port 1", "macs": [macs["192.168.1.1"]]},
+                2: {"name": "Port 2", "macs": [macs["192.168.1.20"]]},
+                4: {"name": "Port 4", "macs": sorted(wifi)},
+                8: {"name": "Port 8", "macs": sorted(office_side)},
+            },
+            "neighbors": [{"port": 8, "port_name": "Port 8", "name": "Office switch",
+                           "mac": "aa:bb:cc:00:00:30", "remote_port": "Port 1"}],
+        },
+        {
+            "ip": "192.168.1.3", "name": "Office switch", "description": "Example 8-port managed switch",
+            "macs": ["aa:bb:cc:00:00:30"], "error": None,
+            "ports": {
+                1: {"name": "Port 1", "macs": sorted(living_side)},
+                3: {"name": "Port 3", "macs": [macs["192.168.1.10"]]},
+                5: {"name": "Port 5", "macs": [macs["192.168.1.30"]]},
+            },
+            "neighbors": [{"port": 1, "port_name": "Port 1", "name": "Living room switch",
+                           "mac": "aa:bb:cc:00:00:20", "remote_port": "Port 8"}],
+        },
+    ]
+
+
+def demo_topology(devices: list[dict]) -> dict:
+    """A switch map for the demo scans, built the same way as a real one."""
+    from .topology import build_topology
+
+    tree = build_topology(_demo_switches(devices), devices, DEMO_NETWORK["gateway_mac"])
+    tree["taken_at"] = None
+    return tree

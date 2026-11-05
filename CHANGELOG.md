@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Switch map.** With managed switches that have SNMP on, `lantern scan --switch IP` (repeatable), `lantern topology --switch IP` (attach a map to the latest saved scan), and `lantern web --switch IP` read each switch's MAC address table and LLDP neighbours with a read-only SNMPv2c community, and work out which switch and port every device is on. The dashboard map gets a **By switch** view (switches around the router, uplinks as arcs, a dashed line for a shared port such as a Wi-Fi access point), and device cards show "Switch: name, port". Text output prints the tree; JSON reports add `switch_map` and a per-device `switch_port`. The community comes from `--snmp-community-file`, `LANTERN_SNMP_COMMUNITY_FILE`, or `LANTERN_SNMP_COMMUNITY`, gets the token file's checks, and is never stored or printed. The SNMP client is new stdlib code (`snmp.py`): it can only encode read requests, bounds-checks every reply, and caps rows, time, and switch count. SNMPv3 is not supported (no AES in the standard library). The demo includes two example switches.
+- Schema 6 adds `scans.topology` (the switch map as JSON). As with every upgrade, an older database is copied to `.v5.bak` first. 1.1.0 refuses a schema 6 database.
+
 ## 1.1.0 - 2026-11-05
 
 Adds a network map and names devices from what they announce. Schema 5: the first 1.1.0 run copies a 1.0.0 database to `.v4.bak` and upgrades it; older scans still draw, with a guessed router. Everything 1.0.0 promised stays compatible; the new JSON fields are additions. Switch topology (which device sits on which switch port) needs SNMP or LLDP and is not in this release.

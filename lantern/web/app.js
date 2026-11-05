@@ -236,6 +236,15 @@ function identityLine(device) {
   return parts.join(" · ");
 }
 
+function switchPortLine(device) {
+  const where = device.switch_port;
+  if (!where) return "";
+  const shared = where.shared
+    ? ` (shared with ${esc(Math.max(1, (where.mac_count || 2) - 1))} other address(es): usually Wi-Fi or an unmanaged switch)`
+    : "";
+  return `<p>Switch: ${esc(where.switch_name || where.switch)}, ${esc(where.port)}${shared}</p>`;
+}
+
 function renderDevice(device) {
   const name = esc(displayName(device));
   const kind = KIND_LABELS[device.kind];
@@ -262,6 +271,7 @@ function renderDevice(device) {
       ? `<p>Tags: ${device.tags.map((tag) => esc(tag)).join(", ")}</p>`
       : "",
     device.notes ? `<p>Notes: ${esc(device.notes)}</p>` : "",
+    switchPortLine(device),
   ].join("");
   return `<article class="device ${device.trusted ? "" : "unknown"}">
     <h2>${name} ${trustBadge}</h2>
@@ -492,9 +502,10 @@ $("history").addEventListener("change", async (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Map tab: the router in the middle, devices grouped by kind around it.
-// Built with DOM calls and textContent only, so no device-supplied text is
-// ever parsed as markup. Lines mean "reached through the router", not cables.
+// Map tab: the router in the middle, devices grouped by kind around it, or,
+// when switches were read, by the switch they were seen on. Built with DOM
+// calls and textContent only, so no device-supplied text is ever parsed as
+// markup. In the kind view lines mean "reached through the router", not cables.
 // ---------------------------------------------------------------------------
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -520,54 +531,6 @@ function shortText(value, max) {
 
 function deviceKey(device) {
   return device.mac || device.ip;
-}
-
-function mapLayout(devices, gatewayIp) {
-  const router = devices.find((d) => d.ip === gatewayIp) || null;
-  const others = devices.filter((d) => d !== router);
-  const known = new Set(MAP_KIND_ORDER);
-  const kindOf = (d) => (known.has(d.kind) ? d.kind : (d.kind ? "other" : "unknown"));
-  const groups = MAP_KIND_ORDER
-    .map((kind) => ({ kind, items: others.filter((d) => kindOf(d) === kind) }))
-    .filter((g) => g.items.length);
-  const total = Math.max(1, others.length);
-  const hubRadius = 120;
-  const ringStart = 230;
-  const ringGap = 92; // node plus its two label lines
-  const nodeGap = 104; // arc length between neighbours: room for a 20-character label
-  const minSpan = groups.length > 1 ? 0.35 : Math.PI * 2;
-  // Give small groups a minimum wedge, then scale everything back to a circle.
-  const raw = groups.map((g) => Math.max((g.items.length / total) * Math.PI * 2, minSpan));
-  const scale = (Math.PI * 2) / raw.reduce((a, b) => a + b, 0);
-  const placed = [];
-  const hubs = [];
-  let angle = -Math.PI / 2;
-  let maxRadius = ringStart;
-  groups.forEach((group, gi) => {
-    const span = raw[gi] * scale;
-    const mid = angle + span / 2;
-    hubs.push({ kind: group.kind, count: group.items.length,
-      x: Math.cos(mid) * hubRadius, y: Math.sin(mid) * hubRadius, angle: mid });
-    let index = 0;
-    let ring = 0;
-    while (index < group.items.length) {
-      const radius = ringStart + ring * ringGap;
-      const fit = Math.max(1, Math.floor((span * radius) / nodeGap));
-      const row = group.items.slice(index, index + fit);
-      // Odd rings sit half a slot over, so labels do not stack on the ring inside.
-      const shift = ring % 2 ? 0.5 : 0;
-      row.forEach((device, i) => {
-        const slot = Math.min(row.length, fit);
-        const a = row.length === 1 && !shift ? mid : angle + span * ((i + 0.5 + shift) / (slot + shift));
-        placed.push({ device, kind: group.kind, x: Math.cos(a) * radius, y: Math.sin(a) * radius, hub: gi });
-      });
-      maxRadius = Math.max(maxRadius, radius);
-      index += row.length;
-      ring += 1;
-    }
-    angle += span;
-  });
-  return { router, hubs, placed, radius: maxRadius + 70 };
 }
 
 function mapNode(device, x, y, kind, network) {
@@ -605,11 +568,127 @@ function refreshMapIfShown() {
   if (!$("map").hidden) renderMap();
 }
 
+// Place groups of devices in wedges around the centre. Each group gets a hub
+// on an inner ring and its devices on rings outside it.
+function wedgeLayout(groups, total) {
+  const hubRadius = 130;
+  const ringStart = 240;
+  const ringGap = 92; // node plus its two label lines
+  const nodeGap = 104; // arc length between neighbours: room for a 20-character label
+  const minSpan = groups.length > 1 ? 0.35 : Math.PI * 2;
+  // Give small groups a minimum wedge, then scale everything back to a circle.
+  const raw = groups.map((g) => Math.max((Math.max(g.items.length, 1) / Math.max(1, total)) * Math.PI * 2, minSpan));
+  const scale = (Math.PI * 2) / raw.reduce((a, b) => a + b, 0);
+  const placed = [];
+  const hubs = [];
+  let angle = -Math.PI / 2;
+  let maxRadius = ringStart;
+  groups.forEach((group, gi) => {
+    const span = raw[gi] * scale;
+    const mid = angle + span / 2;
+    hubs.push({ ...group, count: group.items.length,
+      x: Math.cos(mid) * hubRadius, y: Math.sin(mid) * hubRadius, angle: mid });
+    let index = 0;
+    let ring = 0;
+    while (index < group.items.length) {
+      const radius = ringStart + ring * ringGap;
+      const fit = Math.max(1, Math.floor((span * radius) / nodeGap));
+      const row = group.items.slice(index, index + fit);
+      // Odd rings sit half a slot over, so labels do not stack on the ring inside.
+      const shift = ring % 2 ? 0.5 : 0;
+      row.forEach((device, i) => {
+        const slot = Math.min(row.length, fit);
+        const a = row.length === 1 && !shift ? mid : angle + span * ((i + 0.5 + shift) / (slot + shift));
+        placed.push({ device, kind: group.kind || device.kind, x: Math.cos(a) * radius, y: Math.sin(a) * radius, hub: gi });
+      });
+      maxRadius = Math.max(maxRadius, radius);
+      index += row.length;
+      ring += 1;
+    }
+    angle += span;
+  });
+  return { hubs, placed, radius: maxRadius + 70 };
+}
+
+function mapLayout(devices, gatewayIp) {
+  const router = devices.find((d) => d.ip === gatewayIp) || null;
+  const others = devices.filter((d) => d !== router);
+  const known = new Set(MAP_KIND_ORDER);
+  const kindOf = (d) => (known.has(d.kind) ? d.kind : (d.kind ? "other" : "unknown"));
+  const groups = MAP_KIND_ORDER
+    .map((kind) => ({ kind, label: KIND_LABELS[kind] || kind, items: others.filter((d) => kindOf(d) === kind) }))
+    .filter((g) => g.items.length);
+  return { router, ...wedgeLayout(groups, others.length) };
+}
+
+// Switches that answered, top of the tree first.
+function answeredSwitches(scan) {
+  const topo = scan && scan.topology;
+  if (!topo || !Array.isArray(topo.switches)) return [];
+  return topo.switches.filter((s) => !s.error)
+    .sort((a, b) => (a.depth - b.depth) || String(a.name || a.ip).localeCompare(String(b.name || b.ip)));
+}
+
+// By switch: one wedge per switch that answered, plus one for devices no
+// switch saw. A switch hub hangs off the router or off its parent switch.
+function switchLayout(devices, gatewayIp, switches) {
+  const router = devices.find((d) => d.ip === gatewayIp) || null;
+  const switchIps = new Set(switches.map((s) => s.ip));
+  const leaves = devices.filter((d) => d !== router && !d.is_switch && !switchIps.has(d.ip));
+  const ordered = [];
+  const visit = (s) => {
+    ordered.push(s);
+    switches.filter((c) => c.parent === s.ip).forEach(visit);
+  };
+  switches.filter((s) => !s.parent || !switches.some((p) => p.ip === s.parent)).forEach(visit);
+  const groups = ordered.map((s) => ({
+    switchInfo: s,
+    label: s.name || s.ip,
+    device: devices.find((d) => d.ip === s.ip) || null,
+    items: leaves.filter((d) => d.switch_port && d.switch_port.switch === s.ip),
+  }));
+  const loose = leaves.filter((d) => !d.switch_port || !switchIps.has(d.switch_port.switch));
+  if (loose.length) groups.push({ label: "Not seen on a switch", items: loose, loose: true });
+  return { router, ...wedgeLayout(groups, leaves.length) };
+}
+
+function mapMode() {
+  try { return sessionStorage.getItem("lantern-map-mode") === "kind" ? "kind" : "switch"; } catch (err) { return "switch"; }
+}
+
+function setMapMode(mode) {
+  try { sessionStorage.setItem("lantern-map-mode", mode); } catch (err) { /* storage blocked */ }
+  renderMap();
+}
+
+function switchNode(hub) {
+  const s = hub.switchInfo;
+  const g = svgEl("g", {
+    class: "map-switch", transform: `translate(${hub.x.toFixed(1)} ${hub.y.toFixed(1)})`,
+    tabindex: 0, role: "button", "aria-label": `Switch ${hub.label} ${s.ip}, ${hub.count} devices`,
+  });
+  g.dataset.switch = s.ip;
+  g.appendChild(svgEl("rect", { x: -26, y: -15, width: 52, height: 30, rx: 6 }));
+  g.appendChild(svgEl("text", { class: "map-glyph", "text-anchor": "middle", dy: "0.35em" }, "SW"));
+  g.appendChild(svgEl("text", { class: "map-label", "text-anchor": "middle", y: 30 }, shortText(hub.label, 22)));
+  g.appendChild(svgEl("text", { class: "map-sublabel", "text-anchor": "middle", y: 43 }, s.ip));
+  g.appendChild(svgEl("title", {}, `${hub.label} (${s.ip})${s.description ? ` - ${s.description}` : ""}`));
+  return g;
+}
+
 function renderMap() {
   const holder = $("map-svg");
   if (!holder) return;
   holder.textContent = "";
   $("map-legend").textContent = "";
+  const switches = answeredSwitches(currentScan);
+  const modeBox = $("map-mode");
+  if (modeBox) {
+    modeBox.hidden = !switches.length;
+    for (const b of modeBox.querySelectorAll ? modeBox.querySelectorAll("button") : []) {
+      b.setAttribute("aria-pressed", String(b.dataset.mode === mapMode()));
+    }
+  }
   if (!currentScan || !currentScan.devices.length) {
     const p = document.createElement("p");
     p.className = "empty";
@@ -619,7 +698,15 @@ function renderMap() {
     return;
   }
   const network = currentScan.network || {};
-  const layout = mapLayout(currentScan.devices, network.gateway_ip);
+  const bySwitch = switches.length > 0 && mapMode() === "switch";
+  const layout = bySwitch
+    ? switchLayout(currentScan.devices, network.gateway_ip, switches)
+    : mapLayout(currentScan.devices, network.gateway_ip);
+  $("map-note").textContent = bySwitch
+    ? "Lines show the switch port each device was seen on, read from the switches' MAC address tables. "
+      + "A dashed line means several devices share that port, usually a Wi-Fi access point or an unmanaged switch."
+    : "Lines show what each device reaches through the router, grouped by device type. They are not cables: "
+      + "a scan cannot see switches or which Wi-Fi access point a device uses.";
   const size = layout.radius * 2;
   const svg = svgEl("svg", {
     viewBox: `${-layout.radius} ${-layout.radius} ${size} ${size}`,
@@ -630,17 +717,41 @@ function renderMap() {
   const nodes = svgEl("g", { class: "map-nodes" });
   svg.append(lines, nodes);
 
+  const hubAt = {};
+  layout.hubs.forEach((hub) => { if (hub.switchInfo) hubAt[hub.switchInfo.ip] = hub; });
   for (const hub of layout.hubs) {
-    lines.appendChild(svgEl("line", { class: "map-trunk", x1: 0, y1: 0, x2: hub.x.toFixed(1), y2: hub.y.toFixed(1) }));
+    const parent = hub.switchInfo && hub.switchInfo.parent ? hubAt[hub.switchInfo.parent] : null;
+    if (parent) {
+      // Switch to switch: an arc along the hub ring, so the link never
+      // looks like it goes through the router in the middle.
+      const r = Math.hypot(hub.x, hub.y);
+      let turn = hub.angle - parent.angle;
+      while (turn > Math.PI) turn -= Math.PI * 2;
+      while (turn < -Math.PI) turn += Math.PI * 2;
+      const sweep = turn >= 0 ? 1 : 0;
+      lines.appendChild(svgEl("path", {
+        class: "map-trunk uplink", fill: "none",
+        d: `M ${parent.x.toFixed(1)} ${parent.y.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 ${sweep} ${hub.x.toFixed(1)} ${hub.y.toFixed(1)}`,
+      }));
+      continue;
+    }
+    const cls = hub.loose ? "map-trunk loose" : (hub.switchInfo ? "map-trunk uplink" : "map-trunk");
+    lines.appendChild(svgEl("line", { class: cls, x1: 0, y1: 0, x2: hub.x.toFixed(1), y2: hub.y.toFixed(1) }));
   }
   for (const item of layout.placed) {
     const hub = layout.hubs[item.hub];
-    const cls = deviceMatches(item.device) ? "map-link" : "map-link dim";
+    const classes = ["map-link"];
+    if (!deviceMatches(item.device)) classes.push("dim");
+    if (bySwitch && item.device.switch_port && item.device.switch_port.shared) classes.push("shared");
     lines.appendChild(svgEl("line", {
-      class: cls, x1: hub.x.toFixed(1), y1: hub.y.toFixed(1), x2: item.x.toFixed(1), y2: item.y.toFixed(1),
+      class: classes.join(" "), x1: hub.x.toFixed(1), y1: hub.y.toFixed(1), x2: item.x.toFixed(1), y2: item.y.toFixed(1),
     }));
   }
   for (const hub of layout.hubs) {
+    if (hub.switchInfo) {
+      nodes.appendChild(switchNode(hub));
+      continue;
+    }
     const g = svgEl("g", { class: "map-hub", transform: `translate(${hub.x.toFixed(1)} ${hub.y.toFixed(1)})` });
     g.appendChild(svgEl("circle", { r: 6 }));
     const cos = Math.cos(hub.angle);
@@ -648,7 +759,7 @@ function renderMap() {
     const dx = anchor === "end" ? -10 : (anchor === "start" ? 10 : 0);
     const dy = anchor === "middle" ? (Math.sin(hub.angle) < 0 ? -12 : 20) : 4;
     g.appendChild(svgEl("text", { class: "map-hub-label", "text-anchor": anchor, x: dx, y: dy },
-      `${KIND_LABELS[hub.kind] || hub.kind} (${hub.count})`));
+      `${hub.label} (${hub.count})`));
     nodes.appendChild(g);
   }
   if (layout.router) {
@@ -663,29 +774,36 @@ function renderMap() {
   }
   for (const item of layout.placed) nodes.appendChild(mapNode(item.device, item.x, item.y, item.kind, network));
 
-  svg.addEventListener("click", (event) => {
-    const node = event.target.closest("[data-key]");
-    if (node) selectMapDevice(node.dataset.key);
-  });
+  const activate = (target) => {
+    const node = target.closest("[data-key]");
+    if (node) { selectMapDevice(node.dataset.key); return true; }
+    const sw = target.closest("[data-switch]");
+    if (sw) { selectMapSwitch(sw.dataset.switch); return true; }
+    return false;
+  };
+  svg.addEventListener("click", (event) => { activate(event.target); });
   svg.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
-    const node = event.target.closest("[data-key]");
-    if (!node) return;
-    event.preventDefault();
-    selectMapDevice(node.dataset.key);
+    if (activate(event.target)) event.preventDefault();
   });
   holder.appendChild(svg);
-  renderMapLegend(network);
+  renderMapLegend(network, bySwitch);
   const selected = currentScan.devices.find((d) => deviceKey(d) === mapSelected);
   showMapDetail(selected || null);
 }
 
-function renderMapLegend(network) {
+function renderMapLegend(network, bySwitch) {
   const legend = $("map-legend");
   const items = [
     ["sev-critical", "Critical risk"], ["sev-high", "High risk"], ["sev-medium", "Medium risk"],
     ["sev-low", "Low risk"], ["sev-none", "No risky ports"], ["untrusted", "Dashed ring: not trusted yet"],
   ];
+  if (bySwitch) {
+    items.push(["", "Dashed line: a shared port (Wi-Fi or an unmanaged switch)"]);
+    const topo = currentScan.topology || {};
+    const failed = (topo.switches || []).filter((s) => s.error).length;
+    if (failed) items.push(["", `${failed} switch(es) did not answer`]);
+  }
   if (network.gateway_guessed) items.push(["", "Router guessed from its ports and address"]);
   for (const [cls, text] of items) {
     const li = document.createElement("li");
@@ -697,6 +815,28 @@ function renderMapLegend(network) {
     li.appendChild(document.createTextNode(text));
     legend.appendChild(li);
   }
+}
+
+function selectMapSwitch(ip) {
+  const topo = (currentScan && currentScan.topology) || {};
+  const s = (topo.switches || []).find((item) => item.ip === ip);
+  const device = currentScan && currentScan.devices.find((d) => d.ip === ip);
+  if (device) { selectMapDevice(deviceKey(device)); return; }
+  mapSelected = null;
+  document.querySelectorAll("#map-svg .map-node").forEach((node) => node.classList.remove("selected"));
+  const panel = $("map-detail");
+  if (!s) { showMapDetail(null); return; }
+  const parent = s.parent ? (topo.switches || []).find((item) => item.ip === s.parent) : null;
+  const up = parent
+    ? `Uplink ${s.port_to_parent || "?"} to ${parent.name || parent.ip}, ${s.parent_port || "?"}`
+    : (s.port_to_parent ? `Router on ${s.port_to_parent}` : "");
+  panel.innerHTML = `<article class="device">
+    <h2>${esc(s.name || s.ip)} <span class="badge">switch</span></h2>
+    <p class="meta">${esc(s.ip)}</p>
+    ${s.description ? `<p>${esc(s.description)}</p>` : ""}
+    ${up ? `<p>${esc(up)}</p>` : ""}
+    <p class="hint">This switch's management address did not show up in the scan, so it has no device card.</p>
+  </article>`;
 }
 
 function selectMapDevice(key) {
@@ -732,6 +872,10 @@ function showTab(name) {
 }
 
 $("tab-devices").addEventListener("click", () => showTab("devices"));
+$("map-mode").addEventListener("click", (event) => {
+  const button = event.target.closest && event.target.closest("button[data-mode]");
+  if (button) setMapMode(button.dataset.mode);
+});
 $("tab-map").addEventListener("click", () => showTab("map"));
 $("tabs").addEventListener("keydown", (event) => {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
