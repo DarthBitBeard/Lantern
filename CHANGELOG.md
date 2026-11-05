@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- CI pins `actions/checkout` at v7.0.1 and `actions/setup-python` at v7.1.0, the same commit in every workflow. The Docker image installs those hash-pinned build tools, then the package with `--no-deps --no-build-isolation`, so the image build does not fetch an unpinned setuptools. The monthly vendor-table job pushes a new branch for each run and does not force-push.
 - A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
 
 ## 1.3.0 - 2026-11-05
