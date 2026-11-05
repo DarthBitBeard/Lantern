@@ -649,6 +649,11 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             connect(self.path)
         self.assertIn("newer", str(ctx.exception))
+        self.assertIn(
+            "Refusing to change it (schema 99 vs 6).",
+            str(ctx.exception),
+        )
+        self.assertNotIn("Refusing to change it.", str(ctx.exception))
         self.assertIn("schema 99 vs 6", str(ctx.exception))
         self.assertIn("Upgrade Lantern to open this file.", str(ctx.exception))
         self.assertNotIn(self.path.name, str(ctx.exception))
