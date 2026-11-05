@@ -1,14 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-11-04
+
+First stable release. From here on, `/api/v1`, the command-line flags, exit codes and `--format json` output, and the export columns stay compatible for every 1.x release (see "Versioning and compatibility" in the README). There is no schema change since 0.5.0, so a 0.5.0 database opens as is. Windows users can install it like an app with `lantern-1.0.0-windows-x64-setup.exe` (first entry below). Beyond the mocked-network test suite on Linux, macOS and Windows, this release was checked with a real scan of one Windows /24 network from the installed app: the subnet was detected, and 40 devices were found with MAC addresses, hostnames, and findings. Other networks and platforms may still find gaps; please report anything it misses.
 
 - Windows installer: `lantern-<version>-windows-x64-setup.exe` installs Lantern for the current user with no Python and no admin rights. It adds `lantern` to the user PATH (optional), adds Start Menu entries for the dashboard and a command prompt, and keeps scan history in `%LOCALAPPDATA%\Lantern`. Uninstalling keeps that history. A new CI workflow builds the one-file `lantern.exe` (PyInstaller) and the installer (Inno Setup), then installs, runs, and uninstalls them on a clean Windows runner.
 - `lantern web --open` opens the dashboard in the default browser once it is listening. Loopback only; `--open` with `--allow-lan` exits 2. With strict auth the token travels in the link's `#fragment`, as in the printed link. Because the token goes straight to the local browser, `--open` can mint one without a terminal (a Start Menu shortcut), and then prints nothing.
-
-## 1.0.0 - 2026-11-04
-
-First stable release. From here on, `/api/v1`, the command-line flags, exit codes and `--format json` output, and the export columns stay compatible for every 1.x release (see "Versioning and compatibility" in the README). There is no schema change since 0.5.0, so a 0.5.0 database opens as is. Discovery has been tested with mocked network calls and the offline suite on Linux, macOS and Windows, but not yet against a live home network; please report anything it misses.
-
 - `lantern asset set` by IP address now prints a note on stderr that the record follows the address, so it can land on a different device if DHCP reassigns it. Devices with a MAC are keyed by MAC and are not affected.
 - Packaging: the license is now declared as the SPDX expression `MIT` with `license-files`, replacing the deprecated `{text = "MIT"}` form and the license classifier that newer setuptools stop supporting after 2027-02-18. The version now lives only in `lantern/__init__.py`. `pyproject.toml` reads it from there.
 - CI: runs once per change instead of twice (pushes to `main` and tags, plus pull requests), cancels a run that a newer push replaces, and has a `ruff check` job with a hash-pinned ruff. Dependabot now also watches the hash-pinned requirement files in `.github`.
