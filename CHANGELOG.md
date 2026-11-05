@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 - 2026-11-05
+
+Adds a network map and names devices from what they announce. Schema 5: the first 1.1.0 run copies a 1.0.0 database to `.v4.bak` and upgrades it; older scans still draw, with a guessed router. Everything 1.0.0 promised stays compatible; the new JSON fields are additions. Switch topology (which device sits on which switch port) needs SNMP or LLDP and is not in this release.
+
+- **Map tab.** The dashboard draws the network: the router in the middle and every device around it, grouped by kind and colored by risk. Untrusted devices have a dashed ring, and this computer has an amber ring. Click a device for its full card with the trust controls. Search and the filter dim non-matching devices. The lines mean "reached through the router", not cables, and the map says so.
+- **Device names and kinds.** Each scan also sends one SSDP search and one mDNS query on the local link and listens for 2.5 seconds, alongside the ping and port sweep, so scans take no longer. Devices that answer get a friendly name, model, manufacturer, and service list (for example a printer's model or a TV's cast name). A UPnP description is fetched only from the device that announced it, over plain HTTP inside the scanned subnet, capped at 64 KiB, and DTDs are refused. Every device also gets a kind (router, computer, server, NAS, printer, camera, TV or media, smart home, phone, other) with a plain-English reason, shown on its card. The router is this computer's default route when it is inside the subnet, otherwise a best guess that the map labels as a guess.
+- Schema 5 stores each scan's gateway address and MAC and this computer's address, plus each device's announced identity. As with every upgrade, an older database is copied to `.v4.bak` first. 1.0.0 refuses a schema 5 database.
+- The dashboard's `/api/scans/*` responses add `network` (gateway, gateway MAC, this computer's address, and whether the gateway was guessed) to each scan. They and `--format json` reports add `kind`, `kind_reason`, and `identity` to each device. Nothing is renamed or removed. `/api/v1` and export are unchanged.
+
 ## 1.0.0 - 2026-11-04
 
 First stable release. From here on, `/api/v1`, the command-line flags, exit codes and `--format json` output, and the export columns stay compatible for every 1.x release (see "Versioning and compatibility" in the README). There is no schema change since 0.5.0, so a 0.5.0 database opens as is. Windows users can install it like an app with `lantern-1.0.0-windows-x64-setup.exe` (first entry below). Beyond the mocked-network test suite on Linux, macOS and Windows, this release was checked with a real scan of one Windows /24 network from the installed app: the subnet was detected, and 40 devices were found with MAC addresses, hostnames, and findings. Other networks and platforms may still find gaps; please report anything it misses.
