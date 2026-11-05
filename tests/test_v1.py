@@ -1591,3 +1591,41 @@ class FilteredBlobCapTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, 413)
         finally:
             conn.close()
+
+    def test_retained_plus_one_row_exactly_at_the_cap_is_accepted(self):
+        """retained + stored == cap is kept. `>` changed to `>=` refuses that row."""
+        first = _device("10.2.0.41", "aa:bb:cc:dd:ee:41", hostname="a")
+        second = _device("10.2.0.42", "aa:bb:cc:dd:ee:42", hostname="b")
+        db = self._database([first, second], [first["mac"], second["mac"]])
+        conn = connect(db)
+        try:
+            scan_id = conn.execute("SELECT id FROM scans").fetchone()[0]
+            sizes = []
+            for ip, mac, hostname, label, ports_len, findings_len, identity_len in conn.execute(
+                """
+                SELECT ip, mac, hostname, label,
+                       LENGTH(IFNULL(open_ports, '')),
+                       LENGTH(IFNULL(findings, '')),
+                       LENGTH(IFNULL(identity, ''))
+                FROM devices WHERE scan_id = ?
+                ORDER BY id
+                """,
+                (scan_id,),
+            ):
+                sizes.append(v1._stored_text_bytes(
+                    ip, mac, hostname, label, ports_len, findings_len, identity_len,
+                ))
+            self.assertEqual(len(sizes), 2)
+            cap = sum(sizes)
+            self.assertLess(max(sizes), cap)
+            scan = v1._scan_header(conn, scan_id)
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", cap):
+                shown = v1._matching_devices(
+                    conn, scan, ["keep"], None, private=False,
+                )
+            self.assertEqual(
+                [item["ip"] for item in shown],
+                ["10.2.0.41", "10.2.0.42"],
+            )
+        finally:
+            conn.close()
