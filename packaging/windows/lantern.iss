@@ -1,7 +1,11 @@
 ; Inno Setup script for the Lantern Windows installer.
 ;
-; Build (after PyInstaller has written dist\lantern.exe):
-;   iscc /DAppVersion=1.0.0 /DExeDir=<folder with lantern.exe> /DOutDir=<output folder> packaging\windows\lantern.iss
+; Build (after PyInstaller has written a one-folder build, dist\lantern\):
+;   iscc /DAppVersion=1.1.0 /DAppDir=<folder with lantern.exe and _internal> /DOutDir=<output folder> packaging\windows\lantern.iss
+;
+; The installer ships PyInstaller's one-folder form, not the one-file
+; lantern.exe: a one-file exe unpacks itself into a temp folder on every
+; run, which antivirus heuristics often flag, and it starts slower.
 ;
 ; Installs for the current user only: no admin prompt, files go to
 ; %LOCALAPPDATA%\Programs\Lantern, and that folder is added to the user's
@@ -11,8 +15,8 @@
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z
 #endif
-#ifndef ExeDir
-  #define ExeDir "..\..\dist"
+#ifndef AppDir
+  #define AppDir "..\..\dist\lantern"
 #endif
 #ifndef OutDir
   #define OutDir "..\..\dist"
@@ -56,8 +60,14 @@ Name: "desktopicon"; Description: "Create a desktop shortcut for the dashboard";
 ; Per-user data folder shared by the shortcuts and the command prompt.
 Name: "{localappdata}\Lantern"
 
+[InstallDelete]
+; Clear the previous build's runtime files so an upgrade never mixes two
+; PyInstaller builds. Scan data is in {localappdata}\Lantern, not here.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "{#ExeDir}\lantern.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#AppDir}\lantern.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#AppDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "lantern.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
