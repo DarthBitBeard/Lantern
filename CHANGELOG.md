@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-- A newer-schema error names the two schema numbers, for example `schema 99 vs 6`, and says to upgrade Lantern. That line still has no file path.
+- A newer-schema error says `Refusing to change it (schema 99 vs 6).` The full stop comes after the schema numbers. That line still has no file path and still says to upgrade Lantern.
 - Opening a database, or a later database failure, prints `Cannot open database.` or `Database error.` and does not include the file path or the raw database error. A newer schema and a symlink still have their own fixed messages, chosen by the kind of failure, also without the path. An unreadable export path, a demo report that cannot be written, and a saved scan whose JSON is corrupt exit 2 with a fixed message and no traceback. A loose-permission warning strips control and ANSI characters from the path it prints. The exit code is still 2.
 - CI pins `actions/checkout` at v7.0.1 and `actions/setup-python` at v7.1.0, the same commit in every workflow. The Docker image installs those hash-pinned build tools, then the package with `--no-deps --no-build-isolation`, so the image build does not fetch an unpinned setuptools. The monthly vendor-table job pushes a new branch for each run and does not force-push.
 - A catchable Ctrl-C or SIGTERM during `lantern export --output` removes the `.lantern-export-*` file that write created and a partial new file. With `--force`, the previous file stays until the replacement finishes. Ctrl-C then exits with status 130 and does not print a traceback. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup.
 - A tag or criticality filter on devices is applied before the 100000-row and 32 MiB caps. A small selection from a large scan is returned. The same scan with no filter is still refused. The caps still apply to the devices that match, and an over-limit result is a complete error, not a partial body.
-- A filtered device read measures each row before decoding it. A row over 32 MiB is a 413, including a row the filter would skip. Matching rows are kept only while their stored text stays within 32 MiB. The 100000-row cap and the encoded-output cap still apply. The CLI exits 2.
+- A filtered device read measures each row before decoding it. The measure is SQLite `LENGTH` (characters, not UTF-8 bytes). A row over 33554432 characters is a 413, including a row the filter would skip. Matching rows are kept only while their stored text stays within that character count. This is not a limit on process memory. The 100000-row cap and the 32 MiB encoded-output cap still apply. The CLI exits 2.
+- The README limitations section records what is already true: inventory is edited with `lantern asset` and shown on authenticated device cards, the static page does not embed those fields, there is no dashboard inventory editor, no second API role, no TLS, no SNMPv3, SNMP was checked only against a simulated agent, and the Windows binaries are not code-signed. Fingerprinting, vulnerability matching, and watch or local alerts are not in this version.
 
 ## 1.3.0 - 2026-11-05
 

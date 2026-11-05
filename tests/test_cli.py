@@ -346,9 +346,11 @@ class CliTests(unittest.TestCase):
         text = err.getvalue()
         self.assertEqual(code, 2)
         self.assertIn(
-            "Database schema is newer than this Lantern. Refusing to change it.",
+            "Database schema is newer than this Lantern. Refusing to change it "
+            "(schema 99 vs 6).",
             text,
         )
+        self.assertNotIn("Refusing to change it.", text)
         self.assertIn("schema 99 vs 6", text)
         self.assertIn("Upgrade Lantern to open this file.", text)
         self.assertNotIn(marker, text)

@@ -86,15 +86,15 @@ class CorruptScanError(ValueError):
 
 _SYMLINK_MESSAGE = "Database path is a symlink. Lantern will not follow it."
 _NEWER_SCHEMA_MESSAGE = (
-    "Database schema is newer than this Lantern. Refusing to change it."
+    "Database schema is newer than this Lantern. Refusing to change it"
 )
 _CORRUPT_SCAN_MESSAGE = "The saved scan could not be read."
 
 
 def _newer_message(found: int, target: int) -> str:
     return (
-        f"{_NEWER_SCHEMA_MESSAGE} "
-        f"(schema {found} vs {target}). Upgrade Lantern to open this file."
+        f"{_NEWER_SCHEMA_MESSAGE} (schema {found} vs {target}). "
+        "Upgrade Lantern to open this file."
     )
 
 

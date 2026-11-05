@@ -1533,3 +1533,99 @@ class FilteredBlobCapTests(unittest.TestCase):
         seen = self._refuse(self._database(devices, macs), cap=cap)
         decoded = sum(1 for text in seen if marker in text)
         self.assertLess(decoded, len(devices))
+
+    def test_router_port_text_at_the_character_limit_is_allowed(self):
+        """LENGTH(open_ports) == cap is allowed. `>` changed to `>=` refuses it."""
+        blob = "ü" * 8
+        self.assertEqual(len(blob), 8)
+        self.assertGreater(len(blob.encode("utf-8")), len(blob))
+        db = self._database([_device("10.2.0.30", "aa:bb:cc:dd:ee:30")], [])
+        conn = connect(db)
+        try:
+            scan_id = conn.execute("SELECT id FROM scans").fetchone()[0]
+            conn.execute("UPDATE devices SET open_ports = ?", (blob,))
+            conn.commit()
+            measured = conn.execute(
+                "SELECT LENGTH(open_ports) FROM devices WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()[0]
+            self.assertEqual(measured, len(blob))
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", measured):
+                self.assertEqual(v1._router_for_scan(conn, scan_id, None), (None, False))
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", measured - 1):
+                with self.assertRaises(v1.V1Error) as caught:
+                    v1._router_for_scan(conn, scan_id, None)
+            self.assertEqual(caught.exception.status, 413)
+        finally:
+            conn.close()
+
+    def test_stored_row_at_the_character_limit_is_decoded(self):
+        """The summed LENGTH of a row == cap is decoded. `>` changed to `>=` refuses it."""
+        device = _device("10.2.0.31", "aa:bb:cc:dd:ee:31", hostname="ü")
+        self.assertEqual(len(device["hostname"]), 1)
+        self.assertGreater(len(device["hostname"].encode("utf-8")), 1)
+        db = self._database([device], [])
+        conn = connect(db)
+        try:
+            scan_id = conn.execute("SELECT id FROM scans").fetchone()[0]
+            ip, mac, hostname, label, ports_len, findings_len, identity_len = conn.execute(
+                """
+                SELECT ip, mac, hostname, label,
+                       LENGTH(IFNULL(open_ports, '')),
+                       LENGTH(IFNULL(findings, '')),
+                       LENGTH(IFNULL(identity, ''))
+                FROM devices WHERE scan_id = ?
+                """,
+                (scan_id,),
+            ).fetchone()
+            stored = v1._stored_text_bytes(
+                ip, mac, hostname, label, ports_len, findings_len, identity_len,
+            )
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", stored):
+                rows = list(v1._iter_stored_devices(conn, scan_id))
+            self.assertEqual([row["ip"] for row in rows], ["10.2.0.31"])
+            self.assertEqual(rows[0]["hostname"], "ü")
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", stored - 1):
+                with self.assertRaises(v1.V1Error) as caught:
+                    list(v1._iter_stored_devices(conn, scan_id))
+            self.assertEqual(caught.exception.status, 413)
+        finally:
+            conn.close()
+
+    def test_retained_plus_one_row_exactly_at_the_cap_is_accepted(self):
+        """retained + stored == cap is kept. `>` changed to `>=` refuses that row."""
+        first = _device("10.2.0.41", "aa:bb:cc:dd:ee:41", hostname="a")
+        second = _device("10.2.0.42", "aa:bb:cc:dd:ee:42", hostname="b")
+        db = self._database([first, second], [first["mac"], second["mac"]])
+        conn = connect(db)
+        try:
+            scan_id = conn.execute("SELECT id FROM scans").fetchone()[0]
+            sizes = []
+            for ip, mac, hostname, label, ports_len, findings_len, identity_len in conn.execute(
+                """
+                SELECT ip, mac, hostname, label,
+                       LENGTH(IFNULL(open_ports, '')),
+                       LENGTH(IFNULL(findings, '')),
+                       LENGTH(IFNULL(identity, ''))
+                FROM devices WHERE scan_id = ?
+                ORDER BY id
+                """,
+                (scan_id,),
+            ):
+                sizes.append(v1._stored_text_bytes(
+                    ip, mac, hostname, label, ports_len, findings_len, identity_len,
+                ))
+            self.assertEqual(len(sizes), 2)
+            cap = sum(sizes)
+            self.assertLess(max(sizes), cap)
+            scan = v1._scan_header(conn, scan_id)
+            with mock.patch.object(v1, "MAX_V1_RESPONSE_BYTES", cap):
+                shown = v1._matching_devices(
+                    conn, scan, ["keep"], None, private=False,
+                )
+            self.assertEqual(
+                [item["ip"] for item in shown],
+                ["10.2.0.41", "10.2.0.42"],
+            )
+        finally:
+            conn.close()
