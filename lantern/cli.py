@@ -462,6 +462,9 @@ def _cmd_export(args, conn) -> int:
         return _err(MESSAGES[exc.code])
     except ExportPathError as exc:
         return _err(str(exc))
+    except (json.JSONDecodeError, CorruptScanError):
+        # A stored row that is not valid JSON: a read problem, not a write one.
+        return _err("The saved scan could not be read.")
     except ValueError:
         return _err("The export could not be written.")
     except Exception:
@@ -1272,6 +1275,10 @@ def main(argv=None) -> int:
         return _dispatch(args, conn, db_path, web_bind)
     except sqlite3.Error:
         return _err("Database error.")
+    except CorruptScanError:
+        # report and diff catch this themselves; topology, scan, and the
+        # rest land here instead of printing a traceback.
+        return _err("The saved scan could not be read.")
     finally:
         conn.close()
 

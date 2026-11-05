@@ -44,6 +44,16 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn('branch="oui-refresh/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"', text)
         self.assertNotIn("oui-refresh/$(date", text)
 
+    def test_oui_refresh_pushes_with_basic_token_auth(self):
+        # GitHub refuses "AUTHORIZATION: bearer" for git push over HTTPS
+        # (checked with a dry-run push); Basic x-access-token is what
+        # actions/checkout uses. The encoded token must be masked.
+        text = (WORKFLOWS / "oui-refresh.yml").read_text(encoding="utf-8")
+        self.assertNotIn("AUTHORIZATION: bearer", text)
+        self.assertIn("x-access-token:", text)
+        self.assertIn('AUTHORIZATION: basic ${auth}', text)
+        self.assertIn('::add-mask::${auth}', text)
+
     def test_dockerfile_does_not_fetch_an_unpinned_build_backend(self):
         text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(BASE_DIGEST, text)
