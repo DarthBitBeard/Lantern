@@ -7,6 +7,7 @@ from the CLI.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import errno
 import io
@@ -14,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import stat
 import tempfile
 import threading
@@ -949,12 +951,87 @@ def _unlink_quiet(path: Path | None) -> None:
         pass
 
 
+class ExportInterrupted(BaseException):
+    """SIGINT or SIGTERM arrived while an export file was being written."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(signum)
+
+
+def _termination_signals() -> tuple[int, ...]:
+    found = []
+    for name in ("SIGINT", "SIGTERM"):
+        value = getattr(signal, name, None)
+        if isinstance(value, int):
+            found.append(value)
+    return tuple(found)
+
+
+@contextlib.contextmanager
+def _during_export_write():
+    """Catch SIGINT and SIGTERM for one write, then restore the old handlers.
+
+    Only the main thread may register signals. A worker thread writes
+    without replacing process handlers. The previous handler is always
+    put back, including when the write fails.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum, _frame):
+        raise ExportInterrupted(signum)
+
+    previous: dict[int, object] = {}
+    try:
+        for sig in _termination_signals():
+            try:
+                previous[sig] = signal.signal(sig, _handler)
+            except (ValueError, OSError):
+                continue
+        yield
+    finally:
+        for sig, old in previous.items():
+            try:
+                signal.signal(sig, old)
+            except (ValueError, OSError):
+                pass
+
+
+def _reraise_termination(signum: int) -> None:
+    """Finish a catchable signal after the owned files are gone.
+
+    Handlers are already restored. A callable previous handler runs
+    (Python turns SIGINT into KeyboardInterrupt). The default action is
+    delivered again so the process still stops. SIGKILL, a power loss,
+    and Windows TerminateProcess never enter this function.
+    """
+    try:
+        previous = signal.getsignal(signum)
+    except (ValueError, OSError):
+        raise ExportInterrupted(signum) from None
+    if callable(previous):
+        previous(signum, None)
+        raise ExportInterrupted(signum)
+    if previous == signal.SIG_IGN:
+        raise ExportInterrupted(signum)
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    except (AttributeError, OSError, ValueError):
+        pass
+    raise ExportInterrupted(signum)
+
+
 def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
     """Write ``payload`` to ``path`` at mode 0600. Return the absolute path.
 
-    A failure, including KeyboardInterrupt, removes a ``.lantern-export-*``
-    temp file and a partial file created without ``force``. An existing file
-    replaced with ``force`` is left as it was when the replace did not finish.
+    A failure, including KeyboardInterrupt, SIGINT, and catchable SIGTERM,
+    removes a ``.lantern-export-*`` temp file this write created and a
+    partial file created without ``force``. An existing file replaced with
+    ``force`` is left as it was when the replace did not finish. SIGKILL,
+    a power loss, and a forced Windows kill do not run this cleanup.
     """
     destination = prepare_export_path(path, force)
     parent = destination.parent
@@ -962,47 +1039,53 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
     temporary_path = None
     partial = None
     success = False
+    interrupted: int | None = None
     try:
-        if os.open in getattr(os, "supports_dir_fd", ()):
-            flags = os.O_RDONLY
-            if hasattr(os, "O_DIRECTORY"):
-                flags |= os.O_DIRECTORY
-            directory = os.open(parent, flags)
-        if not force:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            # Windows translates \n to \r\n unless the fd is binary, which
-            # would turn CSV \r\n into \r\r\n. POSIX ignores this flag.
-            if hasattr(os, "O_BINARY"):
-                flags |= os.O_BINARY
-            if directory is not None:
-                fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
+        with _during_export_write():
+            if os.open in getattr(os, "supports_dir_fd", ()):
+                flags = os.O_RDONLY
+                if hasattr(os, "O_DIRECTORY"):
+                    flags |= os.O_DIRECTORY
+                directory = os.open(parent, flags)
+            if not force:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                # Windows translates \n to \r\n unless the fd is binary, which
+                # would turn CSV \r\n into \r\r\n. POSIX ignores this flag.
+                if hasattr(os, "O_BINARY"):
+                    flags |= os.O_BINARY
+                if directory is not None:
+                    fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
+                else:
+                    fd = os.open(destination, flags, 0o600)
+                partial = destination
+                try:
+                    _write_fd(fd, payload)
+                finally:
+                    os.close(fd)
             else:
-                fd = os.open(destination, flags, 0o600)
-            partial = destination
-            try:
-                _write_fd(fd, payload)
-            finally:
-                os.close(fd)
-        else:
-            fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
-            temporary_path = Path(temporary)
-            try:
-                _write_fd(fd, payload)
-            finally:
-                os.close(fd)
-            os.replace(temporary_path, destination)
-            temporary_path = None
-        success = True
+                fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
+                temporary_path = Path(temporary)
+                try:
+                    _write_fd(fd, payload)
+                finally:
+                    os.close(fd)
+                os.replace(temporary_path, destination)
+                temporary_path = None
+            success = True
     except OSError as exc:
         if exc.errno in _PATH_ERRNOS:
             raise ExportPathError("The export path is not allowed.") from exc
         raise ExportPathError("The export could not be written.") from exc
+    except ExportInterrupted as exc:
+        interrupted = exc.signum
     finally:
         if not success:
             _unlink_quiet(temporary_path)
             _unlink_quiet(partial)
         if directory is not None:
             os.close(directory)
+    if interrupted is not None:
+        _reraise_termination(interrupted)
     return os.path.abspath(destination)
