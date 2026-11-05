@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -251,12 +252,51 @@ class CliTests(unittest.TestCase):
 
     def test_bad_db_path_and_port(self):
         # A plain file where the parent directory should be: open fails.
-        Path(self.tmp.name, "file.db").write_text("")
+        blocked = Path(self.tmp.name) / "file.db"
+        blocked.write_text("")
+        target = blocked / "x.db"
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(["--db", str(Path(self.tmp.name) / "file.db" / "x.db"), "demo"])
+            code = cli.main(["--db", str(target), "demo"])
         self.assertEqual(code, 2)
-        self.assertIn("Cannot open database", err.getvalue())
+        text = err.getvalue()
+        self.assertIn("Cannot open database", text)
+        self.assertNotIn(str(target), text)
+        self.assertNotIn("file.db", text)
+        self.assertNotIn("x.db", text)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_database_errors_omit_paths_and_raw_details(self):
+        marker = "db-path-marker-9f3a"
+        opened = Path(self.tmp.name) / marker / "secret-open.db"
+        leaked = f"{opened}-from-exception"
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("lantern.cli.connect", side_effect=OSError(f"unable to open {leaked}")):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--db", str(opened), "history"])
+        self.assertEqual(code, 2)
+        text = err.getvalue()
+        self.assertIn("Cannot open database.", text)
+        self.assertNotIn(marker, text)
+        self.assertNotIn("secret-open.db", text)
+        self.assertNotIn(leaked, text)
+        self.assertNotIn("unable to open", text)
+        self.assertEqual(out.getvalue(), "")
+
+        other = Path(self.tmp.name) / "dispatch-marker-77c1" / "secret-dispatch.db"
+        with mock.patch(
+            "lantern.cli._dispatch",
+            side_effect=sqlite3.OperationalError(f"corrupt at {other}"),
+        ):
+            code, out, err = self.run_cli("history")
+        self.assertEqual(code, 2)
+        self.assertIn("Database error.", err)
+        self.assertNotIn("dispatch-marker-77c1", err)
+        self.assertNotIn("secret-dispatch.db", err)
+        self.assertNotIn("corrupt at", err)
+        self.assertNotIn(str(self.db), err)
+        self.assertNotIn(self.tmp.name, err)
+        self.assertEqual(out, "")
 
         code, _, err = self.run_cli("web", "--port", "70000")
         self.assertEqual(code, 2)

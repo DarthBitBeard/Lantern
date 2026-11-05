@@ -395,6 +395,20 @@ def _err(message: str) -> int:
     return 2
 
 
+def _database_open_message(exc: BaseException) -> str:
+    """A fixed open-failure line. The exception text is not printed.
+
+    Two known cases stay distinct so the message is still useful, and
+    neither one repeats the database path.
+    """
+    text = str(exc)
+    if "newer than this Lantern" in text:
+        return "Database schema is newer than this Lantern. Refusing to change it."
+    if "is a symlink" in text:
+        return "Database path is a symlink. Lantern will not follow it."
+    return "Cannot open database."
+
+
 def _export_format(output: str | None, chosen: str | None) -> str:
     """Pick JSON or CSV. A .csv or .json suffix must agree with --format."""
     suffix = Path(output).suffix.casefold() if output else ""
@@ -1244,12 +1258,12 @@ def main(argv=None) -> int:
         # would leave that directory at 0755 under umask 022.
         conn = connect(db_path)
     except (OSError, sqlite3.Error, ValueError) as exc:
-        return _err(f"Cannot open database {db_path}: {exc}")
+        return _err(_database_open_message(exc))
 
     try:
         return _dispatch(args, conn, db_path, web_bind)
-    except sqlite3.Error as exc:
-        return _err(f"Database error ({db_path}): {exc}")
+    except sqlite3.Error:
+        return _err("Database error.")
     finally:
         conn.close()
 
