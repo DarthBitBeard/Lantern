@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 - 2026-11-05
+
+Names the maker of each device's network card from its MAC address, using a bundled copy of the IEEE registry; nothing is looked up online. No schema change: a 1.2.0 database opens as is, and older scans get vendors too. Everything 1.0 promised stays compatible; `vendor` and `private_mac` are additions.
 
 - **MAC vendors.** Each device gets `vendor`, the maker of its network card, looked up from the first half of its MAC address in a bundled copy of the IEEE public registry (MA-L, MA-M, and MA-S, about 54,000 prefixes, 550 KB compressed). Nothing is looked up online; the table loads once on first use and the longest prefix wins. A randomized address gets no vendor and `private_mac: true`. The vendor shows on device cards and in dashboard search, names unnamed devices in text output, and is in JSON reports, `/api/v1`, and exports (the device CSV adds `vendor` and `private_mac` after the 1.2.0 columns). No schema change: it is worked out from the stored MAC when a scan is shown, so old scans get vendors too.
 - **Better device kinds from the vendor.** A maker of one kind of device is a strong hint (Synology or QNAP: NAS; Hikvision, Reolink, or Axis: camera; Brother, Lexmark, or Xerox: printer; Ubiquiti, MikroTik, or Cisco: network gear; Espressif, Tuya, or Shelly: smart home; Sonos or Roku: media), so a Synology box with file sharing open is a NAS, not a computer. Phone makers and PC network-card makers only fill in when nothing else fits. Announced services and names still win.
