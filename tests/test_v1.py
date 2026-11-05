@@ -1332,7 +1332,7 @@ class FilterCapTests(unittest.TestCase):
         conn = connect(self.db)
         try:
             devices = []
-            for i, host in enumerate((2, 3, 4, 10, 11)):
+            for host in (2, 3, 4, 10, 11):
                 devices.append(_device(
                     f"192.168.50.{host}",
                     f"aa:bb:cc:dd:ee:{host:02x}",
