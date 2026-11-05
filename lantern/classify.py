@@ -115,6 +115,33 @@ def classify(device: dict, gateway_ip: str | None = None, gateway_guessed: bool 
     return "unknown", "It answered discovery but offers no services Lantern checks."
 
 
+def gateway_score(ip: str | None, ports) -> tuple | None:
+    """Sort key for one router candidate (lower is better), or None if it is not one.
+
+    Scores DNS +2, a web page +1, and a `.1` or `.254` address +2, and needs
+    at least 3. Exposed so a streaming caller can pick the router without
+    holding every device in memory.
+    """
+    if not ip:
+        return None
+    ports = set(ports)
+    last = ip.rsplit(".", 1)[-1]
+    score = 0
+    if 53 in ports:
+        score += 2
+    if ports & _WEB_PORTS:
+        score += 1
+    if last in ("1", "254"):
+        score += 2
+    if score < 3:
+        return None
+    return (-score, int(last) if last.isdigit() else 999, ip)
+
+
+def device_ports(device: dict) -> set:
+    return {p.get("port") for p in device.get("open_ports") or [] if isinstance(p, dict)}
+
+
 def likely_gateway(devices: list[dict], network_text: str | None = None) -> str | None:
     """Best guess at the router when the OS default route is outside the scanned subnet.
 
@@ -122,21 +149,10 @@ def likely_gateway(devices: list[dict], network_text: str | None = None) -> str 
     address, which home routers use by convention.
     """
     by_ip = {d.get("ip"): d for d in devices}
-    candidates = []
-    for ip, device in by_ip.items():
-        if not ip:
-            continue
-        ports = {p.get("port") for p in device.get("open_ports") or [] if isinstance(p, dict)}
-        last = ip.rsplit(".", 1)[-1]
-        score = 0
-        if 53 in ports:
-            score += 2
-        if ports & _WEB_PORTS:
-            score += 1
-        if last in ("1", "254"):
-            score += 2
-        if score >= 3:
-            candidates.append((-score, int(last) if last.isdigit() else 999, ip))
+    candidates = [
+        key for key in (gateway_score(ip, device_ports(device)) for ip, device in by_ip.items())
+        if key is not None
+    ]
     return min(candidates)[2] if candidates else None
 
 

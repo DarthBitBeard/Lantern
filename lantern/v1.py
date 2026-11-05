@@ -22,6 +22,8 @@ from pathlib import Path
 
 from . import __version__
 from .assets import CRITICALITIES, normalize_mac, strip_for_text
+from .classify import annotate_scan, classify, gateway_score
+from .identify import empty_identity, identity_is_empty
 from .ports import SEVERITY_RANK
 from .store import (
     diff_scans,
@@ -65,6 +67,8 @@ _DEVICE_COLUMNS = (
     "scan_id", "key", "key_type", "ip", "mac", "hostname", "label", "trusted",
     "owner", "location", "tags", "criticality", "notes", "updated_at",
     "first_seen", "last_seen", "open_ports", "finding_count",
+    # Added in 1.2.0, after every 1.0 column so positional readers keep working.
+    "kind", "kind_reason", "announced_name", "announced_model", "announced_manufacturer",
 )
 _FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
@@ -372,6 +376,20 @@ def _ports(device: dict) -> list[dict]:
     return ports
 
 
+def _public_identity(raw) -> dict | None:
+    """What the device announced (SSDP/mDNS), in a fixed shape, or None."""
+    if not isinstance(raw, dict) or identity_is_empty(raw):
+        return None
+    shown = empty_identity()
+    for key in ("name", "model", "manufacturer", "device_type"):
+        value = raw.get(key)
+        shown[key] = value if isinstance(value, str) and value else None
+    for key in ("services", "names", "sources"):
+        value = raw.get(key)
+        shown[key] = [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+    return shown
+
+
 def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private: bool) -> dict:
     key, key_type = _device_identity(device)
     asset = assets.get(f"{key_type}:{key}")
@@ -391,6 +409,9 @@ def _device_dict(device: dict, scan: dict, assets: dict, seen: dict, *, private:
         "last_seen": as_z(last),
         "open_ports": _ports(device),
         "finding_count": len(device.get("findings") or []),
+        "kind": device.get("kind") or "unknown",
+        "kind_reason": device.get("kind_reason"),
+        "identity": _public_identity(device.get("identity")),
     }
     if private:
         body["owner"] = asset["owner"] if asset else None
@@ -403,7 +424,7 @@ def _load_trusted_scan(conn, scan_id: int):
     scan = load_scan(conn, scan_id)
     if scan is None:
         return None
-    return apply_trust(scan, get_trusted(conn))
+    return annotate_scan(apply_trust(scan, get_trusted(conn)))
 
 
 def _resolve_scan_id(conn, query: dict) -> int:
@@ -464,8 +485,9 @@ def _overlay_trust(device: dict, trusted: dict) -> None:
 
 def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], criticality: str | None):
     """Yield API device dicts one at a time, in export sort order."""
-    started_at, subnet, demo, scope_name = conn.execute(
-        "SELECT started_at, subnet, demo, scope_name FROM scans WHERE id = ?",
+    started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip = conn.execute(
+        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip"
+        " FROM scans WHERE id = ?",
         (scan_id,),
     ).fetchone()
     scan = {
@@ -479,12 +501,38 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
     seen = _seen_bounds(conn)
     trusted = get_trusted(conn)
     fetched = conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings FROM devices WHERE scan_id = ?",
+        "SELECT ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
         (scan_id,),
     ).fetchall()
     fetched.sort(key=lambda row: (ip_sort_key(row[0]), normalize_mac(row[1]) or ""))
-    for ip, mac, hostname, label, ports_json, findings_json in fetched:
+    # A device's kind depends on which host is the router, which depends on
+    # the whole scan. Pick the router in a light first pass (stored gateway
+    # if it was seen, otherwise the best-scoring candidate), then classify
+    # each device as it streams out, so a 100k-row export never holds all
+    # device dicts at once.
+    gateway_seen = False
+    best = None
+    for row in fetched:
+        if gateway_ip and row[0] == gateway_ip:
+            gateway_seen = True
+            break
+        try:
+            ports = json.loads(row[4] or "[]")
+        except ValueError:
+            continue
+        key = gateway_score(row[0], (p.get("port") for p in ports if isinstance(p, dict)))
+        if key is not None and (best is None or key < best):
+            best = key
+    if gateway_seen:
+        router, guessed = gateway_ip, False
+    else:
+        router, guessed = (best[2], True) if best else (None, False)
+    for ip, mac, hostname, label, ports_json, findings_json, identity_json in fetched:
         findings = json.loads(findings_json or "[]")
+        try:
+            identity = json.loads(identity_json) if identity_json else None
+        except ValueError:
+            identity = None
         device = {
             "ip": ip,
             "mac": mac,
@@ -492,8 +540,10 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
             "label": label,
             "open_ports": json.loads(ports_json or "[]"),
             "findings": findings if isinstance(findings, list) else [],
+            "identity": identity,
         }
         _overlay_trust(device, trusted)
+        device["kind"], device["kind_reason"] = classify(device, router, guessed)
         shown = _device_dict(device, scan, assets, seen, private=private)
         if _matches(shown, tags, criticality):
             yield shown
@@ -716,6 +766,11 @@ def _device_csv(scan_id: int, device: dict, *, private: bool) -> list:
         "last_seen": device["last_seen"],
         "open_ports": ";".join(ports),
         "finding_count": device["finding_count"],
+        "kind": device["kind"],
+        "kind_reason": device["kind_reason"],
+        "announced_name": (device["identity"] or {}).get("name"),
+        "announced_model": (device["identity"] or {}).get("model"),
+        "announced_manufacturer": (device["identity"] or {}).get("manufacturer"),
     }
     columns = [name for name in _DEVICE_COLUMNS if private or name not in _PRIVATE]
     return _project_rows(columns, [values])[0]

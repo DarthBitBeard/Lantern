@@ -39,7 +39,7 @@ class ExportMemoryTests(unittest.TestCase):
     is built, so the insert itself is not the measurement.
     """
 
-    def _database(self, hostname):
+    def _database(self, hostname, count=100_000):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db = str(Path(tmp.name) / "many.db")
@@ -60,7 +60,7 @@ class ExportMemoryTests(unittest.TestCase):
                     "[]",
                     "[]",
                 )
-                for index in range(100_000)
+                for index in range(count)
             ]
             conn.executemany(
                 "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings) "
@@ -89,8 +89,12 @@ class ExportMemoryTests(unittest.TestCase):
             tracemalloc.stop()
             conn.close()
 
-    def test_successful_100k_export_peak_stays_under_250_mib(self):
-        body, kind, peak = self._peak(self._database(None))
+    def test_successful_large_export_peak_stays_under_250_mib(self):
+        # 75k rows: with the 1.2.0 fields (kind, kind_reason, identity) a
+        # bare device row is about 410 bytes of JSON, so 100k rows would no
+        # longer fit under the 32 MiB cap. This keeps the body near the cap
+        # (about 29 MiB). A real scan has at most 1024 devices.
+        body, kind, peak = self._peak(self._database(None, count=75_000))
         self.assertEqual(kind, "ok")
         self.assertLess(len(body), v1.MAX_V1_RESPONSE_BYTES)
         self.assertGreater(len(body), 20 * 1024 * 1024)
@@ -346,7 +350,7 @@ class ApiTests(unittest.TestCase):
             headers["X-Lantern-Token"] = token
         req = urllib.request.Request((base or self.base) + path, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:  # generous: slow Windows runners
                 return resp.status, resp.read().decode(), resp.headers
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), exc.headers
