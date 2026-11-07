@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-11-07
 
+A hardening and polish release: dashboard tag and criticality filters and the brand artwork, error messages that no longer print database paths, device caps applied after filters, export cleanup on Ctrl-C or SIGTERM, and pinned CI and Docker builds. No schema change: a 1.3.0 database opens as is. Everything 1.0 promised stays compatible.
+
+- `lantern topology` (and any command other than `report` and `diff`) prints `The saved scan could not be read.` for a stored scan row that is not valid JSON, instead of a traceback. `lantern export` says the same instead of `The export could not be written.`
+- The monthly vendor-table refresh pushes its branch with the token as Basic `x-access-token` auth (masked in the log), as `actions/checkout` does. GitHub refuses a Bearer header for a push, so the first refresh with changes would have failed at the push step.
 - Dashboard fixes found in review: a device card shows the network card's maker only when the device did not name its own maker (the 1.3.0 rule); the badge class allowlist reads its own keys only, so a value such as `constructor` cannot reach a class attribute; map lines, hubs, and the mode buttons keep the quieter slate (`--map-line`) so switch uplinks stay distinct from other lines; the brand SVGs are served with `default-src 'none'; style-src 'unsafe-inline'; sandbox`; and the History selector no longer overflows a phone-width screen.
 - The dashboard filters the cards already on the page by tag and criticality, and search also matches owner, location, tags, notes, and criticality. Those controls do not write inventory. Device text is inserted as text, not as HTML. The header uses the lockup, `/favicon.ico` redirects to the icon, and the border color is `#94a3b8` so it stays at least 3:1 against the page and panels. A hostname cap on ingest, and a Content-Security-Policy change for the saved HTML report, are not in this change.
 - A newer-schema error says `Refusing to change it (schema 99 vs 6).` The full stop comes after the schema numbers. That line still has no file path and still says to upgrade Lantern.
