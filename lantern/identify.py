@@ -291,10 +291,10 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
     The request is raw HTTP/1.0. ``timeout`` caps the connect and every later
     read and write. The status line, headers, and body also share
     ``DESCRIPTION_DEADLINE``: each wait is the shorter of ``timeout`` and the
-    time still left. A stalled read returns b"", not the bytes gathered so
+    time still left.     A stalled read returns b"", not the bytes gathered so
     far. Headers stop at ``DESCRIPTION_HEADER_MAX``. A chunked response is
-    refused. A Content-Length above ``DESCRIPTION_MAX_BYTES`` (64 KiB) is
-    refused; a body of exactly that size is kept.
+    refused. A body longer than ``DESCRIPTION_MAX_BYTES`` (64 KiB) is refused
+    whether or not it sends Content-Length. A body of exactly that size is kept.
     """
     parts = urllib.parse.urlsplit(location)
     if parts.scheme not in ("http", ""):
@@ -352,7 +352,9 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
             return b""
         declared = headers.get(b"content-length")
         if declared is None:
-            want = DESCRIPTION_MAX_BYTES
+            # One byte past the cap, so a longer stream is refused whole
+            # instead of being returned truncated.
+            want = DESCRIPTION_MAX_BYTES + 1
         elif declared.isdigit():
             want = int(declared)
             if want > DESCRIPTION_MAX_BYTES:

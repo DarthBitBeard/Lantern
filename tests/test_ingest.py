@@ -359,16 +359,31 @@ class DescriptionDeadlineTests(unittest.TestCase):
         started = time.monotonic()
         self.assertEqual(identify.fetch_description(f"http://127.0.0.1:{over}/x", timeout=2), b"")
         self.assertLess(time.monotonic() - started, 1.0)
+        # No Content-Length: reading only the first 64 KiB must not return them.
+        streamed = self._serve_body(b"Q" * (cap + 1), length=False)
+        self.assertEqual(
+            identify.fetch_description(f"http://127.0.0.1:{streamed}/x", timeout=2),
+            b"",
+        )
+        exact_close = self._serve_body(b"Q" * cap, length=False)
+        self.assertEqual(
+            identify.fetch_description(f"http://127.0.0.1:{exact_close}/x", timeout=2),
+            b"Q" * cap,
+        )
 
-    def _serve_body(self, payload: bytes) -> int:
+    def _serve_body(self, payload: bytes, length: bool = True) -> int:
         server = socket.socket()
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         port = server.getsockname()[1]
         held = []
-        head = (
-            b"HTTP/1.0 200 OK\r\nContent-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n"
-        )
+        if length:
+            head = (
+                b"HTTP/1.0 200 OK\r\nContent-Length: "
+                + str(len(payload)).encode("ascii") + b"\r\n\r\n"
+            )
+        else:
+            head = b"HTTP/1.0 200 OK\r\n\r\n"
 
         def run():
             try:
@@ -379,6 +394,7 @@ class DescriptionDeadlineTests(unittest.TestCase):
             try:
                 conn.recv(4096)
                 conn.sendall(head + payload)
+                conn.shutdown(socket.SHUT_WR)
             except OSError:
                 return
 
