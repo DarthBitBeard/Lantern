@@ -770,8 +770,10 @@ def _require_object(raw: str | None) -> dict | None:
         return None
     try:
         value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE) from exc
+    except json.JSONDecodeError:
+        # A broken identity or topology blob is treated as missing, as before.
+        # A value that parses but is not an object is corrupt.
+        return None
     if value is None:
         return None
     if not isinstance(value, dict):
