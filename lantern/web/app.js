@@ -611,6 +611,7 @@ $("report-link").addEventListener("click", async (event) => {
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   } catch (err) {
     setMessage(err.message, true);
   }

@@ -340,7 +340,7 @@ What this version does, and what it does not do.
 - **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](SECURITY.md#known-limitations).
 - **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
 - **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
-- **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. Hostnames are stored as the device reports them, and the saved HTML report has no Content-Security-Policy of its own. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
+- **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
 
 ## Versioning and compatibility
 

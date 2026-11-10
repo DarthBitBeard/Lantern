@@ -38,6 +38,7 @@ MDNS_GROUP = ("224.0.0.251", 5353)
 LISTEN_SECONDS = 2.5
 DESCRIPTION_TIMEOUT = 2.0
 DESCRIPTION_MAX_BYTES = 64 * 1024
+DESCRIPTION_DEADLINE = 5.0
 DESCRIPTION_WORKERS = 8
 MAX_DEVICES = 1024  # same cap as the scan itself
 MAX_TEXT = 80
@@ -231,11 +232,16 @@ def parse_description(xml_bytes: bytes) -> dict:
 
 
 def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> bytes:
-    """GET one description document. Returns b"" on any failure or oversize body."""
+    """GET one description document. Returns b"" on any failure or oversize body.
+
+    ``timeout`` is the per-read socket timeout. ``DESCRIPTION_DEADLINE`` is
+    the whole fetch, so a slow drip cannot hold the worker until 64 KiB.
+    """
     parts = urllib.parse.urlsplit(location)
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
+    started = time.monotonic()
     conn = HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
     try:
         conn.request("GET", path, headers={"User-Agent": "Lantern/1", "Connection": "close"})
@@ -245,7 +251,23 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
         length = response.getheader("Content-Length")
         if length and length.isdigit() and int(length) > DESCRIPTION_MAX_BYTES:
             return b""
-        body = response.read(DESCRIPTION_MAX_BYTES + 1)
+        chunks = []
+        total = 0
+        while total <= DESCRIPTION_MAX_BYTES:
+            remaining = DESCRIPTION_DEADLINE - (time.monotonic() - started)
+            if remaining <= 0:
+                return b""
+            if conn.sock is not None:
+                conn.sock.settimeout(min(timeout, remaining))
+            try:
+                piece = response.read(1)
+            except (TimeoutError, socket.timeout):
+                return b""
+            if not piece:
+                break
+            chunks.append(piece)
+            total += len(piece)
+        body = b"".join(chunks)
         return b"" if len(body) > DESCRIPTION_MAX_BYTES else body
     except Exception:
         return b""

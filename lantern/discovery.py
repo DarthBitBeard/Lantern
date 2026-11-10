@@ -481,4 +481,8 @@ def reverse_hostname(ip: str) -> str | None:
         slots.release()
         return None
     worker.join(_REVERSE_LOOKUP_TIMEOUT)
-    return found[0] if found else None
+    if not found:
+        return None
+    from .identify import clean_text
+
+    return clean_text(found[0], 253)

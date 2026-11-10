@@ -63,7 +63,16 @@ from .discovery import MAC_RE, guess_subnet, validate_subnet
 from .netutil import is_loopback_host
 from .ports import DEFAULT_PORTS
 from .report import to_html, to_json
-from .store import connect, count_scans, list_scans, load_scan_with_diff, save_scan, set_trusted
+from .store import (
+    CorruptScanError,
+    NewerSchemaError,
+    connect,
+    count_scans,
+    list_scans,
+    load_scan_with_diff,
+    save_scan,
+    set_trusted,
+)
 from .v1 import header_value
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -1124,6 +1133,8 @@ class LanternHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._serve_static(parsed.path)
+        except (CorruptScanError, NewerSchemaError) as exc:
+            self._send_data_error(exc)
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
         except Exception as exc:
@@ -1186,6 +1197,8 @@ class LanternHandler(BaseHTTPRequestHandler):
             self._handle_v1_get(parsed.path, query)
         except V1Error as exc:
             self._send_v1_error(exc.status, exc.code, exc.fields)
+        except (CorruptScanError, NewerSchemaError) as exc:
+            self._send_data_error(exc)
         except Exception as exc:
             self._server_error_v1(exc)
 
@@ -1373,6 +1386,10 @@ class LanternHandler(BaseHTTPRequestHandler):
             self._send_json(415, {"error": str(exc)})
             self.close_connection = True
             return
+        except (CorruptScanError, NewerSchemaError) as exc:
+            self._send_data_error(exc)
+            self.close_connection = True
+            return
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
             self.close_connection = True
@@ -1386,10 +1403,25 @@ class LanternHandler(BaseHTTPRequestHandler):
                 self._handle_trust(body)
             else:
                 self._send_json(404, {"error": "Unknown API route."})
+        except (CorruptScanError, NewerSchemaError) as exc:
+            self._send_data_error(exc)
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
         except Exception as exc:
             self._server_error(exc)
+
+    def _send_data_error(self, exc: BaseException) -> None:
+        """A bad database is not a bad request, and the body is a fixed line."""
+        if isinstance(exc, NewerSchemaError):
+            status, message = 409, "The database schema is newer than this Lantern."
+        else:
+            status, message = 500, "The saved scan could not be read."
+        self._send_bytes(
+            status,
+            json.dumps({"error": message}).encode("utf-8"),
+            "application/json",
+            headers={"Content-Security-Policy": CSP},
+        )
 
     def _handle_demo(self) -> None:
         conn = self._db()

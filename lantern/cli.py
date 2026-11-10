@@ -133,7 +133,7 @@ def _print_topology(scan: dict, topo: dict) -> None:
         placed.setdefault((where["switch"], where["port"]), []).append(mac)
 
     def show(switch: dict, indent: str, lead: str) -> None:
-        name = switch.get("name") or switch["ip"]
+        name = assetlib.strip_for_text(switch.get("name")) or switch["ip"]
         if switch.get("parent"):
             up = f", uplink {switch.get('port_to_parent') or '?'}"
         elif switch.get("port_to_parent"):
@@ -148,7 +148,7 @@ def _print_topology(scan: dict, topo: dict) -> None:
             labels = []
             for mac in sorted(macs):
                 device = devices.get(mac) or {}
-                label = device.get("label") or device.get("hostname") or ""
+                label = assetlib.strip_for_text(device.get("label") or device.get("hostname") or "")
                 labels.append(f"{device.get('ip', mac)}{(' ' + label) if label else ''}")
             where = locations[macs[0]]
             note = (f" (shared: {where['mac_count']} addresses, likely a Wi-Fi access point "
@@ -880,9 +880,9 @@ def _print_text_scan(scan: dict, diff: dict | None) -> None:
     print(f"Scan {scan['id']}: {len(devices)} devices on {scan['subnet']}"
           f"{' (demo data)' if scan['demo'] else ''}")
     for device in devices:
-        name = device.get("label") or device.get("hostname") or ""
+        name = assetlib.strip_for_text(device.get("label") or device.get("hostname") or "")
         if not name and device.get("vendor"):
-            name = f"({device['vendor']})"
+            name = f"({assetlib.strip_for_text(device['vendor'])})"
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
         worst = device["findings"][0]["severity"] if device["findings"] else "none"
         print(f"  {device['ip']:<15} {name:<24} ports: {ports}  worst: {worst}")
