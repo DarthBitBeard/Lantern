@@ -1273,6 +1273,9 @@ def main(argv=None) -> int:
 
     try:
         return _dispatch(args, conn, db_path, web_bind)
+    except KeyboardInterrupt:
+        print("lantern: interrupted", file=sys.stderr)
+        return 130
     except sqlite3.Error:
         return _err("Database error.")
     except CorruptScanError:

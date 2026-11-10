@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Ctrl-C during a command prints `lantern: interrupted` and exits 130, with no traceback. The database connection is closed. An export interrupted by Ctrl-C still exits 130 after its temp file is removed. On POSIX, SIGINT and SIGTERM are blocked while the export file is created and recorded, then unblocked so cleanup still runs. `lantern web` handles SIGTERM by closing the server and exiting 0. Windows cannot deliver SIGINT to a child the same way, and the signal mask is POSIX-only.
+
 ## 1.4.0 - 2026-11-07
 
 A hardening and polish release: dashboard tag and criticality filters and the brand artwork, error messages that no longer print database paths, device caps applied after filters, export cleanup on Ctrl-C or SIGTERM, and pinned CI and Docker builds. No schema change: a 1.3.0 database opens as is. Everything 1.0 promised stays compatible.
