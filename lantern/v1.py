@@ -21,9 +21,28 @@ import tempfile
 import threading
 import unicodedata
 from pathlib import Path
+from urllib.parse import unquote
 
 from . import __version__
-from .assets import CRITICALITIES, normalize_mac, strip_for_text
+from .assets import (
+    CRITICALITIES,
+    LOCATION_MAX,
+    NOTES_MAX,
+    OWNER_MAX,
+    TAG_LIMIT,
+    get_asset,
+    normalize_mac,
+    resolve_asset_key,
+    set_asset,
+    strip_for_text,
+    validate_criticality,
+    validate_location,
+    validate_notes,
+    validate_owner,
+    validate_tag,
+    validate_tags,
+    _is_unsafe,
+)
 from .classify import annotate_scan, classify, gateway_score
 from .identify import empty_identity, identity_is_empty
 from .vendors import is_private_mac, lookup as vendor_lookup
@@ -37,6 +56,7 @@ from .store import (
     list_scans,
     load_scan,
     previous_scan_id,
+    set_trusted,
 )
 
 API_VERSION = 1
@@ -108,6 +128,246 @@ def error_body(code: str, fields: dict | None = None) -> dict:
     if fields:
         error["fields"] = fields
     return {"api_version": API_VERSION, "error": error}
+
+
+_ASSET_FIELDS = ("owner", "location", "tags", "criticality", "notes", "label", "trusted")
+_ASSET_KEYS = frozenset(_ASSET_FIELDS + ("updated_at",))
+_LABEL_MAX = 80
+_PREFIXED_KEY = re.compile(r"(?i)^(mac|ip):")
+
+
+def asset_post_key(path: str) -> str | None:
+    """Bare device key from ``POST /api/v1/assets/{key}``, or None if this is not that path."""
+    prefix = "/api/v1/assets/"
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):]
+
+
+def _instant(value) -> str | None:
+    """One spelling for UTC instants. ``Z`` and ``+00:00`` are the same."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        return text[:-1] + "+00:00"
+    return text
+
+
+class _FieldCode:
+    """A validation code. A plain string is a value to store, never a code."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+
+def _text_code(value, limit: int):
+    """``None`` clears the field. A ``_FieldCode`` refuses it. A string is stored."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        return _FieldCode("invalid")
+    if any(_is_unsafe(char) for char in value):
+        return _FieldCode("invalid")
+    if not value.strip():
+        return _FieldCode("blank")
+    if len(value) > limit:
+        return _FieldCode("too_long")
+    return value
+
+
+def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
+    """Write one inventory update. Raises ``V1Error`` with a fixed code.
+
+    The key is a Device.key: a bare MAC or IPv4, never ``mac:`` or ``ip:``.
+    Omitted inventory fields stay as they are. JSON ``null`` or ``""`` clears
+    a text field. Whitespace-only text is refused. Nothing is truncated.
+    """
+    if not isinstance(body, dict):
+        raise V1Error(400, "bad_request")
+    if any(key not in _ASSET_KEYS for key in body):
+        raise V1Error(400, "bad_request")
+    key = unquote_key(raw_key)
+    if key is None:
+        raise V1Error(400, "bad_request")
+    try:
+        asset_key, kind = resolve_asset_key(conn, key)
+    except ValueError as exc:
+        raise V1Error(404, "not_found") from exc
+
+    fields: dict[str, str] = {}
+    if "updated_at" not in body:
+        fields["updated_at"] = "required"
+        seen = None
+    elif body["updated_at"] is None:
+        seen = None
+    elif isinstance(body["updated_at"], str) and body["updated_at"].strip():
+        seen = body["updated_at"].strip()
+    else:
+        fields["updated_at"] = "invalid"
+        seen = None
+
+    mutable = [name for name in _ASSET_FIELDS if name in body]
+    if not mutable:
+        fields["request"] = "required"
+
+    parsed: dict[str, object] = {}
+    if kind == "ip" and ("label" in body or "trusted" in body):
+        if "label" in body:
+            fields["label"] = "unsupported"
+        if "trusted" in body:
+            fields["trusted"] = "unsupported"
+
+    for name, limit, check in (
+        ("owner", OWNER_MAX, validate_owner),
+        ("location", LOCATION_MAX, validate_location),
+        ("notes", NOTES_MAX, validate_notes),
+    ):
+        if name not in body:
+            continue
+        result = _text_code(body[name], limit)
+        if isinstance(result, _FieldCode):
+            fields[name] = result.code
+            continue
+        if result is None:
+            parsed[name] = None
+            continue
+        try:
+            parsed[name] = check(result)
+        except ValueError:
+            fields[name] = "invalid"
+
+    if "criticality" in body:
+        result = _text_code(body["criticality"], 16)
+        if isinstance(result, _FieldCode):
+            fields["criticality"] = result.code
+        elif result is None:
+            parsed["criticality"] = None
+        else:
+            try:
+                parsed["criticality"] = validate_criticality(result)
+            except ValueError:
+                fields["criticality"] = "invalid"
+
+    if "tags" in body and "tags" not in fields:
+        tags = body["tags"]
+        if tags is None:
+            fields["tags"] = "null_forbidden"
+        elif not isinstance(tags, list):
+            fields["tags"] = "invalid"
+        else:
+            cleaned = []
+            seen_tags = set()
+            refused = None
+            for item in tags:
+                if not isinstance(item, str):
+                    refused = "invalid"
+                    break
+                try:
+                    tag = validate_tag(item)
+                except ValueError:
+                    refused = "invalid"
+                    break
+                if tag not in seen_tags:
+                    seen_tags.add(tag)
+                    cleaned.append(tag)
+            if refused:
+                fields["tags"] = refused
+            elif len(cleaned) > TAG_LIMIT:
+                fields["tags"] = "too_many"
+            else:
+                try:
+                    parsed["tags"] = validate_tags(cleaned)
+                except ValueError:
+                    fields["tags"] = "invalid"
+
+    if kind == "mac" and "label" in body and "label" not in fields:
+        result = _text_code(body["label"], _LABEL_MAX)
+        if isinstance(result, _FieldCode):
+            fields["label"] = result.code
+        elif result is None:
+            parsed["label"] = None
+        else:
+            if len(result) > _LABEL_MAX or any(_is_unsafe(char) for char in result):
+                fields["label"] = "invalid"
+            else:
+                parsed["label"] = result
+
+    if kind == "mac" and "trusted" in body and "trusted" not in fields:
+        if not isinstance(body["trusted"], bool):
+            fields["trusted"] = "invalid"
+        else:
+            parsed["trusted"] = body["trusted"]
+
+    if fields:
+        raise V1Error(422, "validation", fields)
+
+    current = get_asset(conn, asset_key)
+    current_at = current["updated_at"] if current else None
+    if _instant(current_at) != _instant(seen):
+        raise V1Error(409, "conflict")
+
+    clears = {
+        name for name in ("owner", "location", "criticality", "notes")
+        if name in parsed and parsed[name] is None
+    }
+    kwargs = {}
+    for name in ("owner", "location", "criticality", "notes"):
+        if name in parsed and parsed[name] is not None:
+            kwargs[name] = parsed[name]
+    if "tags" in parsed:
+        kwargs["tags"] = parsed["tags"]
+    if kwargs or (clears and current is not None):
+        try:
+            saved = set_asset(conn, asset_key, kind, clears=clears, **kwargs)
+        except ValueError as exc:
+            raise V1Error(422, "validation", {"request": "too_many"}) from exc
+    else:
+        saved = current or {
+            "owner": None, "location": None, "tags": [], "criticality": None,
+            "notes": None, "updated_at": None,
+        }
+
+    bare = asset_key.split(":", 1)[1]
+    label = None
+    trusted = False
+    if kind == "mac":
+        info = get_trusted(conn).get(bare) or {}
+        label = info.get("label")
+        trusted = bool(info.get("trusted"))
+        if "label" in parsed or "trusted" in parsed:
+            if "label" in parsed:
+                label = parsed["label"]
+            if "trusted" in parsed:
+                trusted = bool(parsed["trusted"])
+            set_trusted(conn, bare, label if isinstance(label, str) else None, trusted)
+            info = get_trusted(conn).get(bare) or {}
+            label = info.get("label")
+            trusted = bool(info.get("trusted"))
+
+    return {
+        "api_version": API_VERSION,
+        "key": bare,
+        "key_type": kind,
+        "owner": saved.get("owner"),
+        "location": saved.get("location"),
+        "tags": list(saved.get("tags") or []),
+        "criticality": saved.get("criticality"),
+        "notes": saved.get("notes"),
+        "updated_at": as_z(saved.get("updated_at")) if saved.get("updated_at") else None,
+        "label": label,
+        "trusted": trusted,
+    }
+
+
+def unquote_key(raw: str) -> str | None:
+    """Percent-decode a path key. Prefixed and empty keys are refused."""
+    if raw is None or "/" in raw or raw == "":
+        return None
+    text = unquote(raw)
+    if text == "" or "/" in text or _PREFIXED_KEY.match(text):
+        return None
+    return text
 
 
 def is_v1_path(path: str) -> bool:

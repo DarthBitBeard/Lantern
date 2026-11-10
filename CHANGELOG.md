@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A device card can edit owner, location, tags, criticality, and notes. Save calls `POST /api/v1/assets/{key}` with `X-Lantern-Token` and the same Origin allowlist as other writes. The key is the bare MAC or IPv4 from `/api/v1`, and `updated_at` must match. Limits match `lantern asset` and values are not truncated. The editor is built with `createElement` and `textContent`. There are no CORS headers. Label and Trust stay on the existing row.
 - The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM next to the files they name, as workflow artifacts only; nothing is published. `--check` fails when that checksum file is missing or empty. The Windows SBOM names PyInstaller and the bundled Python. A switch's SNMP budget is a hard limit. The vendor table refuses a gzip that expands past 16 MiB, and a truncated or corrupt table leaves the vendor unknown.
 
 ## 1.4.0 - 2026-11-07

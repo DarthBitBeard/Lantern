@@ -243,12 +243,16 @@ def set_asset(
     tags: list[str] | None = None,
     criticality: str | None = None,
     notes: str | None = None,
+    clears: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Update the fields that were passed. None means leave that field alone.
 
-    A new key is refused once ``ASSET_ROW_CAP`` rows exist. Updating a row
-    that is already stored is still allowed.
+    ``clears`` names fields to store as empty. A new key is refused once
+    ``ASSET_ROW_CAP`` rows exist. Updating a row that is already stored is
+    still allowed. A row with every inventory field empty is removed, which
+    is the same end state as ``clear_asset``.
     """
+    blanked = set(clears or ())
     # Count and write share one reserved lock so two `asset set` processes
     # cannot both pass the cap.
     conn.execute("BEGIN IMMEDIATE")
@@ -262,16 +266,35 @@ def set_asset(
                     "Clear one before adding another."
                 )
             current = _empty_asset(asset_key, kind)
-        if owner is not None:
+        if "owner" in blanked:
+            current["owner"] = None
+        elif owner is not None:
             current["owner"] = owner
-        if location is not None:
+        if "location" in blanked:
+            current["location"] = None
+        elif location is not None:
             current["location"] = location
         if tags is not None:
             current["tags"] = tags
-        if criticality is not None:
+        if "criticality" in blanked:
+            current["criticality"] = None
+        elif criticality is not None:
             current["criticality"] = criticality
-        if notes is not None:
+        if "notes" in blanked:
+            current["notes"] = None
+        elif notes is not None:
             current["notes"] = notes
+        empty = (
+            current["owner"] is None
+            and current["location"] is None
+            and not current["tags"]
+            and current["criticality"] is None
+            and current["notes"] is None
+        )
+        if empty:
+            conn.execute("DELETE FROM assets WHERE asset_key = ?", (asset_key,))
+            conn.commit()
+            return _empty_asset(asset_key, kind)
         conn.execute(
             "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"

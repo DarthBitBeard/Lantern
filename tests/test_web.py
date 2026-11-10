@@ -734,6 +734,186 @@ if (network.length) {
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
 
+    def test_asset_editor_uses_text_and_fixed_copy(self):
+        source = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("innerHTML", source)
+        self.assertNotIn("outerHTML", source)
+        self.assertNotIn("insertAdjacentHTML", source)
+        self.assertNotIn("data.error.message", source)
+        self.assertNotIn("Access-Control", source)
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+async function main() {
+const app = fs.readFileSync(process.argv[1], "utf8");
+const elements = {};
+const network = [];
+let nextStatus = 200;
+let nextBody = {};
+function make(tag) {
+  const node = {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [], className: "", textContent: "", value: "", disabled: false,
+    hidden: true, attributes: {}, listeners: {}, open: false,
+    addEventListener(type, fn) {
+      node.listeners[type] = node.listeners[type] || [];
+      node.listeners[type].push(fn);
+    },
+    getAttribute(name) { return node.attributes[name] || ""; },
+    setAttribute(name, value) {
+      node.attributes[name] = String(value);
+      if (name === "value") node.value = String(value);
+    },
+    appendChild(child) { node.children.push(child); return child; },
+    removeChild(child) {
+      node.children = node.children.filter((item) => item !== child);
+      return child;
+    },
+    get firstChild() { return node.children[0] || null; },
+    get lastChild() { return node.children[node.children.length - 1] || null; },
+    querySelectorAll() { return []; },
+  };
+  return node;
+}
+function walk(node, visit) {
+  if (!node) return;
+  visit(node);
+  for (const child of node.children || []) walk(child, visit);
+}
+function el(id) {
+  if (!elements[id]) elements[id] = Object.assign(make("div"), { id, value: "" });
+  return elements[id];
+}
+const context = {
+  sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  document: {
+    getElementById: el,
+    createElement: make,
+    createTextNode(text) { return { nodeType: 3, textContent: String(text), children: [] }; },
+    querySelector() { return { getAttribute() { return "strict"; } }; },
+    querySelectorAll() { return []; },
+    body: { setAttribute() {} },
+  },
+  window: { open() {}, location: { hash: "", pathname: "/", search: "" } },
+  history: { replaceState() {} },
+  URL: { createObjectURL: () => "blob:test" },
+  fetch: async (path, opts) => {
+    const method = (opts && opts.method) || "GET";
+    network.push({ method, path, body: opts && opts.body });
+    return {
+      ok: nextStatus >= 200 && nextStatus < 300,
+      status: nextStatus,
+      json: async () => nextBody,
+      text: async () => "",
+    };
+  },
+  XMLHttpRequest: function XMLHttpRequest() {
+    this.open = () => { network.push({ method: "XHR", path: "", body: "" }); };
+    this.send = () => {};
+  },
+  console,
+  setTimeout,
+};
+vm.createContext(context);
+vm.runInContext(app, context);
+const payload = '<img src=x onerror="alert(1)">';
+const device = {
+  ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
+  owner: payload, location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", open_ports: [], findings: [],
+};
+nextStatus = 200;
+nextBody = { items: [{
+  key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T00:00:00Z",
+  owner: payload, location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
+}] };
+context.showScan({
+  id: 7, subnet: "10.1.0.0/24", started_at: "2026-11-10T00:00:00Z", demo: true,
+  devices: [device],
+}, null);
+if (network.length) {
+  console.error("showScan fetched", network);
+  process.exit(2);
+}
+let details = null;
+walk(elements.devices, (node) => {
+  if (node.tagName === "DETAILS") details = node;
+});
+if (!details) {
+  console.error("missing editor");
+  process.exit(3);
+}
+details.open = true;
+for (const fn of details.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const tags = [];
+let text = "";
+let owner = null;
+walk(elements.devices, (node) => {
+  if (node.tagName) tags.push(node.tagName);
+  text += "\n" + (node.textContent || "");
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") owner = node;
+});
+if (tags.includes("IMG") || tags.includes("SCRIPT")) {
+  console.error(tags);
+  process.exit(4);
+}
+if (!text.includes(payload) || !owner || owner.value !== payload) {
+  console.error(text);
+  process.exit(5);
+}
+owner.value = "unsaved";
+for (const fn of owner.listeners.input || []) fn();
+elements["tag-filter"].value = "missing";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "unsaved")) {
+  console.error("filter rebuilt a dirty editor");
+  process.exit(6);
+}
+nextStatus = 422;
+nextBody = { error: { message: "SECRET-SERVER-TEXT", code: "validation", fields: { owner: "too_long" } } };
+let save = null;
+walk(elements.devices, (node) => {
+  if (node.tagName === "BUTTON" && node.textContent === "Save") save = node;
+});
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (!text.includes("This is too long.") || text.includes("SECRET-SERVER-TEXT")) {
+  console.error(text);
+  process.exit(7);
+}
+const post = network.filter((item) => item.method === "POST").pop();
+const sent = JSON.parse(post.body);
+if ("label" in sent || "trusted" in sent || sent.owner !== "unsaved") {
+  console.error(post.body);
+  process.exit(8);
+}
+if (!post.path.startsWith("/api/v1/assets/")) {
+  console.error(post.path);
+  process.exit(9);
+}
+function textIncludes(node, needle) {
+  let found = false;
+  walk(node, (item) => {
+    if (String(item.value || "").includes(needle) || String(item.textContent || "").includes(needle)) found = true;
+  });
+  return found;
+}
+}
+main();
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+
 class HostAllowlistTests(unittest.TestCase):
     """F-01: DNS rebinding. Localhost listeners and in-memory data only.
 
