@@ -5,6 +5,7 @@ on Windows, where those signals do not interrupt a child the same way.
 """
 
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -112,48 +113,62 @@ class InterruptTests(unittest.TestCase):
         """))
 
 
+def _real_tempdir():
+    """A directory whose path is not reached through a symlink.
+
+    macOS and Windows put the temp root behind a link. Export refuses that.
+    """
+    raw = tempfile.mkdtemp()
+    return os.path.realpath(raw)
+
+
 class ExportWindowTests(unittest.TestCase):
     def test_interrupt_during_create_removes_the_new_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "out.json"
-            real = os.open
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = Path(tmp) / "out.json"
+        real = os.open
 
-            def boom(path, flags, *args, **kwargs):
-                fd = real(path, flags, *args, **kwargs)
-                if flags & os.O_CREAT:
-                    raise KeyboardInterrupt
-                return fd
+        def boom(path, flags, *args, **kwargs):
+            fd = real(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                os.close(fd)
+                raise KeyboardInterrupt
+            return fd
 
-            with mock.patch("lantern.v1.os.open", boom):
-                with self.assertRaises(KeyboardInterrupt):
-                    v1.write_export_file(str(dest), b"{}", force=False)
-            self.assertFalse(dest.exists())
-            self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
+        with mock.patch("lantern.v1.os.open", boom):
+            with self.assertRaises(KeyboardInterrupt):
+                v1.write_export_file(str(dest), b"{}", force=False)
+        self.assertFalse(dest.exists())
+        self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
 
     def test_interrupt_during_mkstemp_removes_the_temp_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "out.json"
-            dest.write_bytes(b"old")
-            real = __import__("tempfile").mkstemp
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = Path(tmp) / "out.json"
+        dest.write_bytes(b"old")
+        real = tempfile.mkstemp
 
-            def boom(*args, **kwargs):
-                fd, name = real(*args, **kwargs)
-                raise KeyboardInterrupt
+        def boom(*args, **kwargs):
+            fd, name = real(*args, **kwargs)
+            os.close(fd)
+            raise KeyboardInterrupt
 
-            with mock.patch("lantern.v1.tempfile.mkstemp", boom):
-                with self.assertRaises(KeyboardInterrupt):
-                    v1.write_export_file(str(dest), b"new", force=True)
-            self.assertEqual(dest.read_bytes(), b"old")
-            self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
+        with mock.patch("lantern.v1.tempfile.mkstemp", boom):
+            with self.assertRaises(KeyboardInterrupt):
+                v1.write_export_file(str(dest), b"new", force=True)
+        self.assertEqual(dest.read_bytes(), b"old")
+        self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
 
     def test_signal_mask_is_restored(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread_sigmask is POSIX-only")
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "out.json"
-            before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
-            v1.write_export_file(str(dest), b"{}", force=False)
-            after = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = Path(tmp) / "out.json"
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        v1.write_export_file(str(dest), b"{}", force=False)
+        after = signal.pthread_sigmask(signal.SIG_BLOCK, [])
         self.assertEqual(before, after)
 
 
