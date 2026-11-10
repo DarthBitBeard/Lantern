@@ -189,6 +189,9 @@ class PruneTests(unittest.TestCase):
         self.conn = connect(":memory:")
         self.now = datetime(2026, 11, 3, tzinfo=timezone.utc)
 
+    def tearDown(self):
+        self.conn.close()
+
     def add(self, days_ago, scope=None, ip="192.168.1.2"):
         scan_id = save_scan(self.conn, "192.168.1.0/24", [_dev(ip, "aa:bb:cc:00:00:01")], scope_name=scope)
         started = (self.now - timedelta(days=days_ago)).isoformat()
@@ -610,6 +613,139 @@ class MigrationTests(unittest.TestCase):
             self.assertNotIn("devices_ip_scan_mac", self._index_names(saved))
         finally:
             saved.close()
+
+    def _stamp_old_schema(self, migrations, target, seed):
+        from lantern.store import apply_migrations
+
+        raw = sqlite3.connect(self.path)
+        try:
+            apply_migrations(raw, migrations=migrations, target=target, db_path=self.path)
+            seed(raw)
+            raw.commit()
+        finally:
+            raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+    def test_schema_4_database_gains_the_network_columns_and_keeps_rows(self):
+        """A database stamped at schema 4 upgrades forward to schema 6."""
+        from lantern.store import (
+            _migration_1_v030_baseline,
+            _migration_2_scope_name,
+            _migration_3_assets,
+            _migration_4_device_ip_index,
+        )
+
+        def seed(raw):
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
+                ("2026-10-29T00:00:00+00:00", "10.4.0.0/24", 0, "lab"),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?)",
+                ("10.4.0.8", "aa:bb:cc:dd:ee:08", "printer.lan", "Front", "[]", "[]"),
+            )
+
+        self._stamp_old_schema(
+            {
+                1: _migration_1_v030_baseline,
+                2: _migration_2_scope_name,
+                3: _migration_3_assets,
+                4: _migration_4_device_ip_index,
+            },
+            4,
+            seed,
+        )
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            scan = load_scan(conn, 1)
+            self.assertEqual(scan["devices"][0]["hostname"], "printer.lan")
+            self.assertIsNone(scan["devices"][0]["identity"])
+            self.assertIsNone(scan["network"]["gateway_ip"])
+            self.assertIsNone(scan["topology"])
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(devices)")]
+            self.assertIn("identity", columns)
+            scan_columns = [row[1] for row in conn.execute("PRAGMA table_info(scans)")]
+            self.assertIn("topology", scan_columns)
+        finally:
+            conn.close()
+        backups = list(Path(self.tmp.name).glob("*.bak"))
+        self.assertEqual([p.name for p in backups], ["lantern.db.v4.bak"])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+        saved = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 4)
+            saved_columns = [row[1] for row in saved.execute("PRAGMA table_info(devices)")]
+            self.assertNotIn("identity", saved_columns)
+        finally:
+            saved.close()
+        again = connect(self.path)
+        again.close()
+        self.assertEqual([p.name for p in Path(self.tmp.name).glob("*.bak")], ["lantern.db.v4.bak"])
+
+    def test_schema_5_database_gains_topology_and_keeps_identity(self):
+        """A database stamped at schema 5 upgrades forward to schema 6."""
+        from lantern.store import (
+            _migration_1_v030_baseline,
+            _migration_2_scope_name,
+            _migration_3_assets,
+            _migration_4_device_ip_index,
+            _migration_5_network_map,
+        )
+
+        identity = '{"name": "Living Room TV"}'
+
+        def seed(raw):
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("2026-10-30T00:00:00+00:00", "10.5.0.0/24", 0, "home",
+                 "10.5.0.1", "aa:bb:cc:dd:ee:01", "10.5.0.20"),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings, identity)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+                ("10.5.0.9", "aa:bb:cc:dd:ee:09", "tv.lan", None, "[]", "[]", identity),
+            )
+
+        self._stamp_old_schema(
+            {
+                1: _migration_1_v030_baseline,
+                2: _migration_2_scope_name,
+                3: _migration_3_assets,
+                4: _migration_4_device_ip_index,
+                5: _migration_5_network_map,
+            },
+            5,
+            seed,
+        )
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
+            scan = load_scan(conn, 1)
+            self.assertEqual(scan["network"]["gateway_ip"], "10.5.0.1")
+            self.assertEqual(scan["devices"][0]["identity"]["name"], "Living Room TV")
+            self.assertIsNone(scan["topology"])
+        finally:
+            conn.close()
+        backups = list(Path(self.tmp.name).glob("*.bak"))
+        self.assertEqual([p.name for p in backups], ["lantern.db.v5.bak"])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+        saved = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+            saved_columns = [row[1] for row in saved.execute("PRAGMA table_info(scans)")]
+            self.assertNotIn("topology", saved_columns)
+            self.assertEqual(saved.execute("SELECT identity FROM devices").fetchone()[0], identity)
+        finally:
+            saved.close()
+        again = connect(self.path)
+        again.close()
+        self.assertEqual([p.name for p in Path(self.tmp.name).glob("*.bak")], ["lantern.db.v5.bak"])
 
     def test_fresh_database_has_the_device_index(self):
         conn = connect(self.path)

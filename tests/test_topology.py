@@ -11,6 +11,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -671,3 +672,67 @@ class CorruptScanCliTests(unittest.TestCase):
             self.assertEqual(code, 2, argv)
             self.assertIn("The saved scan could not be read.", err, argv)
             self.assertNotIn("Traceback", err, argv)
+
+
+class DeadlineTests(unittest.TestCase):
+    """The per-switch budget bounds every request, including retries."""
+
+    def test_a_timing_out_transport_stops_at_the_deadline(self):
+        calls = []
+
+        def transport(packet, accept, timeout=None):
+            calls.append(timeout)
+            raise SnmpError("timed out")
+
+        def factory(ip, community):
+            return snmp.Client(ip, community, timeout=2.0, retries=8, transport=transport)
+
+        started = time.monotonic()
+        original = topology.SWITCH_DEADLINE
+        topology.SWITCH_DEADLINE = 0.25
+        try:
+            result = topology.query_switch("192.0.2.1", "public", client_factory=factory)
+        finally:
+            topology.SWITCH_DEADLINE = original
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.25 + 2.0)
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(calls)
+        self.assertTrue(all(item is not None and item <= 2.0 for item in calls))
+        self.assertIsNotNone(result["error"])
+
+    def test_rows_read_before_the_deadline_are_kept(self):
+        def transport(packet, accept, timeout=None):
+            _community, pdu, rid, _maxrep, _oids = parse_request(packet)
+            if pdu == snmp.GET:
+                reply = response(rid, [((1, 3, 6, 1, 2, 1, 1, 5, 0), "kept")])
+                self.assertTrue(accept(reply))
+                return reply
+            raise SnmpError("timed out")
+
+        def factory(ip, community):
+            return snmp.Client(ip, community, timeout=2.0, retries=0, transport=transport)
+
+        original = topology.SWITCH_DEADLINE
+        topology.SWITCH_DEADLINE = 0.5
+        try:
+            result = topology.query_switch("192.0.2.1", "public", client_factory=factory)
+        finally:
+            topology.SWITCH_DEADLINE = original
+        self.assertEqual(result["name"], "kept")
+        self.assertIsNotNone(result["error"])
+
+    def test_a_silent_localhost_socket_stays_inside_the_deadline(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        client = snmp.Client("127.0.0.1", "public", port=port, timeout=5.0, retries=4)
+        deadline = time.monotonic() + 0.4
+        started = time.monotonic()
+        try:
+            with self.assertRaises(SnmpError):
+                client.walk((1, 3, 6, 1, 2, 1, 1), deadline=deadline)
+        finally:
+            sock.close()
+        self.assertLess(time.monotonic() - started, 0.4 + 5.0)
+        self.assertLess(time.monotonic() - started, 1.5)

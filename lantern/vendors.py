@@ -14,13 +14,20 @@ coincidence.
 from __future__ import annotations
 
 import gzip
+import io
 import re
 import threading
+import unicodedata
 from importlib import resources
+from pathlib import Path
 
 _LENGTHS = (9, 7, 6)  # MA-S, MA-M, MA-L hex digits; longest first
 _table: dict[str, str] | None = None
 _lock = threading.Lock()
+# Tests point this at a temporary bundle. None reads the shipped file.
+_bundle_path: Path | None = None
+# A hostile or truncated gzip must not expand without a bound.
+MAX_VENDOR_BYTES = 16 * 1024 * 1024
 
 # Legal-form words dropped from the end of a name for display.
 _SUFFIX_RE = re.compile(
@@ -35,19 +42,41 @@ _LOWER_WORDS = {"of", "and", "the", "for", "de"}
 _NO_VENDOR = {"private", "ieee registration authority"}
 
 
+def _bundle_bytes() -> bytes:
+    if _bundle_path is not None:
+        return Path(_bundle_path).read_bytes()
+    return resources.files("lantern").joinpath("data/oui.tsv.gz").read_bytes()
+
+
+def _decompress_bounded(raw: bytes, limit: int | None = None) -> bytes:
+    """Decompress `raw`, refusing a table larger than `limit` bytes."""
+    if limit is None:
+        limit = MAX_VENDOR_BYTES
+    out = bytearray()
+    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as handle:
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            if len(out) + len(chunk) > limit:
+                raise ValueError("The vendor table is larger than Lantern will read.")
+            out += chunk
+    return bytes(out)
+
+
 def _load() -> dict[str, str]:
     global _table
     if _table is None:
         with _lock:
             if _table is None:
-                raw = resources.files("lantern").joinpath("data/oui.tsv.gz").read_bytes()
+                text = _decompress_bounded(_bundle_bytes()).decode("utf-8")
                 table: dict[str, str] = {}
-                for line in gzip.decompress(raw).decode("utf-8").splitlines():
+                for line in text.splitlines():
                     if not line or line.startswith("#"):
                         continue
                     prefix, _, name = line.partition("\t")
                     if name:
-                        table[prefix] = name
+                        table[prefix] = _strip_controls(name)
                 _table = table
     return _table
 
@@ -69,9 +98,13 @@ def is_private_mac(mac: str | None) -> bool:
     return bool(digits) and bool(int(digits[:2], 16) & 0x02)
 
 
+def _strip_controls(value: str) -> str:
+    return "".join(ch for ch in value if unicodedata.category(ch)[0] != "C")
+
+
 def short_name(name: str) -> str:
     """'Synology Incorporated' -> 'Synology', 'XEROX CORPORATION' -> 'Xerox'."""
-    text = name.strip().strip(",. ")
+    text = _strip_controls(name).strip().strip(",. ")
     for _ in range(4):
         trimmed = _SUFFIX_RE.sub("", text).strip(",. ")
         if trimmed == text or not trimmed:
@@ -84,7 +117,7 @@ def short_name(name: str) -> str:
             lower = word.lower()
             words.append(lower if i and lower in _LOWER_WORDS else word.capitalize())
         text = " ".join(words)
-    return text[:40] or name[:40]
+    return text[:40]
 
 
 def lookup(mac: str | None) -> dict | None:
@@ -95,7 +128,10 @@ def lookup(mac: str | None) -> dict | None:
     digits = _hex(mac)
     if not digits or int(digits[:2], 16) & 0x02:
         return None
-    table = _load()
+    try:
+        table = _load()
+    except (OSError, ValueError, gzip.BadGzipFile):
+        return None
     for length in _LENGTHS:
         name = table.get(digits[:length])
         if name:
