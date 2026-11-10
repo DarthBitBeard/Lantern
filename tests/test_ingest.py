@@ -5,6 +5,7 @@ Localhost and fake data only. No DNS and no device scans.
 
 import io
 import json
+import socket
 import threading
 import time
 import unittest
@@ -124,6 +125,8 @@ class CorruptShapeTests(unittest.TestCase):
             ("UPDATE devices SET open_ports = ?", '[1, "a"]'),
             ("UPDATE devices SET findings = ?", '{"x":1}'),
             ("UPDATE devices SET identity = ?", '"str"'),
+            ("UPDATE devices SET open_ports = ?", "[22]"),
+            ("UPDATE devices SET findings = ?", "[{}]"),
         )
         for sql, value in cases:
             db = self._seed(sql, value)
@@ -216,6 +219,58 @@ class DescriptionDeadlineTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(body, b"")
         self.assertLess(elapsed, 0.4 + 1.0)
+
+    def _drip(self, first: bytes, later: bytes, pause: float, count: int):
+        """A localhost socket that writes ``first`` once, then ``later`` slowly."""
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        held = []
+
+        def run():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            held.append(conn)
+            conn.settimeout(2)
+            try:
+                conn.recv(4096)
+            except OSError:
+                pass
+            try:
+                conn.sendall(first)
+                for _ in range(count):
+                    conn.sendall(later)
+                    time.sleep(pause)
+            except OSError:
+                return
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(server.close)
+        self.addCleanup(lambda: [item.close() for item in held])
+        return port
+
+    def test_a_header_drip_stops_at_the_deadline(self):
+        port = self._drip(b"HTTP/1.0 200 OK\r\n", b"X", 1.5, 20)
+        started = time.monotonic()
+        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml")
+        self.assertEqual(body, b"")
+        self.assertLess(time.monotonic() - started, identify.DESCRIPTION_DEADLINE + 1.5)
+
+    def test_a_chunk_drip_is_refused(self):
+        port = self._drip(
+            b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"1",
+            1.5,
+            20,
+        )
+        started = time.monotonic()
+        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml")
+        self.assertEqual(body, b"")
+        self.assertLess(time.monotonic() - started, identify.DESCRIPTION_DEADLINE + 1.5)
 
 
 class BlobUrlTests(unittest.TestCase):

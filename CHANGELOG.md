@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- A reverse-DNS hostname is stored with control characters and bidi overrides removed, and cut at 253 characters. CLI text output strips those characters from names it prints. A saved HTML report starts with its own Content-Security-Policy. A stored scan whose JSON has the wrong shape is `The saved scan could not be read.` (exit 2, or HTTP 500). A newer database is HTTP 409 with a fixed line. A UPnP description fetch stops after 5 seconds.
+- A reverse-DNS hostname is stored with control characters and bidi overrides removed, and cut at 253 characters. CLI text output strips those characters from names it prints. A saved HTML report starts with its own Content-Security-Policy. A stored scan whose JSON has the wrong shape is `The saved scan could not be read.` (exit 2, or HTTP 500), including an open port stored as a bare number and a finding with no severity. A newer database is HTTP 409 with a fixed line. A UPnP description is a raw HTTP/1.0 read. Headers, a chunked body, and the document itself all stop at the same 5 second deadline, and a chunked response is refused.
 - The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM next to the files they name, as workflow artifacts only; nothing is published. `--check` fails when that checksum file is missing or empty. The Windows SBOM names PyInstaller and the bundled Python. A switch's SNMP budget is a hard limit. The vendor table refuses a gzip that expands past 16 MiB, and a truncated or corrupt table leaves the vendor unknown.
 
 ## 1.4.0 - 2026-11-07

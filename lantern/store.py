@@ -743,20 +743,22 @@ def _port_number(value) -> bool:
 
 
 def _require_ports(value):
+    """Each open port is an object with a numeric ``port``. A bare number is not."""
     if not isinstance(value, list):
         raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     for item in value:
-        if isinstance(item, dict):
-            if not _port_number(item.get("port")):
-                raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
-        elif not _port_number(item):
+        if not isinstance(item, dict) or not _port_number(item.get("port")):
             raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     return value
 
 
 def _require_findings(value):
-    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+    """Each finding is an object that names a severity. An empty object is not."""
+    if not isinstance(value, list):
         raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("severity"), str):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     return value
 
 

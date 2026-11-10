@@ -31,13 +31,13 @@ import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from http.client import HTTPConnection
 
 SSDP_GROUP = ("239.255.255.250", 1900)
 MDNS_GROUP = ("224.0.0.251", 5353)
 LISTEN_SECONDS = 2.5
 DESCRIPTION_TIMEOUT = 2.0
 DESCRIPTION_MAX_BYTES = 64 * 1024
+DESCRIPTION_HEADER_MAX = 8 * 1024
 DESCRIPTION_DEADLINE = 5.0
 DESCRIPTION_WORKERS = 8
 MAX_DEVICES = 1024  # same cap as the scan itself
@@ -231,48 +231,136 @@ def parse_description(xml_bytes: bytes) -> dict:
     return result
 
 
+def _deadline_left(started: float) -> float:
+    return DESCRIPTION_DEADLINE - (time.monotonic() - started)
+
+
+def _recv_some(sock: socket.socket, started: float, limit: int) -> bytes | None:
+    """One read. The socket timeout is whatever is left of the deadline."""
+    remaining = _deadline_left(started)
+    if remaining <= 0 or limit <= 0:
+        return None
+    sock.settimeout(remaining)
+    try:
+        return sock.recv(limit)
+    except (TimeoutError, socket.timeout, OSError):
+        return None
+
+
+def _send_all(sock: socket.socket, payload: bytes, started: float) -> bool:
+    view = memoryview(payload)
+    while view:
+        remaining = _deadline_left(started)
+        if remaining <= 0:
+            return False
+        sock.settimeout(remaining)
+        try:
+            sent = sock.send(view)
+        except (TimeoutError, socket.timeout, OSError):
+            return False
+        if sent <= 0:
+            return False
+        view = view[sent:]
+    return True
+
+
+def _http_headers(head: bytes) -> tuple[bytes, dict[bytes, bytes]] | None:
+    lines = head.split(b"\r\n")
+    if not lines or not lines[0]:
+        return None
+    headers: dict[bytes, bytes] = {}
+    for line in lines[1:]:
+        if not line or b":" not in line:
+            return None
+        name, value = line.split(b":", 1)
+        headers[name.strip().lower()] = value.strip()
+    return lines[0], headers
+
+
 def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> bytes:
     """GET one description document. Returns b"" on any failure or oversize body.
 
-    ``timeout`` is the per-read socket timeout. ``DESCRIPTION_DEADLINE`` is
-    the whole fetch, so a slow drip cannot hold the worker until 64 KiB.
+    The request is raw HTTP/1.0 on a socket. ``timeout`` is only the connect
+    timeout. Every later read and write sets the socket timeout to the time
+    left of ``DESCRIPTION_DEADLINE``, including the status line and headers.
+    A chunked body is refused. Header bytes stop at ``DESCRIPTION_HEADER_MAX``.
     """
     parts = urllib.parse.urlsplit(location)
+    if parts.scheme not in ("http", ""):
+        return b""
+    host = parts.hostname
+    if not host:
+        return b""
+    port = parts.port or 80
     path = parts.path or "/"
     if parts.query:
-        path += "?" + parts.query
-    started = time.monotonic()
-    conn = HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
+        path = path + "?" + parts.query
+    if any(char in path or char in host for char in "\r\n"):
+        return b""
+    host_header = host if port == 80 else f"{host}:{port}"
+    if ":" in host and not host.startswith("["):
+        host_header = f"[{host}]" if port == 80 else f"[{host}]:{port}"
     try:
-        conn.request("GET", path, headers={"User-Agent": "Lantern/1", "Connection": "close"})
-        response = conn.getresponse()
-        if response.status != 200:
+        request = (
+            f"GET {path} HTTP/1.0\r\n"
+            f"Host: {host_header}\r\n"
+            "User-Agent: Lantern/1\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+    except UnicodeEncodeError:
+        return b""
+    started = time.monotonic()
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError:
+        return b""
+    try:
+        if not _send_all(sock, request, started):
             return b""
-        length = response.getheader("Content-Length")
-        if length and length.isdigit() and int(length) > DESCRIPTION_MAX_BYTES:
-            return b""
-        chunks = []
-        total = 0
-        while total <= DESCRIPTION_MAX_BYTES:
-            remaining = DESCRIPTION_DEADLINE - (time.monotonic() - started)
-            if remaining <= 0:
+        buf = bytearray()
+        while b"\r\n\r\n" not in buf:
+            if len(buf) >= DESCRIPTION_HEADER_MAX:
                 return b""
-            if conn.sock is not None:
-                conn.sock.settimeout(min(timeout, remaining))
-            try:
-                piece = response.read(1)
-            except (TimeoutError, socket.timeout):
+            piece = _recv_some(sock, started, DESCRIPTION_HEADER_MAX - len(buf))
+            if not piece:
+                return b""
+            buf += piece
+        marker = buf.find(b"\r\n\r\n")
+        if marker > DESCRIPTION_HEADER_MAX:
+            return b""
+        parsed = _http_headers(bytes(buf[:marker]))
+        if parsed is None:
+            return b""
+        status, headers = parsed
+        parts_status = status.split(b" ", 2)
+        if len(parts_status) < 2 or parts_status[1] != b"200":
+            return b""
+        encoding = headers.get(b"transfer-encoding", b"")
+        if b"chunked" in encoding.lower():
+            return b""
+        declared = headers.get(b"content-length")
+        if declared is None:
+            want = DESCRIPTION_MAX_BYTES
+        elif declared.isdigit():
+            want = int(declared)
+            if want > DESCRIPTION_MAX_BYTES:
+                return b""
+        else:
+            return b""
+        body = bytearray(buf[marker + 4:])
+        while len(body) < want:
+            piece = _recv_some(sock, started, min(4096, want - len(body)))
+            if piece is None:
                 return b""
             if not piece:
                 break
-            chunks.append(piece)
-            total += len(piece)
-        body = b"".join(chunks)
-        return b"" if len(body) > DESCRIPTION_MAX_BYTES else body
+            body += piece
+        return b"" if len(body) > DESCRIPTION_MAX_BYTES else bytes(body)
     except Exception:
         return b""
     finally:
-        conn.close()
+        sock.close()
 
 
 def _collect(sock: socket.socket, seconds: float) -> list[tuple[bytes, str]]:
