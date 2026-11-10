@@ -1197,8 +1197,10 @@ class LanternHandler(BaseHTTPRequestHandler):
             self._handle_v1_get(parsed.path, query)
         except V1Error as exc:
             self._send_v1_error(exc.status, exc.code, exc.fields)
-        except (CorruptScanError, NewerSchemaError) as exc:
-            self._send_data_error(exc)
+        except NewerSchemaError:
+            self._send_v1_error(409, "conflict")
+        except CorruptScanError:
+            self._send_v1_error(500, "server_error")
         except Exception as exc:
             self._server_error_v1(exc)
 

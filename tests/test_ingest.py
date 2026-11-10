@@ -5,6 +5,7 @@ Localhost and fake data only. No DNS and no device scans.
 
 import io
 import json
+import re
 import socket
 import threading
 import time
@@ -16,8 +17,8 @@ from pathlib import Path
 from unittest import mock
 
 from lantern import cli, discovery, identify, report
-from lantern.store import connect, load_scan, save_scan
-from lantern.webapp import CSP, make_server
+from lantern.store import CorruptScanError, NewerSchemaError, connect, load_scan, save_scan
+from lantern.webapp import CSP, TOKEN_HEADER, LanternHandler, make_server
 
 
 def _device(ip="10.1.0.5", hostname="printer.lan"):
@@ -72,12 +73,34 @@ class TextOutputTests(unittest.TestCase):
                 "vendor": "ven\rdor",
                 "open_ports": [{"port": 22, "service": "ssh"}],
                 "findings": [],
+            }, {
+                "ip": "10.1.0.9",
+                "mac": "aa:bb:cc:dd:ee:09",
+                "hostname": None,
+                "label": None,
+                "vendor": "Ac\u202eme",
+                "open_ports": [{"port": 80}],
+                "findings": [],
             }],
         }
+        switch_ip = "10.1.0.\x072"
         topo = {
-            "switches": [{"ip": "10.1.0.2", "name": "sw\x1b", "parent": None, "error": None,
-                          "port_to_parent": None}],
-            "locations": {},
+            "switches": [
+                {
+                    "ip": switch_ip, "name": "sw\u202eitch", "parent": None, "error": None,
+                    "port_to_parent": "Gi\u200b0/1",
+                },
+                {
+                    "ip": "10.9.9.9", "name": "child", "parent": switch_ip, "error": None,
+                    "parent_port": "Te\x071/0/1", "port_to_parent": "Up\x071",
+                },
+                {"ip": "10.0.0.\x013", "name": None, "parent": None, "error": "no\x07 reply"},
+            ],
+            "locations": {
+                "aa:bb:cc:dd:ee:05": {
+                    "switch": switch_ip, "port": "Gi\u202e0/3", "shared": False, "mac_count": 1,
+                },
+            },
         }
         out = io.StringIO()
         with mock.patch("sys.stdout", out):
@@ -87,8 +110,16 @@ class TextOutputTests(unittest.TestCase):
         self.assertNotIn("\x1b", text)
         self.assertNotIn("\x07", text)
         self.assertNotIn("\r", text)
+        self.assertNotIn("\u202e", text)
+        self.assertNotIn("\u200b", text)
         self.assertIn("label", text)
-        self.assertIn("sw", text)
+        self.assertIn("switch", text)
+        self.assertIn("Acme", text)
+        self.assertIn("10.1.0.2", text)
+        self.assertIn("Gi0/1", text)
+        self.assertIn("Gi0/3", text)
+        self.assertIn("Te1/0/1", text)
+        self.assertIn("no reply", text)
         self.assertTrue(all(ord(ch) >= 32 or ch in "\n\t" for ch in text))
 
 
@@ -102,6 +133,10 @@ class ReportCspTests(unittest.TestCase):
         head = html.split("<head>", 1)[1].split("</head>", 1)[0]
         self.assertTrue(head.lstrip().startswith('<meta http-equiv="Content-Security-Policy"'))
         self.assertIn("default-src 'none'", head)
+        self.assertIn("base-uri 'none'", head)
+        self.assertIn("form-action 'none'", head)
+        self.assertIn("style-src 'unsafe-inline'", head)
+        self.assertNotIn("script-src", head)
         self.assertNotIn("<script", html.lower())
         self.assertIsNone(__import__("re").search(r"\son[a-z]+=", html.lower()))
 
@@ -126,7 +161,13 @@ class CorruptShapeTests(unittest.TestCase):
             ("UPDATE devices SET findings = ?", '{"x":1}'),
             ("UPDATE devices SET identity = ?", '"str"'),
             ("UPDATE devices SET open_ports = ?", "[22]"),
+            ("UPDATE devices SET open_ports = ?", "[{}]"),
+            ("UPDATE devices SET open_ports = ?", '[{"port": true}]'),
+            ("UPDATE devices SET open_ports = ?", '[{"port": 65536}]'),
+            ("UPDATE devices SET open_ports = ?", '[{"port": -1}]'),
             ("UPDATE devices SET findings = ?", "[{}]"),
+            ("UPDATE devices SET findings = ?", "not json"),
+            ("UPDATE devices SET open_ports = ?", "not json"),
         )
         for sql, value in cases:
             db = self._seed(sql, value)
@@ -137,6 +178,13 @@ class CorruptShapeTests(unittest.TestCase):
                 self.assertEqual(code, 2, (sql, args, err.getvalue()))
                 self.assertIn("The saved scan could not be read.", err.getvalue())
                 self.assertNotIn("Traceback", err.getvalue())
+        db = self._seed("UPDATE scans SET topology = ?", '"str"')
+        for args in (["report"], ["diff"]):
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                code = cli.main(["--db", db, *args])
+            self.assertEqual(code, 2, (args, err.getvalue()))
+            self.assertIn("The saved scan could not be read.", err.getvalue())
 
 
 class DataErrorHttpTests(unittest.TestCase):
@@ -144,8 +192,9 @@ class DataErrorHttpTests(unittest.TestCase):
         server = make_server(db, port=0, strict_auth=False)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        self.addCleanup(server.shutdown)
+        # LIFO: shutdown runs before the listening socket is closed.
         self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_address[1]}"
 
     def _get(self, base, path):
@@ -210,14 +259,15 @@ class DescriptionDeadlineTests(unittest.TestCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
         port = server.server_address[1]
         started = time.monotonic()
         with mock.patch.object(identify, "DESCRIPTION_DEADLINE", 0.4):
             body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml", timeout=2)
         elapsed = time.monotonic() - started
         self.assertEqual(body, b"")
+        self.assertNotIn(b"x", body)
         self.assertLess(elapsed, 0.4 + 1.0)
 
     def _drip(self, first: bytes, later: bytes, pause: float, count: int):
@@ -253,24 +303,268 @@ class DescriptionDeadlineTests(unittest.TestCase):
         self.addCleanup(lambda: [item.close() for item in held])
         return port
 
-    def test_a_header_drip_stops_at_the_deadline(self):
-        port = self._drip(b"HTTP/1.0 200 OK\r\n", b"X", 1.5, 20)
+    def _bounded(self, first: bytes, later: bytes):
+        port = self._drip(first, later, 0.3, 15)
         started = time.monotonic()
-        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml")
+        with mock.patch.object(identify, "DESCRIPTION_DEADLINE", 0.45):
+            body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml", timeout=2)
         self.assertEqual(body, b"")
-        self.assertLess(time.monotonic() - started, identify.DESCRIPTION_DEADLINE + 1.5)
+        self.assertLess(time.monotonic() - started, 1.2)
+
+    def test_a_status_line_drip_stops_at_the_deadline(self):
+        self._bounded(b"", b"H")
+
+    def test_a_header_drip_stops_at_the_deadline(self):
+        self._bounded(b"HTTP/1.0 200 OK\r\n", b"X")
 
     def test_a_chunk_drip_is_refused(self):
         port = self._drip(
             b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
             b"1",
-            1.5,
-            20,
+            0.3,
+            15,
         )
         started = time.monotonic()
-        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml")
+        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml", timeout=2)
         self.assertEqual(body, b"")
-        self.assertLess(time.monotonic() - started, identify.DESCRIPTION_DEADLINE + 1.5)
+        self.assertLess(time.monotonic() - started, 1.2)
+
+    def test_each_read_stops_at_the_per_read_timeout(self):
+        port = self._drip(b"", b"", 5, 1)
+        started = time.monotonic()
+        body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml", timeout=0.25)
+        self.assertEqual(body, b"")
+        self.assertLess(time.monotonic() - started, 0.9)
+
+    def test_a_timeout_does_not_return_a_partial_body(self):
+        port = self._drip(
+            b"HTTP/1.0 200 OK\r\nContent-Type: text/xml\r\n\r\nPARTIAL",
+            b"Y",
+            0.4,
+            8,
+        )
+        with mock.patch.object(identify, "DESCRIPTION_DEADLINE", 0.3):
+            body = identify.fetch_description(f"http://127.0.0.1:{port}/desc.xml", timeout=2)
+        self.assertEqual(body, b"")
+        self.assertNotIn(b"PARTIAL", body)
+
+    def test_exactly_64_kib_is_kept_and_one_more_byte_is_refused(self):
+        cap = identify.DESCRIPTION_MAX_BYTES
+        exact = self._serve_body(b"Z" * cap)
+        self.assertEqual(
+            identify.fetch_description(f"http://127.0.0.1:{exact}/x", timeout=2),
+            b"Z" * cap,
+        )
+        over = self._serve_body(b"Z" * (cap + 1))
+        started = time.monotonic()
+        self.assertEqual(identify.fetch_description(f"http://127.0.0.1:{over}/x", timeout=2), b"")
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def _serve_body(self, payload: bytes) -> int:
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        held = []
+        head = (
+            b"HTTP/1.0 200 OK\r\nContent-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n"
+        )
+
+        def run():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            held.append(conn)
+            try:
+                conn.recv(4096)
+                conn.sendall(head + payload)
+            except OSError:
+                return
+
+        threading.Thread(target=run, daemon=True).start()
+        self.addCleanup(server.close)
+        self.addCleanup(lambda: [item.close() for item in held])
+        return port
+
+
+class PortShapeTests(unittest.TestCase):
+    def test_bool_range_and_bare_number_are_corrupt(self):
+        from lantern import store
+
+        self.assertEqual(store._require_ports([{"port": 0}]), [{"port": 0}])
+        self.assertEqual(store._require_ports([{"port": 65535}]), [{"port": 65535}])
+        for value in ([{"port": True}], [{"port": False}], [{"port": -1}], [{"port": 65536}], [22], "nope"):
+            with self.assertRaises(CorruptScanError):
+                store._require_ports(value)
+        with self.assertRaises(CorruptScanError):
+            store._require_findings([{}])
+        self.assertEqual(store._require_findings([{"severity": "low"}]), [{"severity": "low"}])
+
+
+class LenientTopologyTests(unittest.TestCase):
+    def test_broken_topology_json_is_missing_and_a_non_object_is_corrupt(self):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        conn = connect(db)
+        scan_id = save_scan(conn, "10.1.0.0/24", [_device()])
+        conn.execute("UPDATE scans SET topology = ?", ("not json",))
+        conn.commit()
+        self.assertIsNone(load_scan(conn, scan_id)["topology"])
+        conn.execute("UPDATE devices SET identity = ?", ("not json",))
+        conn.commit()
+        self.assertIsNone(load_scan(conn, scan_id)["devices"][0]["identity"])
+        conn.execute("UPDATE scans SET topology = ?", ('"str"',))
+        conn.commit()
+        with self.assertRaises(CorruptScanError):
+            load_scan(conn, scan_id)
+        conn.close()
+
+
+class HistorySubnetTests(unittest.TestCase):
+    def test_history_strips_controls_from_the_subnet(self):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        conn = connect(db)
+        save_scan(conn, "10.1.0.0/24", [_device()])
+        conn.execute("UPDATE scans SET subnet = ?", ("10.1.0.0/24\x07\u202e",))
+        conn.commit()
+        conn.close()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            code = cli.main(["--db", db, "history"])
+        text = out.getvalue()
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("10.1.0.0/24", text)
+        self.assertNotIn("\x07", text)
+        self.assertNotIn("\u202e", text)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            cli.main(["--db", db, "history", "--format", "json"])
+        self.assertNotIn("\\u0007", out.getvalue())
+        self.assertNotIn("\u202e", out.getvalue())
+
+
+class TagShapeTests(unittest.TestCase):
+    def _db(self, tags):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        conn = connect(db)
+        save_scan(conn, "10.1.0.0/24", [_device()])
+        conn.execute(
+            "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+            " VALUES ('mac:aa:bb:cc:dd:ee:05', 'mac', NULL, NULL, ?, NULL, NULL, 't')",
+            (tags,),
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_wrong_shape_tags_are_the_same_error_everywhere(self):
+        for tags in ("not json", '{"a": 1}', "[1]", '"just"'):
+            db = self._db(tags)
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                code = cli.main(["--db", db, "asset", "list"])
+            self.assertEqual(code, 2, (tags, err.getvalue()))
+            self.assertIn("The saved scan could not be read.", err.getvalue())
+            self.assertNotIn(tags, err.getvalue())
+            self.assertNotIn("Expecting", err.getvalue())
+            for args in (["report"], ["diff"], ["export", "--what", "devices"]):
+                err = io.StringIO()
+                with mock.patch("sys.stderr", err):
+                    code = cli.main(["--db", db, *args])
+                self.assertEqual(code, 2, (tags, args, err.getvalue()))
+                self.assertIn("The saved scan could not be read.", err.getvalue())
+                self.assertNotIn("Traceback", err.getvalue())
+
+
+class V1DataErrorTests(unittest.TestCase):
+    def _serve(self, db):
+        server = make_server(db, port=0, strict_auth=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        page = urllib.request.urlopen(base + "/", timeout=5).read().decode()
+        token = re.search(r'<meta name="lantern-token" content="([^"]+)"', page).group(1)
+        return base, token
+
+    def _ask(self, base, path, token, method="GET", body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(
+            base + path, data=data, method=method,
+            headers={TOKEN_HEADER: token, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode()
+
+    def _schema99(self, db):
+        raw = __import__("sqlite3").connect(db)
+        try:
+            raw.execute("DELETE FROM schema_version")
+            raw.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'future')")
+            raw.commit()
+        finally:
+            raw.close()
+
+    def test_v1_uses_its_envelope_for_a_newer_schema_and_a_corrupt_row(self):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        conn = connect(db)
+        save_scan(conn, "10.1.0.0/24", [_device()])
+        conn.execute("UPDATE devices SET open_ports = ?", ("not json",))
+        conn.commit()
+        conn.close()
+        base, token = self._serve(db)
+        status, body = self._ask(base, "/api/v1/devices", token)
+        payload = json.loads(body)
+        self.assertEqual(status, 500, body)
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["error"]["code"], "server_error")
+        self.assertNotIn("not json", body)
+
+        self._schema99(db)
+        status, body = self._ask(base, "/api/v1/scans", token)
+        payload = json.loads(body)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["error"]["code"], "conflict")
+        self.assertNotIn("schema 99", body)
+
+    def test_post_409_and_both_post_catches_keep_a_fixed_body(self):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        connect(db).close()
+        self._schema99(db)
+        base, token = self._serve(db)
+        status, body = self._ask(base, "/api/demo", token, "POST", {})
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["error"], "The database schema is newer than this Lantern.")
+        self.assertNotIn("schema 99", body)
+        self.assertNotIn("api_version", body)
+
+        fresh = str(Path(tmp.name) / "fresh.db")
+        connect(fresh).close()
+        base, token = self._serve(fresh)
+        with mock.patch.object(LanternHandler, "_read_json", side_effect=NewerSchemaError("schema 99")):
+            status, body = self._ask(base, "/api/scan", token, "POST", {"subnet": "10.1.0.0/24"})
+        self.assertEqual(status, 409, body)
+        self.assertNotIn("schema 99", body)
+        with mock.patch.object(LanternHandler, "_read_json", side_effect=CorruptScanError("raw json")):
+            status, body = self._ask(base, "/api/scan", token, "POST", {"subnet": "10.1.0.0/24"})
+        self.assertEqual(status, 500, body)
+        self.assertEqual(json.loads(body)["error"], "The saved scan could not be read.")
+        self.assertNotIn("raw json", body)
 
 
 class BlobUrlTests(unittest.TestCase):

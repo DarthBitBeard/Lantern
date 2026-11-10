@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 
 from . import __version__
-from .assets import CRITICALITIES, normalize_mac, strip_for_text
+from .assets import CRITICALITIES, normalize_mac, stored_tags, strip_for_text
 from .classify import annotate_scan, classify, gateway_score
 from .identify import empty_identity, identity_is_empty
 from .vendors import is_private_mac, lookup as vendor_lookup
@@ -386,16 +386,10 @@ def _assets(conn) -> dict[str, dict]:
     for key, owner, location, tags, criticality, notes, updated in conn.execute(
         "SELECT asset_key, owner, location, tags, criticality, notes, updated_at FROM assets"
     ):
-        try:
-            parsed_tags = json.loads(tags or "[]")
-        except json.JSONDecodeError as exc:
-            raise CorruptScanError("The saved scan could not be read.") from exc
-        if not isinstance(parsed_tags, list) or any(not isinstance(item, str) for item in parsed_tags):
-            raise CorruptScanError("The saved scan could not be read.")
         found[key] = {
             "owner": owner,
             "location": location,
-            "tags": parsed_tags,
+            "tags": stored_tags(tags),
             "criticality": criticality,
             "notes": notes,
             "updated_at": updated,

@@ -12,7 +12,7 @@ import json
 import re
 import unicodedata
 
-from .store import _now
+from .store import CorruptScanError, _now
 
 OWNER_MAX = 80
 LOCATION_MAX = 80
@@ -156,6 +156,17 @@ def device_asset_fields(device: dict) -> dict:
     }
 
 
+def stored_tags(raw) -> list[str]:
+    """Tags from the inventory table. Bad JSON or a wrong shape is one fixed error."""
+    try:
+        value = json.loads("[]" if raw is None or raw == "" else raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptScanError("The saved scan could not be read.") from exc
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise CorruptScanError("The saved scan could not be read.")
+    return value
+
+
 def _row_to_dict(row) -> dict:
     key, kind, owner, location, tags, criticality, notes, updated_at = row
     return {
@@ -163,7 +174,7 @@ def _row_to_dict(row) -> dict:
         "kind": kind,
         "owner": owner,
         "location": location,
-        "tags": json.loads(tags),
+        "tags": stored_tags(tags),
         "criticality": criticality,
         "notes": notes,
         "updated_at": updated_at,

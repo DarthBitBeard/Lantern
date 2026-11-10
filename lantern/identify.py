@@ -235,25 +235,33 @@ def _deadline_left(started: float) -> float:
     return DESCRIPTION_DEADLINE - (time.monotonic() - started)
 
 
-def _recv_some(sock: socket.socket, started: float, limit: int) -> bytes | None:
-    """One read. The socket timeout is whatever is left of the deadline."""
+def _io_timeout(started: float, timeout: float) -> float | None:
+    """Per-read cap, and never longer than the time left on the deadline."""
     remaining = _deadline_left(started)
-    if remaining <= 0 or limit <= 0:
+    if remaining <= 0:
         return None
-    sock.settimeout(remaining)
+    return min(float(timeout), remaining)
+
+
+def _recv_some(sock: socket.socket, started: float, limit: int, timeout: float) -> bytes | None:
+    """One read of the status line, a header, or the body."""
+    wait = _io_timeout(started, timeout)
+    if wait is None or limit <= 0:
+        return None
+    sock.settimeout(wait)
     try:
         return sock.recv(limit)
     except (TimeoutError, socket.timeout, OSError):
         return None
 
 
-def _send_all(sock: socket.socket, payload: bytes, started: float) -> bool:
+def _send_all(sock: socket.socket, payload: bytes, started: float, timeout: float) -> bool:
     view = memoryview(payload)
     while view:
-        remaining = _deadline_left(started)
-        if remaining <= 0:
+        wait = _io_timeout(started, timeout)
+        if wait is None:
             return False
-        sock.settimeout(remaining)
+        sock.settimeout(wait)
         try:
             sent = sock.send(view)
         except (TimeoutError, socket.timeout, OSError):
@@ -280,10 +288,13 @@ def _http_headers(head: bytes) -> tuple[bytes, dict[bytes, bytes]] | None:
 def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> bytes:
     """GET one description document. Returns b"" on any failure or oversize body.
 
-    The request is raw HTTP/1.0 on a socket. ``timeout`` is only the connect
-    timeout. Every later read and write sets the socket timeout to the time
-    left of ``DESCRIPTION_DEADLINE``, including the status line and headers.
-    A chunked body is refused. Header bytes stop at ``DESCRIPTION_HEADER_MAX``.
+    The request is raw HTTP/1.0. ``timeout`` caps the connect and every later
+    read and write. The status line, headers, and body also share
+    ``DESCRIPTION_DEADLINE``: each wait is the shorter of ``timeout`` and the
+    time still left. A stalled read returns b"", not the bytes gathered so
+    far. Headers stop at ``DESCRIPTION_HEADER_MAX``. A chunked response is
+    refused. A Content-Length above ``DESCRIPTION_MAX_BYTES`` (64 KiB) is
+    refused; a body of exactly that size is kept.
     """
     parts = urllib.parse.urlsplit(location)
     if parts.scheme not in ("http", ""):
@@ -316,13 +327,13 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
     except OSError:
         return b""
     try:
-        if not _send_all(sock, request, started):
+        if not _send_all(sock, request, started, timeout):
             return b""
         buf = bytearray()
         while b"\r\n\r\n" not in buf:
             if len(buf) >= DESCRIPTION_HEADER_MAX:
                 return b""
-            piece = _recv_some(sock, started, DESCRIPTION_HEADER_MAX - len(buf))
+            piece = _recv_some(sock, started, DESCRIPTION_HEADER_MAX - len(buf), timeout)
             if not piece:
                 return b""
             buf += piece
@@ -350,7 +361,7 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
             return b""
         body = bytearray(buf[marker + 4:])
         while len(body) < want:
-            piece = _recv_some(sock, started, min(4096, want - len(body)))
+            piece = _recv_some(sock, started, min(4096, want - len(body)), timeout)
             if piece is None:
                 return b""
             if not piece:
