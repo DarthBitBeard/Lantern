@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Banner text can be parsed into a service, product, and version (`lantern.fingerprint.parse`). The parser is not wired to a scan, a database, or the API yet. A product that is not a short ASCII name is dropped, and the status is `unknown`.
 - The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM next to the files they name, as workflow artifacts only; nothing is published. `--check` fails when that checksum file is missing or empty. The Windows SBOM names PyInstaller and the bundled Python. A switch's SNMP budget is a hard limit. The vendor table refuses a gzip that expands past 16 MiB, and a truncated or corrupt table leaves the vendor unknown.
 
 ## 1.4.0 - 2026-11-07
