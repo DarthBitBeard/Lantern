@@ -2505,7 +2505,8 @@ vm.createContext(context);
 vm.runInContext(app, context);
 const payload = "<script>alert(1)</script>";
 const allow = new Set(["device", "unknown", "kind", "meta", "ports", "port", "findings",
-  "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary"]);
+  "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary",
+  "asset-editor", "asset-editor-body", "asset-form", "tag-chips", "tag-chip", "asset-actions", "asset-error"]);
 function walk(node, visit) {
   if (!node) return;
   if (node.nodeType === 3) { visit(node); return; }
