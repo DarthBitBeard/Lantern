@@ -1182,6 +1182,19 @@ class ExportInterrupted(BaseException):
         super().__init__(signum)
 
 
+def _block_termination() -> bool:
+    """Block SIGINT and SIGTERM until the new file is recorded. POSIX only."""
+    if not hasattr(signal, "pthread_sigmask"):
+        return False
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    return True
+
+
+def _unblock_termination(blocked: bool) -> None:
+    if blocked:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+
+
 def _termination_signals() -> tuple[int, ...]:
     found = []
     for name in ("SIGINT", "SIGTERM"):
@@ -1281,18 +1294,38 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 # would turn CSV \r\n into \r\r\n. POSIX ignores this flag.
                 if hasattr(os, "O_BINARY"):
                     flags |= os.O_BINARY
-                if directory is not None:
-                    fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
-                else:
-                    fd = os.open(destination, flags, 0o600)
-                partial = destination
+                blocked = _block_termination()
+                try:
+                    if directory is not None:
+                        fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
+                    else:
+                        fd = os.open(destination, flags, 0o600)
+                    partial = destination
+                except KeyboardInterrupt:
+                    # os.open created the file and then a simulated signal
+                    # fired before we could record it. The path is known
+                    # because this create is exclusive.
+                    _unlink_quiet(destination)
+                    raise
+                finally:
+                    _unblock_termination(blocked)
                 try:
                     _write_fd(fd, payload)
                 finally:
                     os.close(fd)
             else:
-                fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
-                temporary_path = Path(temporary)
+                before = {path.name for path in parent.glob(".lantern-export-*")}
+                blocked = _block_termination()
+                try:
+                    fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
+                    temporary_path = Path(temporary)
+                except KeyboardInterrupt:
+                    for path in parent.glob(".lantern-export-*"):
+                        if path.name not in before:
+                            _unlink_quiet(path)
+                    raise
+                finally:
+                    _unblock_termination(blocked)
                 try:
                     _write_fd(fd, payload)
                 finally:

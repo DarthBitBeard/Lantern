@@ -49,6 +49,7 @@ import ipaddress
 import json
 import re
 import secrets
+import signal
 import socket
 import sys
 import threading
@@ -1770,9 +1771,27 @@ def serve(
         # The socket is already listening, so the browser's first request
         # waits in the backlog until serve_forever starts.
         _open_browser(open_url)
+    previous_term = None
+    if (
+        hasattr(signal, "SIGTERM")
+        and threading.current_thread() is threading.main_thread()
+    ):
+        def _on_sigterm(_signum, _frame):
+            # shutdown() must not run on the serve_forever thread.
+            threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start()
+
+        try:
+            previous_term = signal.signal(signal.SIGTERM, _on_sigterm)
+        except (ValueError, OSError):
+            previous_term = None
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if previous_term is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous_term)
+            except (ValueError, OSError):
+                pass
         server.server_close()
