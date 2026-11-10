@@ -87,271 +87,30 @@ Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <comma
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
-Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then upgrades it. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. Schema version 2 adds `scope_name` on each scan. Schema version 3 adds the inventory table. Schema version 4 adds an index on the device table and changes no rows. A database already at schema 1 is copied to `.v1.bak` and then gains that column; older rows keep a null scope name. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
-
-On macOS and Linux, a new database file, that migration backup, and the HTML file from `lantern demo` are created mode `0600` (readable and writable only by your user). This holds under the usual umask `022` and under a permissive umask. If the directory for a new database does not exist yet, Lantern creates it mode `0700`. A directory that already exists stays at the mode you set. If a database or backup already on disk is readable by the group or by other users, Lantern prints a warning to stderr and leaves that file unchanged. A database path that is a symlink is refused.
-
-On Windows, Lantern does not set or check these Unix permission bits. Who can read the file is the access control list on your user profile. Keep the database in your profile, not in a folder shared with other accounts.
-
-**Debug tips**
-
-- Prefer demo mode while developing UI or storage: `python3 -m lantern demo` then `python3 -m lantern web --db data/lantern.db`. Open the printed `http://127.0.0.1:8068/#token=...` link. With no terminal, set `LANTERN_API_TOKEN_FILE` or the process exits 2.
-- `--debug` prints each HTTP request to stderr; leave it off for normal use. `python3 -m lantern web --debug` does not print a generated token. Set `LANTERN_API_TOKEN_FILE` or startup exits 2.
-- Break in the stdlib server with `python3 -m pdb -m lantern web --debug`, or attach your IDE debugger to `lantern.cli:main` / `lantern.webapp:serve`. `--debug` does not print a token, including under pdb, so set `LANTERN_API_TOKEN_FILE` or the process exits 2. Without `--debug`, open the printed `#token=` link. With no terminal, set that file.
-- API smoke check: start `python3 -m lantern web` in a terminal and copy the token from the printed `http://127.0.0.1:8068/#token=...` link. The fragment is not sent by the browser, and the HTML page does not contain the token, so do not scrape it. `GET /api/status` without the header is 403. Send the token as `X-Lantern-Token`:
-
-  ```bash
-  # TOKEN is the value after #token= in the printed link.
-  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8068/api/status
-  curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/status
-  curl -s -X POST http://127.0.0.1:8068/api/demo \
-    -H 'Content-Type: application/json' \
-    -H "X-Lantern-Token: $TOKEN" \
-    -d '{}'
-  ```
-- If the dashboard 404s after `pip install`, the install is missing `lantern/web`. Reinstall from this repo (`pip install -e .`); package data is declared in `pyproject.toml`.
-- Subnet auto-detect uses the machine's outbound private IPv4, then its hostname. A hostname lookup that takes more than half a second is skipped, so a slow DNS answer cannot stall the dashboard. If Lantern still cannot guess, pass `--subnet` (CLI) or fill the Subnet field in the UI.
-
-## Scan your own network
-
-```bash
-python3 -m lantern scan --subnet 192.168.1.0/24
-python3 -m lantern diff
-python3 -m lantern history
-python3 -m lantern report --format html > report.html
-```
-
-To keep a few networks on file, copy [`examples/lantern.toml`](examples/lantern.toml) to `lantern.toml` and edit the subnets to networks you are allowed to scan. Then:
-
-```bash
-python3 -m lantern scopes --config lantern.toml
-python3 -m lantern scan --config lantern.toml --scope home
-python3 -m lantern scan --config lantern.toml --scope home --scope lab
-python3 -m lantern scan --config lantern.toml --all
-python3 -m lantern history --scope home
-python3 -m lantern diff --scope home
-python3 -m lantern report --scope home
-```
-
-Each scope is one private subnet (`subnet`) plus an optional `description`. A scope file larger than 64 KiB is refused before it is parsed. `lantern scopes` only prints the file. It does not scan and it does not create a database. If the file defines one scope, `--scope` may be omitted. Repeat `--scope` to scan a chosen list in the order given, or pass `--all` to scan every named scope in file order. Each stored scan is tagged with its scope name. `history`, `diff`, and `report` take `--scope` to stay inside that name. The comparison uses the spelling in the scope file, so `lab-2` matches a scope stored as `Lab-2`. If that name is not in the file, or the file cannot be read, `history`, `diff`, and `report` use the typed name after the usual name check. Scans stored under that exact name are still listed. Those commands do not scan, so a broken `lantern.toml` does not block them. A name that is not a short token is rejected before case folding. A diff compares the latest two scans of that scope, not a scan from a different scope. One scope that fails during the scan does not drop the others; the summary lists which ran and which failed, and the command exits 1. A bad name or a public range is refused before any probe, and the command exits 2. One run scans at most 1024 unique addresses. Exactly 1024 is allowed and 1025 is refused before any probe. Repeated names, including names that differ only by case, are scanned once. Overlapping ranges count once. `lantern diff` and `lantern report` with no `--scope` compare a scan to the previous scan of that same scope. `--format html` with several scopes prints one HTML document. `--subnet` on its own still works and does not read the file. Passing `--subnet` together with `--config`, `--scope`, or `--all` is an error, and so is passing `--all` together with `--scope`. The dashboard does not read `lantern.toml`. When a saved scan has a scope name, the page shows that name escaped.
-
-A scan pings every address in the subnet (50 at a time), adds anything already in the OS neighbor (ARP) cache, then tries a short TCP connect (ports 80, 443, 22, 445) on every address that did neither, so a host that blocks ping is still found and the Docker image, which has no `ping`, still discovers hosts. A refused connection counts as alive. It then TCP-connects to the risk ports on each live host, 8 hosts at a time. Expect roughly 15 to 40 seconds for a /24. A host that drops all of those ports and ignores ping is still missed. Without `--subnet`, the dashboard and `lantern scan` use the real prefix of the interface that reaches the network (a /23 is scanned whole), and fall back to the /24 around the address when the OS does not report one or the network is larger than 1024 addresses.
-
-From the dashboard you can also run a real scan or a demo scan, see the diff banner, search and filter devices, label a device and mark it trusted or unknown, browse scan history, and open the HTML report. The Devices tab narrows the cards already on the page by tag and by criticality, together with the search box and the trust filter. Those controls do not start a scan and do not write anything. Search also matches owner, location, tags, notes, and criticality. There is still no inventory editor on the dashboard. Trust is stored by MAC address in the same SQLite file, so a trusted label survives later scans.
-
-Run scans from a machine on your home network. A scan from inside a normal Docker container only sees the container network.
-
-## Device inventory
-
-Inventory fields stay with the device across scans. They are not a second copy of the trust label.
-
-```bash
-python3 -m lantern asset set aa:bb:cc:dd:ee:ff --owner Ada --location "Rack A" --tag web --criticality high --notes "Patched last week"
-python3 -m lantern asset show aa:bb:cc:dd:ee:ff
-python3 -m lantern asset list --tag web --criticality high
-python3 -m lantern asset clear aa:bb:cc:dd:ee:ff --field notes
-```
-
-`set` only accepts a MAC or IPv4 address that already appears in a saved scan. A device with a MAC is stored by that MAC (lowercase, colon form), so a later scan with a new IP keeps the same record. A device with no MAC is stored by IP. Owner and location are at most 80 characters, notes at most 500. A blank or whitespace-only value is rejected; use `asset clear` to remove a field. Tags are at most 10 after duplicates are removed, each 1 to 32 characters from `a-z`, `0-9`, `.`, `_`, or `-` after ASCII lowercase only. A character that would change under case folding or NFKC normalization is rejected. Criticality is `low`, `medium`, `high`, or `critical`. Control, format, and separator characters are rejected, including bidirectional overrides, zero-width characters, and line separators. Lantern stores at most 10000 inventory records. Adding a new device past that limit is refused; updating a record that is already stored still works. `asset list --scope` can still match a scope name that has been removed from the config file when one spelling is stored on a scan. An exact stored spelling is used when more than one case variant is stored. `history`, `diff`, and `report` instead keep the typed name when the file does not contain it or cannot be read.
-
-You edit these fields with the `asset` commands. They show in the CLI, in `report`, in `diff`, and on the dashboard's device cards after the page has loaded a scan with the access token. The static HTML does not contain owner, location, tags, criticality, or notes; the cards fill them in from that response. There is no inventory editor in the dashboard. Owner, location, and notes are personal data. They are stored only in the local database, which is created mode 0600. `/api/v1/devices` and `/api/v1/diffs` return them to a caller with the token. `lantern export` and `/api/v1/export` leave owner, location, and notes out unless you ask. Reports and diffs you may share include them. HTML output escapes them.
-
-## Network map
-
-The dashboard's **Map** tab draws the latest scan, or the one picked in History: the router in the middle, and every device around it grouped by kind (servers, computers, printers, cameras, TVs and speakers, smart-home gear, phones, and so on). Each circle is colored by its worst finding, and a dashed ring means the device is not trusted yet. The computer running Lantern has an amber ring. Click or tab to a device to see its full card beside the map, with the same trust and label controls as the Devices tab. The search box and filter dim everything that does not match.
-
-Where the names come from:
-- **Router:** this computer's default route, when it is inside the scanned subnet. Otherwise the host that answers DNS and has a web page at a router address (`.1` or `.254`), and the legend says it was guessed.
-- **Device kind:** open ports, the hostname, a randomized MAC, who made the network card, and what the device announces about itself. Hover a device to see the reason.
-- **Vendor:** the maker of the network card, from the first half of the MAC address (for example Synology, Ubiquiti, Brother, Espressif, Apple). Lantern looks it up in a copy of the IEEE public registry of MAC prefixes that ships with it; nothing is looked up online. A vendor that only makes one kind of thing (network storage, cameras, printers, network gear, smart-home chips, speakers) is a strong hint about the kind; a maker of phones or PC network cards only fills in when nothing else does. A randomized ("private Wi-Fi") address has no vendor, because its bits are made up by the device. The vendor shows on device cards, in search, in text output for unnamed devices, and in JSON reports.
-- **Friendly names and models:** SSDP (UPnP) and mDNS (Bonjour), for example "Living Room TV, Chromecast" or "Lexmark B2338dw". Only the name, model, manufacturer, device type, and service types are kept. Serial numbers and other TXT fields are ignored. Every value is cleaned of control characters and cut to 80 characters.
-
-The lines in this view show what each device reaches through the router, grouped by kind. They are not cables: a scan alone cannot see switches, or which Wi-Fi access point a device uses. For that, see the switch map below.
-
-### Switch map (managed switches)
-
-If you have managed switches with SNMP turned on, Lantern can read them and draw which switch, and which port, each device is plugged into. The map then has a **By switch** view: the router in the middle, each switch around it (uplinks between switches drawn as arcs), and each device on the switch port where it was seen. A dashed line means several devices share that port, which usually means a Wi-Fi access point or an unmanaged switch is plugged in there. Device cards show the switch and port.
-
-```bash
-# Put the switches' read-only community in a file only you can read.
-printf '%s' 'your-read-only-community' > ~/.lantern-snmp && chmod 600 ~/.lantern-snmp
-
-# Read the switches after a scan, and store the map with it:
-lantern scan --switch 192.168.1.2 --switch 192.168.1.3 --snmp-community-file ~/.lantern-snmp
-
-# Or attach a map to the latest saved scan without rescanning:
-lantern topology --switch 192.168.1.2 --snmp-community-file ~/.lantern-snmp
-
-# Dashboard scans read the switches too:
-lantern web --switch 192.168.1.2 --snmp-community-file ~/.lantern-snmp
-```
-
-The community can also come from `LANTERN_SNMP_COMMUNITY_FILE` (a path) or `LANTERN_SNMP_COMMUNITY` (the value). There is no prompt. The file gets the same checks as the API token file: no symlinks, at most 4 KiB, and on macOS and Linux no group or other permission bits. The community is never stored in the database, printed, logged, or sent to the browser.
-
-What Lantern reads, with SNMPv2c GetRequest, GetNextRequest, and GetBulkRequest only (it has no code that can send a SetRequest, so it cannot change a switch):
-- the switch's name and description (SNMPv2-MIB `sysName`, `sysDescr`), and port names (IF-MIB `ifName`, else `ifDescr`);
-- the MAC address table (Q-BRIDGE-MIB `dot1qTpFdbTable`, else BRIDGE-MIB `dot1dTpFdbTable`), learned entries only;
-- LLDP neighbours (LLDP-MIB `lldpRemTable`), to see which switch is cabled to which.
-
-A port that leads to another switch you named is an uplink. Each device is placed on the non-uplink port where it was seen with the fewest other addresses. The switch with the router on one of its ports is the top of the tree. Devices no switch saw (Wi-Fi through the router, a switch you did not name, or an unmanaged switch upstream) are drawn under "Not seen on a switch".
-
-Limits: switch addresses must be private IPv4 addresses, as for scans; at most 16 switches per run, read 4 at a time; 2 seconds per request with one retry; at most 20000 rows per table and 30 seconds per switch. A switch that does not answer is listed with the reason and the rest still draw. SNMPv3 is not supported: its privacy mode needs AES, which Python's standard library does not include, and Lantern has no third-party dependencies. If your switches only allow SNMPv3, the switch map is not available yet.
-
-The demo (`lantern demo`, or **Run demo** on the dashboard) includes two example switches, so you can see the switch view without any hardware.
-
-Scans saved before 1.1.0 still draw. They have no stored router or names, so the router is guessed and devices are grouped by ports and hostnames only.
-
-## Export and `/api/v1`
-
-`lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
-
-When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every other path, including stdout and `.json`, is JSON. The suffix match ignores case. If `--format` is set and the path ends in `.csv` or `.json` and that suffix does not match, the command exits 2 and does not write the file. A different suffix, such as `.txt`, keeps the format you named.
-
-Owner, location, and notes are left out of `lantern export` and `/api/v1/export` unless you pass `--include-private-fields` or `include=private`. `/api/v1/devices` and `/api/v1/diffs` return those fields when the caller has the token. The diff uses the same device shape as `/api/v1/devices`.
-
-Since 1.2.0, each device in `/api/v1/devices`, `/api/v1/diffs`, and the JSON export also has `kind` (one of `router`, `network`, `computer`, `server`, `nas`, `printer`, `camera`, `media`, `smart_home`, `phone`, `other`, `unknown`), `kind_reason` (one plain-English sentence), and `identity`. `identity` is what the device announced over SSDP or mDNS (`name`, `model`, `manufacturer`, `device_type`, `services`, `names`, `sources`), or `null` when it announced nothing. The device CSV adds `kind`, `kind_reason`, `announced_name`, `announced_model`, and `announced_manufacturer` after every 1.0 column, so readers that go by column position keep working. These are the same kinds as on the dashboard's map.
-
-Since 1.3.0, devices also have `vendor` (the network card's maker, or `null`) and `private_mac` (true for a randomized address). The device CSV adds `vendor` and `private_mac` after the 1.2.0 columns.
-
-```bash
-TOKEN=the-token-from-the-page-or-startup-link
-curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/status
-curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/devices
-curl -s -H "X-Lantern-Token: $TOKEN" http://127.0.0.1:8068/api/v1/diffs
-curl -s -H "X-Lantern-Token: $TOKEN" "http://127.0.0.1:8068/api/v1/export?what=devices&format=csv"
-```
-
-With `--no-strict-auth`, `/api/v1` still requires a token, and that token is only the one embedded in the page for that process. Loopback without strict auth does not load `LANTERN_API_TOKEN_FILE`, so a token from that file gets 403. Strict auth and `--allow-lan` do use the file.
-
-CSV quotes every cell and prefixes a cell with `'` when it could be a spreadsheet formula (`=`, `+`, `-`, `@`, tab, a line break, `|`, the full-width forms of those signs, or a `cmd|` / `DDE(` payload), including when Unicode spaces or format characters sit in front of the trigger. Values such as `-5` and `+1` get that prefix too, so a spreadsheet opens them as text rather than as numbers or formulas. Spreadsheet behaviour varies; the prefix is a best-effort mitigation, not a promise about how Excel, LibreOffice, or Google Sheets will display the cell. The file is UTF-8 with no byte-order mark.
-
-An `--output` file is created mode 0600 on macOS and Linux. On Windows those mode bits are not applied; the user profile ACL keeps the file private, the same way it does for the database. The directory must already exist. Lantern refuses a missing directory, a directory reached through a symlink, a symlink at the output file (including with `--force`), and a hard link when replacing a file. A path that already exists needs `--force`. The file is the same bytes as stdout, including the trailing newline. If the write is interrupted by Ctrl-C or a catchable SIGTERM, a `.lantern-export-*` file this write created and a partial new file are removed. With `--force`, the previous file stays until the replacement finishes. Ctrl-C then exits with status 130 and does not print a traceback. SIGKILL, a power loss, and a forced Windows process kill do not run that cleanup. The API never writes a file; `/api/v1/export` is a download.
-
-`/api/v1` is read-only. Every route, including on loopback with strict auth turned off, requires `X-Lantern-Token`. A bad token is 403, not 401. `GET /api/v1/status` reports `api_version` 1 and `role` `admin`. Other `/api/v1` JSON bodies also carry `api_version`. There are no CORS headers. Paths such as `/api/v1x` are not part of this API. Without a tag or criticality filter, a device list or device export is refused before those rows are loaded when the scan has more than 100000 devices, and a device export is also refused then when the stored device text is already over 33554432 characters, counted with SQLite `LENGTH`. With a tag or criticality filter, a small selection from a large scan is returned. Each stored row is measured before its JSON is decoded. The measure is SQLite `LENGTH`, which counts characters, not UTF-8 bytes. A row over 33554432 characters is refused, including a row the filter would skip. Matching rows are decoded only while the characters kept so far stay within that count. That count is not a limit on process memory. The selection is still refused at 100000 matching devices or 32 MiB of encoded UTF-8. Nothing partial is sent: the check finishes before the success response. Device JSON is encoded one device at a time into one buffer. Device CSV still loads every matching row into memory, then writes the CSV. The HTTP response is that finished body with `Content-Length`. It is not streamed to the client as it is generated. This is not a promise that every other endpoint stays inside that memory while it reads a large scan. A filtered device export still looks at each device's ports once to choose the router, unless that port text is itself over 33554432 characters (`LENGTH`, not UTF-8 bytes), which is refused before it is decoded. That check is not a limit on process memory either. Devices that did not match are not kept, and their findings are not decoded. A second export while one is running is 429. Numeric parameters are 1 to 9 digits.
-
-## Safety rules, enforced in code
-
-- Private RFC1918 subnets only (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and the scope must sit fully inside one of them. Public addresses, loopback, link-local, `0.0.0.0/8`, `240.0.0.0/4`, `192.0.0.0/24`, the TEST-NET blocks, and `198.18.0.0/15` are refused.
-- At most 1024 unique addresses in one run (a /22), normally a /24. Repeated scope names and overlapping ranges do not raise that total.
-- A scope in `lantern.toml` uses those same checks. The file cannot raise the cap, allow a public, loopback, or link-local range, or set excludes, extra CIDRs, or a different port list. Those keys are rejected. A scope file larger than 64 KiB is refused. Several scopes in one run still share the 1024 unique-address cap.
-- No brute force, no exploits, no default password checks, ever. The only bytes Lantern sends after connecting to a scanned port are a single `HEAD / HTTP/1.0` to ports that usually speak HTTP.
-- Switches are read only when you name them with `--switch`, using read-only SNMPv2c requests (no SetRequest exists in the code) to UDP port 161 of those private addresses. The community stays in memory and is never stored, printed, or logged.
-- To name devices, each scan also sends one SSDP search (`239.255.255.250:1900`) and one mDNS query (`224.0.0.251:5353`) on the local link, with a multicast TTL of 1, and listens for 2.5 seconds. These are the same discovery messages phones and computers send all the time. When a device answers SSDP with a description URL, Lantern fetches that one XML file only from the device that answered, only over plain HTTP inside the scanned subnet, with a 2-second timeout and a 64 KiB cap, and refuses any document with a DTD. Replies from outside the subnet are ignored.
-- Stdlib only. No Nmap, no Scapy, no root needed. The Docker image runs as uid 10001, not root.
-- The database, its migration backup, and the demo HTML report are created private to your user. A database path that is a symlink is refused. Lantern leaves an existing directory at the mode you set, and warns on stderr if that directory is looser than 0700 (for example 0755). For the Docker bind mount of `./data`, run `mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data`.
-
-Only scan networks you own or have explicit permission to scan. See [SECURITY.md](SECURITY.md).
-
-## Threat model
-
-Lantern is a local admin tool. The dashboard has no accounts. On loopback the checks stop another website in the same browser. A LAN bind is a separate, explicit choice and requires one startup token on every API call.
-
-What it resists:
-
-- Another site triggering a scan or reading the inventory (cross-site requests, and DNS rebinding where a public name starts pointing at `127.0.0.1`).
-- A scan of a network that is not a small private range.
-- A LAN client calling the API without the startup token. In that mode the page does not contain the token.
-
-What it does not resist:
-
-- On loopback with `--no-strict-auth`, anyone who can open an allowed Host can read the page, and that page contains the token used for `POST`. That person can call the API. The default does not embed the token. `--allow-host` does not add a login.
-- On a LAN bind, anyone who has the startup token can read the inventory and start scans. Treat that token like a password. It is not an account system.
-- A person at the keyboard, or another local user who can read the SQLite file.
-
-Every request must send an allowed `Host`. On loopback that is `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, plus any host you named with `--allow-host`. With `--allow-lan`, the allowlist is only the explicit bind address and the `--allow-host` values. `0.0.0.0` and `::` are not added, and a wildcard is not accepted. A name you did not list is refused even when it resolves to loopback.
-
-By default every `/api` route, including `GET`, requires `X-Lantern-Token`. The process generates that token at startup with `secrets.token_urlsafe` (256 bits), does not embed it in the page, and compares it with `hmac.compare_digest`. It is not written to the log. On a terminal it is printed once in the `#token=` link. `--no-strict-auth` embeds it on loopback and does not require it on `GET`. If a `POST` includes an `Origin` header, that origin must be `http` or `https` and its host and port must be on the same allowlist. A `POST` with no `Origin` is accepted only when the token is valid.
-
-A LAN bind uses that same header for `POST` and for `GET` of inventory, status, and reports. The token is the one the CLI loaded or generated. It is not embedded in the page and it is not written to the log.
-
-Scanning is unchanged: private RFC1918 ranges only, at most 1024 addresses, no loopback or link-local targets. The Host allowlist does not widen that.
-
-## Web dashboard
-
-No pip install needed. The dashboard is stdlib only, plain HTML, CSS, and JavaScript, with a JSON API.
-
-```bash
-python3 -m lantern web
-# Open the printed http://127.0.0.1:8068/#token=... link.
-# With no terminal, set LANTERN_API_TOKEN_FILE or the process exits 2.
-```
-
-API. Every call is refused (403, body `{"error": "Forbidden."}`) unless `Host` is on the allowlist. On loopback that is this port's loopback names, or a host passed with `--allow-host`. With `--allow-lan` it is only the bind address and `--allow-host`.
-
-| Route | Returns |
-| --- | --- |
-| `GET /api/status` | version, guessed subnet, scan count, latest scan id, `scan_running` |
-| `GET /api/scans` | saved scans, newest first, with `total`. `?limit=` (default 200, at most 1000) and `?offset=` page through them |
-| `GET /api/scans/latest`, `GET /api/diff` | latest scan plus its diff against the scan before it |
-| `GET /api/scans/{id}` | one scan plus its diff against the scan before it |
-| `GET /api/report?format=json\|html&scan_id=N` | report for the latest scan, or scan `N` |
-| `POST /api/scan` `{"subnet": "192.168.1.0/24"}` | starts a real scan in the background (subnet optional, auto-detected) and returns 202 at once; 409 while one is running |
-| `GET /api/scan` | the latest dashboard scan: `state` (`idle`, `running`, `done`, `error`), `subnet`, `scan_id` once done, and a fixed `error` message when it failed |
-| `POST /api/demo` `{}` | saves the two demo scans |
-| `POST /api/trust` `{"mac": "...", "label": "...", "trusted": true}` | labels a device by MAC |
-
-On loopback, `GET` needs an allowed `Host`. By default it also needs `X-Lantern-Token`, and the page does not contain the token. `POST /api/*` needs that header too. A new token is generated each time the process starts. On a terminal it is printed once in the `#token=` link and is not written to the request log. `--no-strict-auth` embeds the token in the page and does not require it on `GET`. Any local user or process that can connect can then read the page, and therefore the token, and can read `GET /api/*` without it. With Docker host networking, that `127.0.0.1` is the host's loopback, so the same is true of every user on the Docker host when you opt out.
-
-Strict auth is the default. It never puts the token in the page, and every `/api` route, including `GET`, requires `X-Lantern-Token` in both loopback and LAN mode. The comparison and the short delay on a presented mismatch are the same as the other modes. On an interactive terminal, a generated token is printed once as `http://127.0.0.1:PORT/#token=...`. Open that link in the browser. The token is valid until Lantern restarts. The `#token` fragment is not sent to the server. The page script stores it in `sessionStorage` only in this mode and in LAN mode, removes it from the address bar with `history.replaceState`, and sends it as `X-Lantern-Token`. A 403 clears that stored token and asks again, including after a restart leaves a stale value. Without a terminal, which is how `docker logs` works, Lantern does not generate or print a token. Prefer `LANTERN_API_TOKEN_FILE` over `LANTERN_API_TOKEN`: on Linux the process environment is `/proc/<pid>/environ` (mode 0400), so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment. `LANTERN_STRICT_AUTH` accepts `1`, `true`, `yes`, or `on` to enable, and `0`, `false`, `no`, or `off` to opt out (re-opens the local-user token gap). Any other non-empty value refuses to start; an empty value is treated as unset. `0` does not override `--strict-auth`. `--no-strict-auth` turns strict auth off even when `LANTERN_STRICT_AUTH` is `1`, `true`, `yes`, or `on`, and startup prints a warning that names that flag. `--debug` does not print a generated token either. There is no separate config file for this flag. The environment variable is the non-flag setting, the same way the token is configured.
-
-With `--allow-lan`, `GET /api/*` (inventory, status, and HTML or JSON reports) needs the same header as `POST`. The page does not contain the token. Paste it once into the dashboard; the browser keeps it in `sessionStorage` for that tab and sends it as `X-Lantern-Token`. Static files such as `app.js` stay available without the token. The comparison is `hmac.compare_digest`. A token that is presented and does not match waits a short fixed time. The token is not written to the log. `--debug` does not print a generated token; set the file or `LANTERN_API_TOKEN` instead.
-
-POST bodies must be JSON with `Content-Type: application/json` and at most 64 KiB (415 or 413 otherwise). `Transfer-Encoding`, including an empty header and chunked bodies, is rejected with 400 and the connection is closed. Every POST closes the connection. A GET or HEAD whose `Content-Length` is greater than 0 also closes the connection, so that unread body is not parsed as a second request. A `Content-Length` that is negative, not an integer, or repeated (`abc`, `-1`, `+2`, `1e3`, `5, 5`, or two headers) is 400 on every method, and the connection is closed. If a POST includes `Origin`, that origin's host and port must be on the same allowlist (`http` or `https` only). A POST with no `Origin` is accepted only when the token is valid. A bad Host, a missing or wrong token, or a disallowed Origin is a generic 403. `OPTIONS`, `PUT`, `DELETE`, and `PATCH` are 405 after the Host check and, when LAN-bound, the token check, and the response lists `Allow: GET, HEAD, POST`. An unexpected server error is a generic 500; the exception text is logged only with `--debug`. Each connection has a 10 second idle timeout and a 10 second deadline for reading the request line, the headers, and the body, so a slow drip cannot hold a slot. The response is sent in 16 KiB chunks. Each chunk waits up to 10 seconds for the client to take more data, and never longer than the time left on a 60 second overall deadline. A reader that keeps going can take longer than 10 seconds in total, up to 60 seconds. A reader that stalls is dropped when that wait runs out. The process handles at most 32 connections at once and at most 8 from one client address. `--allow-host` rejects loose IPv4 forms such as `0177.0.0.1`, `0x7f.1`, and `127.000.000.001`. A full cap is 503. A request target must be a path; an absolute URL in the request line is a 400. Scan results include trusted labels and `trusted`/`known` flags per device.
-
-`--allow-host` is repeatable. `python3 -m lantern web --allow-host dashboard.home` also accepts `Host: dashboard.home:<port>`. `python3 -m lantern web --allow-host dashboard.home:8443` accepts that exact host and port. Bracket an IPv6 address (`--allow-host '[2001:db8::5]'`). `0.0.0.0`, `::`, a bare `0` or other all-digit name, shorthand and loose IPv4 such as `127.1`, `0x7f000001`, `0177.0.0.1`, `0x7f.1`, and `127.000.000.001` (the error says to use the full dotted form), a zone id such as `[fe80::1%eth0]`, a wildcard, and a CIDR are rejected. On loopback the default allowlist is only `127.0.0.1`, `localhost`, and `[::1]` on the bound port. `::1` is a real IPv6 loopback listener, not only an allowed Host value.
-
-The dashboard binds to loopback by default (`127.0.0.1`). Any other address, including `0.0.0.0` and `::`, is refused unless you also pass `--allow-lan`. That flag still does not open the port by itself. It exits 2, before listening, unless it has a token of at least 128 bits (22 to 512 urlsafe characters). The token comes from `LANTERN_API_TOKEN_FILE`, then `LANTERN_API_TOKEN`, then `secrets.token_urlsafe` when stderr is an interactive terminal and `--debug` is not set. The generated token is printed once on that terminal and nowhere else. `--debug` does not print it. When stderr is not a terminal, which is how `docker logs` works, Lantern does not generate or print a token; set the file or the environment variable. The token is not written to the database or the request log. `--host 0.0.0.0` or `--host ::` also needs `--allow-host` set to the LAN address clients will send, because the unspecified address is not put on the allowlist. Prefer an SSH tunnel or Tailscale to `127.0.0.1`. Never expose port 8068 to the internet.
-
-Docker, for a homelab host:
-
-```bash
-mkdir -p data && sudo chown 10001:10001 data && sudo chmod 700 data
-umask 077
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > lantern_token
-chmod 400 lantern_token
-sudo chown 10001:10001 lantern_token
-```
-
-Then uncomment the service `secrets:` list and the top-level `secrets:` block in `docker-compose.yml`, and set `LANTERN_API_TOKEN_FILE=/run/secrets/lantern_token` on the service. Do not write the token into the compose file. `docker compose up -d` then listens on the host at http://127.0.0.1:8068/. The page does not contain the token; use the value in `lantern_token`. Without that file the container exits 2. Docker has no terminal, so it will not print a token. Do not put the token in `LANTERN_API_TOKEN`: on Linux `/proc/<pid>/environ` is mode 0400, so the same user and root can read an env token there, and child processes inherit it. A mode-0400 token file is not copied into that environment. `LANTERN_STRICT_AUTH=0` opts out and re-opens the local-user token gap.
-
-```yaml
-environment:
-  LANTERN_API_TOKEN_FILE: /run/secrets/lantern_token
-```
-
-The compose file uses host networking so a scan can see the host LAN (the ARP cache and neighbor hosts). The dashboard itself binds `127.0.0.1`. With host networking that is the host's loopback, not the LAN. Compose does not publish port 8068.
-
-The container runs as uid 10001, not root. Compose drops every capability (`--cap-drop ALL`), makes the root filesystem read-only, mounts a tmpfs on `/tmp`, keeps the SQLite file on the `/data` volume, and sets `no-new-privileges`. ICMP ping needs `CAP_NET_RAW` and a ping binary. This image adds neither. TCP connect scans and the host ARP cache work with all capabilities dropped. A setuid or file-capability ping would not help: `no-new-privileges` ignores both. The comments in `Dockerfile` and `docker-compose.yml` record the same flags.
-
-A token file is required by default (and for a LAN bind). Put the token in a regular file and point `LANTERN_API_TOKEN_FILE` at it (the compose file has a commented `secrets:` snippet). The file must not be a symlink or a FIFO, and it must be at most 4 KiB. On macOS and Linux it must be mode 0400 or 0600: any group or other bit is refused. That includes Docker Swarm secrets (mode 0444) and Kubernetes secrets (mode 0644 by default) until you set the file to 0400. Compose `secrets:` bind-mounts the host file as-is and does not change its mode; that path has not been run as a test. `chmod 400` and `chown` the file to uid 10001 yourself. Lantern does not follow a symlink to a looser file. Override the command with `--host 0.0.0.0`, `--allow-lan`, and `--allow-host` set to the LAN address. Do not put the token in `docker-compose.yml`. The container has no terminal, so Lantern will not print a token into `docker logs`. Without the file or `LANTERN_API_TOKEN`, the command exits 2 and does not listen. Prefer Tailscale or an SSH tunnel instead.
-
-CI (`.github/workflows/docker.yml`) builds the image and runs every container with `--network none` (loopback only). It checks the process is not root, the default command without a token exits non-zero and does not listen, the same command with a mode-0400 token file listens on `127.0.0.1:8068`, `GET /api/*` is 403 without that token and 200 with it, and the token is not in the page or in `docker logs`, a non-loopback bind without `--allow-lan` is refused, and `--allow-lan` without a token is refused. It also runs `lantern --version`, an offline `lantern demo`, and a check that loopback and public subnets are refused. The job does not push, tag, or publish an image, and it does not scan a network. The demo uses the built-in fake devices.
-
-## What it scans
-
-33 ports, chosen for risk, not coverage: Telnet, FTP, SSH, SMB, RDP, VNC, databases (including MongoDB, Elasticsearch, Memcached), mail, web, the Docker API, MQTT, camera streams (RTSP), printers, plus homelab services (Jellyfin 8096, Plex 32400, Home Assistant 8123). Each open port maps to a severity, a plain English title, and a fix step in `lantern/ports.py`.
-
-## Limitations
-
-What this version does, and what it does not do.
-
-- **Inventory is edited in the CLI and shown on the dashboard.** `lantern asset` writes owner, location, tags, criticality, and notes ([0.4.0](CHANGELOG.md#040---2026-10-30)). The static page does not embed them. A caller with the access token receives them on the scan API, and the device cards render them ([0.5.0](CHANGELOG.md#050---2026-11-02)). The dashboard has no form that edits inventory.
-- **One token.** `GET /api/v1/status` reports `role` `admin`. There is no read-only token and no second role.
-- **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](SECURITY.md#known-limitations).
-- **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
-- **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
-- **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. Hostnames are stored as the device reports them, and the saved HTML report has no Content-Security-Policy of its own. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
-
-## Versioning and compatibility
-
-From 1.0.0, Lantern follows semantic versioning for the things scripts and other tools rely on:
-
-- **`/api/v1`**: routes, parameters, and JSON field names stay compatible for every 1.x release. New fields and routes may be added; nothing is renamed or removed. A breaking change would ship as `/api/v2` alongside v1, with `api_version` set to 2.
-- **Command line**: command names, flags, exit codes (0 ok, 1 partial or not found, 2 refused or usage error), and `--format json` output stay compatible for 1.x. Plain-text output is for people and may change.
-- **Export**: JSON and CSV column names stay compatible for 1.x.
-- **Database**: a newer 1.x opens any older Lantern database and upgrades it in place after writing a `.vN.bak` copy beside it. Migrations only move forward, so an older Lantern refuses a database that a newer one has upgraded. Keep the backup if you may need to roll back.
-
-The dashboard's own `/api/*` routes (without `v1`) serve the web page and may change in any release. Use `/api/v1` from scripts.
+The database is schema 6. Opening an older file upgrades it in place and writes `.vN.bak` first. Schema 5 stores the gateway and what a device announced. Schema 6 stores the switch map. Details are in [Database and migrations](docs/running.md#run-and-debug).
+
+Lantern only scans private RFC1918 networks, at most 1024 addresses, and it does not guess passwords or send exploits. The full rules are in [Safety rules](docs/safety.md#safety-rules-enforced-in-code) and the [Threat model](docs/safety.md#threat-model).
+
+## Troubleshooting
+
+- **The dashboard exits 2 before it listens.** Strict auth is on, and there is no terminal to print a token. Set `LANTERN_API_TOKEN_FILE` to a regular file, mode 0400 or 0600, that contains one token. Docker has no terminal, so the same exit 2 means the token file or `LANTERN_API_TOKEN` is missing. Do not put the token in the image or in `docker-compose.yml`.
+- **`Refusing to change it (schema …)`.** The database was written by a newer Lantern. This copy will not migrate it backwards. Upgrade Lantern, or restore the `.vN.bak` that the newer copy left beside the file.
+- **`The saved scan could not be read.`** A stored scan row is not valid JSON, or the JSON has the wrong shape. The command exits 2. The dashboard returns HTTP 500 with that same line.
+- **A subnet is refused.** Only networks fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` are accepted, and a run is at most 1024 addresses. Public, loopback, and link-local ranges are refused.
+
+## More detail
+
+- [Run and debug](docs/running.md#run-and-debug)
+- [Scan your own network](docs/scanning.md#scan-your-own-network)
+- [Device inventory](docs/inventory.md#device-inventory)
+- [Network map](docs/network-map.md#network-map) and [Switch map (managed switches)](docs/network-map.md#switch-map-managed-switches)
+- [Export and `/api/v1`](docs/export.md#export-and-apiv1)
+- [Safety rules, enforced in code](docs/safety.md#safety-rules-enforced-in-code)
+- [Threat model](docs/safety.md#threat-model)
+- [Web dashboard](docs/dashboard.md#web-dashboard)
+- [What it scans](docs/ports.md#what-it-scans)
+- [Limitations](docs/limitations.md#limitations)
+- [Versioning and compatibility](docs/versioning.md#versioning-and-compatibility)
 
 ## Tests
 

@@ -608,7 +608,7 @@ def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYT
         if file_path.is_symlink():
             raise ValueError(f"{label} must be a regular file, not a symlink. {suffix}")
     except OSError as exc:
-        raise ValueError(f"Cannot read {label} ({file_path}): {exc.strerror or exc}. {suffix}") from exc
+        raise ValueError(f"Cannot read {label}. {suffix}") from exc
     try:
         fd = os.open(file_path, _token_open_flags())
     except OSError as exc:
@@ -619,7 +619,7 @@ def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYT
         # and it must not block.
         if exc.errno == errno.ENXIO:
             raise ValueError(f"{label} must be a regular file. {suffix}") from exc
-        raise ValueError(f"Cannot read {label} ({file_path}): {exc.strerror or exc}. {suffix}") from exc
+        raise ValueError(f"Cannot read {label}. {suffix}") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -1301,6 +1301,8 @@ def _cmd_prune(args, conn) -> int:
     except ValueError as exc:
         return _err(str(exc))
     deleted = 0
+    if args.vacuum and not args.yes:
+        print("lantern: --vacuum runs only with --yes; nothing was vacuumed.", file=sys.stderr)
     if args.yes and doomed:
         deleted = delete_scans(conn, doomed)
         if args.vacuum:

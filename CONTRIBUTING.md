@@ -27,7 +27,11 @@ See the README "Run and debug" section for DB path, ports, and debugger tips.
 
 ```bash
 python3 tests/run_tests.py
+# CI uses warnings as errors:
+python3 -W error tests/run_tests.py
 ```
+
+`python3 -m unittest discover -s tests` also works. `python3 -m unittest discover -s tests -t .` fails because `tests/` has no `__init__.py`, so the start directory is not importable. Do not add `-t .`.
 
 Tests use `unittest` and are discovered automatically from `tests/test_*.py`; you can also run one file directly, for example `python3 tests/test_web.py`. Add a test for new behavior, next to the module it covers: risk rules in `test_risks.py`, subnet and ARP handling in `test_discovery.py`, probes in `test_scanner.py`, storage and diff in `test_store.py`, commands in `test_cli.py`, scope files in `test_scopes.py`, dashboard API in `test_web.py`. Keep tests fast and offline: no real network scans in CI. Mock `ping_host`, `tcp_alive`, `arp_table`, and `scan_host` where a test would otherwise touch the network. Patch them in `lantern.engine`, where the scan pipeline lives (`mock.patch.object(engine, "ping_host", ...)`), not in `lantern.cli`.
 

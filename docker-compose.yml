@@ -39,6 +39,9 @@ services:
     # way. If you ever switch this service to a bridge network, publish
     # loopback on the host only: "127.0.0.1:8068:8068". Never expose 8068
     # to the internet.
+    # init runs a tiny init as PID 1 so SIGTERM reaches Lantern instead of
+    # being ignored by a process that is PID 1 itself.
+    init: true
     network_mode: "host"
     user: "10001:10001"
     read_only: true
