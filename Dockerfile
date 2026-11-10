@@ -53,6 +53,10 @@ RUN pip install --no-cache-dir --require-hashes -r .github/requirements-build.tx
 
 VOLUME ["/data"]
 EXPOSE 8068
+# Alive means something accepts TCP on the dashboard port. The check does
+# not send a token and does not add a route that skips auth.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD python -c "import socket; s=socket.create_connection(('127.0.0.1', 8068), 2); s.close()"
 USER lantern
 
 CMD ["lantern", "web", "--host", "127.0.0.1", "--port", "8068", "--db", "/data/lantern.db"]
