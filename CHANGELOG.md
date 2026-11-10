@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM as workflow artifacts only; nothing is published. A switch's SNMP budget is a hard limit, and the vendor table refuses a gzip that expands past 16 MiB.
+- The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM next to the files they name, as workflow artifacts only; nothing is published. `--check` fails when that checksum file is missing or empty. The Windows SBOM names PyInstaller and the bundled Python. A switch's SNMP budget is a hard limit. The vendor table refuses a gzip that expands past 16 MiB, and a truncated or corrupt table leaves the vendor unknown.
 
 ## 1.4.0 - 2026-11-07
 

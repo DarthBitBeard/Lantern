@@ -32,13 +32,6 @@ def _unraisable(unraisable) -> None:
 
 
 def _thread_exception(args) -> None:
-    # Closing a test server's socket on Windows wakes serve_forever's select
-    # with WSAENOTSOCK (10038). The server has already stopped; the exception
-    # is the selector noticing. Every other thread exception still fails the run.
-    if isinstance(args.exc_value, OSError) and getattr(args.exc_value, "winerror", None) == 10038:
-        frames = "".join(traceback.format_tb(args.exc_traceback))
-        if "serve_forever" in frames:
-            return
     text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
     _remember("thread", text.rstrip())
 

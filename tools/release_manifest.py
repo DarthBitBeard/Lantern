@@ -1,8 +1,10 @@
 """Write SHA256SUMS and a CycloneDX SBOM for files already built.
 
-Nothing here is published. The workflows upload the two files as artifacts.
-Runtime dependencies: none. The SBOM lists Lantern, the bundled vendor
-table, and the pinned build tools.
+Nothing here is published. The workflows upload the checksum file, the
+SBOM, and the files they name, all in one folder. Runtime dependencies:
+none. The SBOM lists Lantern, the bundled vendor table, and the pinned
+build tools. The Windows package also lists PyInstaller and the Python
+runtime that the executable bundles.
 """
 
 from __future__ import annotations
@@ -67,7 +69,12 @@ def lantern_version() -> str:
     return __version__
 
 
-def sbom(paths: list[Path], requirements: list[tuple[str, str]], version: str) -> dict:
+def sbom(
+    paths: list[Path],
+    requirements: list[tuple[str, str]],
+    version: str,
+    python_runtime: str = "",
+) -> dict:
     components = [
         {
             "type": "application",
@@ -82,6 +89,14 @@ def sbom(paths: list[Path], requirements: list[tuple[str, str]], version: str) -
             "description": "Bundled IEEE MAC vendor table. No network lookup.",
         },
     ]
+    if python_runtime:
+        components.append({
+            "type": "platform",
+            "name": "python",
+            "version": python_runtime,
+            "description": "Python runtime bundled into the Windows executable by PyInstaller.",
+            "purl": f"pkg:generic/python@{python_runtime}",
+        })
     for name, req_version in requirements:
         components.append({
             "type": "library",
@@ -112,23 +127,42 @@ def sbom(paths: list[Path], requirements: list[tuple[str, str]], version: str) -
     }
 
 
-def write_manifest(paths: list[Path], out_dir: Path, requirements_text: str, version: str) -> tuple[Path, Path]:
+def write_manifest(
+    paths: list[Path],
+    out_dir: Path,
+    requirements: list[tuple[str, str]],
+    version: str,
+    python_runtime: str = "",
+) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     sums = out_dir / "SHA256SUMS"
     sums.write_text(checksum_lines(paths), encoding="utf-8")
     document = out_dir / "lantern-sbom.cdx.json"
     document.write_text(
-        json.dumps(sbom(paths, build_requirements(requirements_text), version), indent=2) + "\n",
+        json.dumps(sbom(paths, requirements, version, python_runtime), indent=2) + "\n",
         encoding="utf-8",
     )
     return sums, document
 
 
 def check_manifest(out_dir: Path) -> None:
-    """Raise if SHA256SUMS does not match the files beside it."""
-    for line in (out_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+    """Raise if SHA256SUMS is missing, empty, or does not match the files beside it."""
+    sums = out_dir / "SHA256SUMS"
+    if not sums.is_file():
+        raise ValueError("checksum file is missing")
+    lines = [line for line in sums.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("checksum file is empty")
+    for line in lines:
+        if line.count("  ") != 1:
+            raise ValueError("checksum file is not valid")
         digest, name = line.split("  ", 1)
-        got = sha256(out_dir / name)
+        if not digest or not name or "/" in name or "\\" in name or name in (".", ".."):
+            raise ValueError("checksum file is not valid")
+        path = out_dir / name
+        if not path.is_file():
+            raise ValueError(f"checksum file names a missing file: {name}")
+        got = sha256(path)
         if got != digest:
             raise ValueError(f"checksum mismatch for {name}")
 
@@ -137,6 +171,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write SHA256SUMS and a CycloneDX SBOM.")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--check", action="store_true", help="Verify SHA256SUMS in --out.")
+    parser.add_argument(
+        "--requirements",
+        action="append",
+        default=[],
+        type=Path,
+        help="Extra pinned requirements to list in the SBOM. The build file is always included.",
+    )
+    parser.add_argument(
+        "--python-runtime",
+        default="",
+        help="Version of the Python interpreter bundled into a Windows executable.",
+    )
     parser.add_argument("files", nargs="*", type=Path)
     args = parser.parse_args(argv)
     if args.check:
@@ -153,8 +199,21 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print("missing files: " + ", ".join(str(path) for path in missing), file=sys.stderr)
         return 1
-    requirements = (ROOT / ".github" / "requirements-build.txt").read_text(encoding="utf-8")
-    write_manifest(args.files, args.out, requirements, lantern_version())
+    texts = [(ROOT / ".github" / "requirements-build.txt").read_text(encoding="utf-8")]
+    for path in args.requirements:
+        texts.append(path.read_text(encoding="utf-8"))
+    requirements: list[tuple[str, str]] = []
+    seen = set()
+    for text in texts:
+        for item in build_requirements(text):
+            if item not in seen:
+                seen.add(item)
+                requirements.append(item)
+    runtime = args.python_runtime.strip()
+    if runtime and any(char.isspace() for char in runtime):
+        print("the Python runtime version must be one token", file=sys.stderr)
+        return 1
+    write_manifest(args.files, args.out, requirements, lantern_version(), runtime)
     return 0
 
 

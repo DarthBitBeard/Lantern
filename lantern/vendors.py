@@ -18,6 +18,7 @@ import io
 import re
 import threading
 import unicodedata
+import zlib
 from importlib import resources
 from pathlib import Path
 
@@ -130,7 +131,9 @@ def lookup(mac: str | None) -> dict | None:
         return None
     try:
         table = _load()
-    except (OSError, ValueError, gzip.BadGzipFile):
+    except (OSError, ValueError, EOFError, zlib.error, UnicodeDecodeError, gzip.BadGzipFile):
+        # A truncated or corrupt gzip, or text that is not UTF-8. The
+        # address stays unknown instead of failing the scan.
         return None
     for length in _LENGTHS:
         name = table.get(digits[:length])

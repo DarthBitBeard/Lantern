@@ -219,6 +219,20 @@ class VendorBundleTests(unittest.TestCase):
         finally:
             vendors.MAX_VENDOR_BYTES = original
 
+    def test_a_truncated_or_corrupt_table_is_unknown(self):
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
+            handle.write(b"001122\tAcme\n" * 40)
+        raw = buf.getvalue()
+        self._write(raw[: len(raw) // 2])
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+        corrupt = bytearray(raw)
+        corrupt[len(corrupt) // 2] ^= 0xFF
+        self._write(bytes(corrupt))
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+        self._write(b"not-gzip")
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+
     def test_a_vendor_name_with_esc_is_cleaned(self):
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
