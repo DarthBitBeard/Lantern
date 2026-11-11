@@ -1134,7 +1134,7 @@ def prepare_export_path(path: str, force: bool) -> Path:
     if not parent.is_dir():
         raise ExportPathError("The export directory must already exist.")
     if os.path.realpath(parent) != os.path.abspath(parent):
-        raise ExportPathError("The export directory must not be a symlink.")
+        raise ExportPathError("The export directory must not be reached through a symlink.")
     try:
         info = os.lstat(candidate)
     except FileNotFoundError:
@@ -1143,7 +1143,7 @@ def prepare_export_path(path: str, force: bool) -> Path:
         raise ExportPathError("The export path is not allowed.") from exc
     if info is not None:
         if stat.S_ISLNK(info.st_mode):
-            raise ExportPathError("The export path must not be a symlink.")
+            raise ExportPathError("The output file must not be a symlink.")
         if not stat.S_ISREG(info.st_mode):
             raise ExportPathError("The export path must be a regular file.")
         if not force:
