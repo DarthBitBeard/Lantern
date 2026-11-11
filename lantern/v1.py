@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import stat
 import tempfile
@@ -1133,8 +1134,12 @@ def prepare_export_path(path: str, force: bool) -> Path:
     parent = candidate.parent
     if not parent.is_dir():
         raise ExportPathError("The export directory must already exist.")
-    if os.path.realpath(parent) != os.path.abspath(parent):
-        raise ExportPathError("The export directory must not be reached through a symlink.")
+    try:
+        parent_info = os.lstat(parent)
+    except OSError as exc:
+        raise ExportPathError("The export path is not allowed.") from exc
+    if _is_link(parent_info):
+        raise ExportPathError("The export directory itself must not be a symlink.")
     try:
         info = os.lstat(candidate)
     except FileNotFoundError:
@@ -1142,7 +1147,7 @@ def prepare_export_path(path: str, force: bool) -> Path:
     except OSError as exc:
         raise ExportPathError("The export path is not allowed.") from exc
     if info is not None:
-        if stat.S_ISLNK(info.st_mode):
+        if _is_link(info):
             raise ExportPathError("The output file must not be a symlink.")
         if not stat.S_ISREG(info.st_mode):
             raise ExportPathError("The export path must be a regular file.")
@@ -1151,6 +1156,14 @@ def prepare_export_path(path: str, force: bool) -> Path:
         if info.st_nlink > 1:
             raise ExportPathError("The export path must not be a hard link.")
     return candidate
+
+
+def _is_link(info) -> bool:
+    """True for a symlink or, on Windows, a reparse point such as a junction."""
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and getattr(info, "st_file_attributes", 0) & reparse)
 
 
 def _write_fd(fd: int, payload: bytes) -> None:
@@ -1289,6 +1302,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 flags = os.O_RDONLY
                 if hasattr(os, "O_DIRECTORY"):
                     flags |= os.O_DIRECTORY
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
                 directory = os.open(parent, flags)
             if not force:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -1334,8 +1349,18 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 fd = None
                 try:
                     try:
-                        fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
-                        temporary_path = Path(temporary)
+                        if directory is not None:
+                            name = ".lantern-export-" + secrets.token_hex(8)
+                            create = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            if hasattr(os, "O_NOFOLLOW"):
+                                create |= os.O_NOFOLLOW
+                            if hasattr(os, "O_BINARY"):
+                                create |= os.O_BINARY
+                            fd = os.open(name, create, 0o600, dir_fd=directory)
+                            temporary_path = parent / name
+                        else:
+                            fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
+                            temporary_path = Path(temporary)
                     except BaseException as exc:
                         # Only the file this call created. Another
                         # ``.lantern-export-*`` in the directory is not ours.
@@ -1351,10 +1376,18 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                     _write_fd(fd, payload)
                 finally:
                     os.close(fd)
-                os.replace(temporary_path, destination)
+                if directory is not None:
+                    os.replace(
+                        temporary_path.name, destination.name,
+                        src_dir_fd=directory, dst_dir_fd=directory,
+                    )
+                else:
+                    os.replace(temporary_path, destination)
                 temporary_path = None
             success = True
     except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ExportPathError("The export directory itself must not be a symlink.") from exc
         if exc.errno in _PATH_ERRNOS:
             raise ExportPathError("The export path is not allowed.") from exc
         raise ExportPathError("The export could not be written.") from exc
