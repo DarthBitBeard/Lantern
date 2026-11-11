@@ -668,7 +668,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.text_factory = _decode_db_text
     try:
         apply_migrations(conn, db_path=db_path)
-    except Exception:
+    except BaseException:
         conn.close()
         raise
     return conn
