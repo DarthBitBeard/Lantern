@@ -119,18 +119,14 @@ class InterruptTests(unittest.TestCase):
         """))
 
 
-def _real_tempdir():
-    """A directory whose path is not reached through a symlink.
-
-    macOS and Windows put the temp root behind a link. Export refuses that.
-    """
-    raw = tempfile.mkdtemp()
-    return os.path.realpath(raw)
+def _tempdir():
+    """A private directory. An ancestor may be a symlink; this directory is not."""
+    return tempfile.mkdtemp()
 
 
 class ExportWindowTests(unittest.TestCase):
     def test_interrupt_during_create_removes_the_new_file(self):
-        tmp = _real_tempdir()
+        tmp = _tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         real = os.open
@@ -149,7 +145,7 @@ class ExportWindowTests(unittest.TestCase):
         self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
 
     def test_interrupt_during_mkstemp_removes_only_that_temp_file(self):
-        tmp = _real_tempdir()
+        tmp = _tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         dest.write_bytes(b"old")
@@ -169,7 +165,7 @@ class ExportWindowTests(unittest.TestCase):
     def test_sigint_in_the_create_window_is_delivered_after_the_path_is_recorded(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread_sigmask is POSIX-only")
-        tmp = _real_tempdir()
+        tmp = _tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         real = os.open
@@ -194,7 +190,7 @@ class ExportWindowTests(unittest.TestCase):
     def test_a_mask_the_caller_held_is_still_held(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread_sigmask is POSIX-only")
-        tmp = _real_tempdir()
+        tmp = _tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
@@ -208,7 +204,7 @@ class ExportWindowTests(unittest.TestCase):
     def test_signal_mask_is_restored(self):
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread_sigmask is POSIX-only")
-        tmp = _real_tempdir()
+        tmp = _tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         before = signal.pthread_sigmask(signal.SIG_BLOCK, [])

@@ -91,6 +91,9 @@ MESSAGES = {
 }
 
 _export_lock = threading.Lock()
+# Captured before tests replace os.open. dir_fd is a POSIX feature of the
+# real open, not of a mock.
+_DIR_FD = os.open in getattr(os, "supports_dir_fd", ())
 
 
 class V1Error(Exception):
@@ -1124,26 +1127,51 @@ def _reject_path_text(path: str) -> None:
         raise ExportPathError("The export path must not use ~.")
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """A symlink, or on Windows a junction or other reparse point."""
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0) or 0
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & flag)
+
+
+def _lstat_or_none(path: Path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
 def prepare_export_path(path: str, force: bool) -> Path:
-    """Check the destination. Does not create a missing directory."""
+    """Check the destination. Does not create a missing directory.
+
+    Only the final directory and the output file are checked for links.
+    An ancestor that is a symlink, a Windows 8.3 short name, or a
+    different letter case is allowed. The export directory itself and the
+    output file are not: a symlink, a dangling link, or a reparse point
+    is refused, with or without ``--force``. ``--force`` replaces a
+    regular file only.
+    """
     _reject_path_text(path)
     candidate = Path(path)
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     parent = candidate.parent
-    if not parent.is_dir():
+    # lstat the final parent before any resolve. is_dir() would follow a link.
+    parent_info = _lstat_or_none(parent)
+    if parent_info is not None and _is_reparse_point(parent_info):
+        raise ExportPathError(
+            "The export directory itself is a symlink. Lantern will not follow it."
+        )
+    if parent_info is None or not stat.S_ISDIR(parent_info.st_mode):
         raise ExportPathError("The export directory must already exist.")
-    if os.path.realpath(parent) != os.path.abspath(parent):
-        raise ExportPathError("The export directory must not be a symlink.")
-    try:
-        info = os.lstat(candidate)
-    except FileNotFoundError:
-        info = None
-    except OSError as exc:
-        raise ExportPathError("The export path is not allowed.") from exc
+    info = _lstat_or_none(candidate)
     if info is not None:
-        if stat.S_ISLNK(info.st_mode):
-            raise ExportPathError("The export path must not be a symlink.")
+        if _is_reparse_point(info):
+            raise ExportPathError(
+                "The output file is a symlink. Lantern will not follow it."
+            )
         if not stat.S_ISREG(info.st_mode):
             raise ExportPathError("The export path must be a regular file.")
         if not force:
@@ -1285,11 +1313,24 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
     interrupted: int | None = None
     try:
         with _during_export_write():
-            if os.open in getattr(os, "supports_dir_fd", ()):
+            # POSIX opens the directory once and does not follow a symlink
+            # swapped in after the lstat check. Windows has no dir_fd here;
+            # the lstat above is the check, and the create is best effort.
+            if _DIR_FD:
                 flags = os.O_RDONLY
                 if hasattr(os, "O_DIRECTORY"):
                     flags |= os.O_DIRECTORY
-                directory = os.open(parent, flags)
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                try:
+                    directory = os.open(parent, flags)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise ExportPathError(
+                            "The export directory itself is a symlink. "
+                            "Lantern will not follow it."
+                        ) from exc
+                    raise
             if not force:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                 if hasattr(os, "O_NOFOLLOW"):
@@ -1351,7 +1392,15 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                     _write_fd(fd, payload)
                 finally:
                     os.close(fd)
-                os.replace(temporary_path, destination)
+                if directory is not None:
+                    os.replace(
+                        temporary_path.name,
+                        destination.name,
+                        src_dir_fd=directory,
+                        dst_dir_fd=directory,
+                    )
+                else:
+                    os.replace(temporary_path, destination)
                 temporary_path = None
             success = True
     except OSError as exc:

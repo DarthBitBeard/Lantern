@@ -190,7 +190,7 @@ class CsvTests(unittest.TestCase):
 class PathTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name).resolve()
+        self.root = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -495,6 +495,122 @@ class PathTests(unittest.TestCase):
             self.assertEqual(dest.read_bytes(), b"keep")
         else:
             self.assertFalse(dest.exists())
+
+
+class ExportLinkTests(unittest.TestCase):
+    """Final-component links are refused. Ancestors, 8.3 names, and case are not."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _link(self, link: Path, target: Path, directory: bool = False):
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except OSError:
+            self.skipTest("this process cannot create a symlink")
+
+    def test_ancestor_links_including_tmp_and_home_style_are_allowed(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink")
+        root = self.root / "root"
+        root.mkdir()
+        via = self.root / "via"
+        self._link(via, root, directory=True)
+        exports = via / "exports"
+        exports.mkdir()
+        written = v1.write_export_file(str(exports / "out.json"), b"{}", force=False)
+        self.assertEqual(Path(written).read_bytes(), b"{}")
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, True))
+        again = v1.write_export_file(str(folder / "out.json"), b"ok", force=False)
+        self.assertEqual(Path(again).read_bytes(), b"ok")
+
+    def test_symlinked_final_directory_and_destination_are_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink")
+        real = self.root / "real"
+        real.mkdir()
+        link = self.root / "link"
+        self._link(link, real, directory=True)
+        for force in (False, True):
+            with self.assertRaises(v1.ExportPathError) as caught:
+                v1.write_export_file(str(link / "out.json"), b"{}", force=force)
+            self.assertIn("export directory itself", str(caught.exception))
+        self.assertFalse((real / "out.json").exists())
+
+        directory = self.root / "plain"
+        directory.mkdir()
+        target = directory / "target.json"
+        target.write_bytes(b"keep")
+        output = directory / "out.json"
+        self._link(output, target)
+        for force in (False, True):
+            with self.assertRaises(v1.ExportPathError) as caught:
+                v1.write_export_file(str(output), b"new", force=force)
+            self.assertIn("output file", str(caught.exception))
+        self.assertEqual(target.read_bytes(), b"keep")
+
+        dangling = directory / "dangling.json"
+        self._link(dangling, directory / "missing.json")
+        for force in (False, True):
+            with self.assertRaises(v1.ExportPathError) as caught:
+                v1.write_export_file(str(dangling), b"new", force=force)
+            self.assertIn("output file", str(caught.exception))
+        self.assertFalse((directory / "missing.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "junctions are a Windows directory link")
+    def test_a_junction_at_the_final_directory_is_refused(self):
+        real = self.root / "real"
+        real.mkdir()
+        link = self.root / "junction"
+        subprocess.check_call(["cmd", "/c", "mklink", "/J", str(link), str(real)])
+        with self.assertRaises(v1.ExportPathError) as caught:
+            v1.write_export_file(str(link / "out.json"), b"{}", force=False)
+        self.assertIn("export directory itself", str(caught.exception))
+        self.assertFalse((real / "out.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "8.3 names and case folding are Windows path forms")
+    def test_short_names_and_letter_case_are_accepted(self):
+        import ctypes
+
+        directory = self.root / "ExportDir"
+        directory.mkdir()
+        buf = ctypes.create_unicode_buffer(512)
+        count = ctypes.windll.kernel32.GetShortPathNameW(str(directory), buf, 512)
+        if count and buf.value.lower() != str(directory).lower():
+            written = v1.write_export_file(str(Path(buf.value) / "out.json"), b"short", force=False)
+            self.assertEqual(Path(written).read_bytes(), b"short")
+        leaf = directory.name
+        swapped = leaf[0].swapcase() + leaf[1:]
+        if swapped == leaf:
+            self.skipTest("leaf has no letter to change")
+        other = directory.parent / swapped / "case.json"
+        written = v1.write_export_file(str(other), b"case", force=False)
+        self.assertEqual((directory / "case.json").read_bytes(), b"case")
+
+    @unittest.skipUnless(os.name != "nt" and hasattr(os, "O_NOFOLLOW"), "POSIX no-follow open")
+    def test_a_directory_swapped_for_a_symlink_is_not_followed(self):
+        parent = self.root / "parent"
+        parent.mkdir()
+        secret = self.root / "secret"
+        secret.mkdir()
+        real_open = os.open
+
+        def racing(path, flags, *args, **kwargs):
+            if flags & os.O_DIRECTORY and Path(path) == parent:
+                parent.rename(self.root / "parent-real")
+                parent.symlink_to(secret, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch("lantern.v1.os.open", racing):
+            with self.assertRaises(v1.ExportPathError) as caught:
+                v1.write_export_file(str(parent / "out.json"), b"{}", force=False)
+        self.assertIn("export directory itself", str(caught.exception))
+        self.assertEqual(list(secret.iterdir()), [])
 
 
 class ApiTests(unittest.TestCase):
@@ -854,7 +970,7 @@ class CliExportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = str(Path(self.tmp.name) / "lantern.db")
-        self.root = Path(self.tmp.name).resolve()
+        self.root = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()

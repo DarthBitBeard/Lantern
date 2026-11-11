@@ -383,15 +383,33 @@ def _warn_existing_backups(db_path: Path) -> None:
             warn_loose_permissions(candidate)
 
 
-def _refuse_database_symlink(path: Path) -> None:
-    """Refuse a symlink, including a dangling one.
+def _is_reparse(path: Path) -> bool:
+    """The final component is a symlink or, on Windows, any reparse point."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0) or 0
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & flag)
 
-    Opening it would follow the link. SQLite then creates the target at
-    mode 0644, and a dangling link does not stat, so there is no warning.
-    The error does not include the link target.
+
+def _refuse_database_symlink(path: Path) -> None:
+    """Refuse a symlink at the database file or at its final directory.
+
+    An ancestor link is allowed. Opening the file itself would follow the
+    link. SQLite then creates the target at mode 0644, and a dangling link
+    does not stat, so there is no warning. The error does not include a path.
     """
-    if path.is_symlink():
+    if path.is_symlink() or _is_reparse(path):
         raise DatabaseSymlinkError(_SYMLINK_MESSAGE)
+    parent = path.parent
+    if parent not in (Path(""), Path(".")) and _is_reparse(parent):
+        raise DatabaseSymlinkError(
+            "The database directory itself is a symlink. Lantern will not follow it."
+        )
 
 
 def _prepare_database_file(db_path: str | Path) -> None:

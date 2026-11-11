@@ -921,6 +921,25 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(real.read_bytes(), b"leave-me")
         self.assertEqual(_mode(real), 0o644)
 
+        root = Path(self.tmp.name) / "root"
+        root.mkdir()
+        via = Path(self.tmp.name) / "via"
+        via.symlink_to(root, target_is_directory=True)
+        nested = via / "ok"
+        nested.mkdir()
+        os.chmod(nested, 0o700)
+        connect(nested / "lantern.db").close()
+        self.assertTrue((root / "ok" / "lantern.db").is_file())
+
+        real_dir = Path(self.tmp.name) / "real-dir"
+        real_dir.mkdir()
+        link_dir = Path(self.tmp.name) / "link-dir"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        with self.assertRaises(ValueError) as ctx:
+            connect(link_dir / "lantern.db")
+        self.assertIn("database directory itself", str(ctx.exception))
+        self.assertFalse((real_dir / "lantern.db").exists())
+
     def test_loose_permission_warning_strips_controls_and_ansi(self):
         shown = _path_for_warning(Path("loose\x1b[31m\x07db"))
         self.assertEqual(shown, "loosedb")

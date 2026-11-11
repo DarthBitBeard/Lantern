@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- An export refuses the export directory itself when that final directory is a symlink or a Windows junction, and refuses the output file when it is a symlink, a dangling link, or a reparse point, with or without `--force`. An ancestor link is allowed. On macOS and Linux the directory is opened with `O_NOFOLLOW` and the file is created beside that descriptor. Windows checks with `lstat` and then creates the file as best effort. The database file's own directory is refused the same way, and the message does not include a path.
 - Ctrl-C during a command, including while the database is opening or migrating, prints `lantern: interrupted` and exits 130, with no traceback. The database connection is closed. An export interrupted by Ctrl-C still exits 130 after the temp file that write created is removed. On POSIX, SIGINT and SIGTERM are blocked while the export file is created and its path is recorded, then the previous mask is restored so a pending signal is delivered only after cleanup knows that file. `lantern web` handles SIGTERM by closing the server and exiting 0. Windows cannot deliver SIGINT to a child the same way, and the signal mask is POSIX-only.
 
 ## 1.4.0 - 2026-11-07
