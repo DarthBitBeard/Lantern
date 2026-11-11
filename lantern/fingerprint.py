@@ -56,13 +56,16 @@ def _first_line(text: str) -> str:
     return line
 
 
-def _lines(text: str, limit: int) -> list[str]:
+def _header_lines(text: str, limit: int) -> list[str]:
+    """Status line and headers. Stops at the first empty line or at ``limit`` lines."""
     found = []
     rest = text
     while rest and len(found) < limit:
         line, sep, rest = rest.partition("\n")
         if line.endswith("\r"):
             line = line[:-1]
+        if line == "":
+            break
         found.append(line)
         if not sep:
             break
@@ -82,6 +85,12 @@ def _strip_ends(token: str) -> str:
 
 
 def _version(value: str | None) -> str | None:
+    """A version is digits and ``._+~-``. ``?`` is not a version character.
+
+    Sendmail writes ``8.15.2/8.15.2``. The part before ``/`` is the version.
+    """
+    if value and "/" in value:
+        value = value.split("/", 1)[0]
     if not value or len(value) > VERSION_CAP or not value[0].isdigit():
         return None
     for char in value:
@@ -91,13 +100,16 @@ def _version(value: str | None) -> str | None:
 
 
 def _product(value: str | None) -> str | None:
-    """A strict name, capped at 40, or None. Junk is not truncated into a name."""
-    if not value or not value[0].isalnum():
+    """A strict name of at most 40 characters, or None.
+
+    A longer name is dropped. It is not shortened into a different name.
+    """
+    if not value or len(value) > PRODUCT_CAP or not value[0].isalnum():
         return None
     for char in value:
         if char not in _PRODUCT_CHARS:
             return None
-    return value[:PRODUCT_CAP]
+    return value
 
 
 def _result(service: str, product: str | None, version: str | None, raw: str) -> Fingerprint:
@@ -116,7 +128,10 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
 
     Bytes past the protocol cap are dropped before decode. The text is ASCII
     with ``errors="replace"``, then anything outside 0x20–0x7E becomes ``?``.
+    ``raw`` must be bytes. A ``str`` raises ``TypeError``.
     """
+    if not isinstance(raw, (bytes, bytearray)):
+        raise TypeError("a banner is bytes")
     cap = _READ_CAP.get(service_hint)
     if cap is None or not raw:
         return None
@@ -127,12 +142,12 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
             return _rejected("ssh", line)
         head = _tokens(line)[0] if _tokens(line) else ""
         parts = head.split("-", 2)
-        if len(parts) < 3 or not parts[2]:
+        if len(parts) < 3 or parts[1] not in ("2.0", "1.99") or not parts[2]:
             return _rejected("ssh", line)
         name, separator, version = parts[2].partition("_")
         return _result("ssh", name, version if separator else None, line)
     if service_hint == "http":
-        lines = _lines(text, _LINE_CAP)
+        lines = _header_lines(text, _LINE_CAP)
         value = ""
         for line in lines[1:]:
             if line[:7].lower() == "server:":
@@ -144,7 +159,8 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
         name, slash, version = tokens[0].partition("/")
         return _result("http", name or None, version if slash else None, value)
     line = _sanitise(_first_line(text))
-    if not line.startswith("220"):
+    greeting = _tokens(line)
+    if not greeting or greeting[0] != "220":
         return _rejected(service_hint, line)
     tokens = [_strip_ends(token) for token in _tokens(line)]
     table = _PRODUCTS[service_hint]

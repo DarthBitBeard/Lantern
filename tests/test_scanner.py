@@ -36,7 +36,15 @@ class _Listener:
                         pass
 
     def close(self):
+        # shutdown wakes accept. Closing alone can leave this thread blocked
+        # in the kernel, and a later server may reuse the fd and receive the
+        # banner this thread still sends.
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.sock.close()
+        self.thread.join(timeout=2)
 
 
 def _free_port():

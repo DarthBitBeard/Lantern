@@ -72,7 +72,9 @@ class FixtureTests(unittest.TestCase):
         self.assertIsNone(parse("ssh", b""))
         self.assertIsNone(parse("telnet", b"hello"))
         huge = parse("ssh", b"SSH-2.0-" + b"A" * 100_000)
-        self.assertEqual(len(huge.product), PRODUCT_CAP)
+        self.assertIsNone(huge.product)
+        self.assertIsNone(huge.version)
+        self.assertEqual(huge.parse_status, "unknown")
         self.assertLessEqual(len(huge.raw), RAW_CAP)
 
 
@@ -103,7 +105,7 @@ class HostileInputTests(unittest.TestCase):
         for _ in range(2000):
             size = chooser.randrange(0, 4097)
             sample = bytes(chooser.randrange(256) for _ in range(size))
-            for protocol in ("ssh", "http"):
+            for protocol in ("ssh", "ftp", "smtp", "http"):
                 self._holds(parse(protocol, sample))
 
     def _holds(self, got):
@@ -119,6 +121,69 @@ class HostileInputTests(unittest.TestCase):
         if got.version is not None:
             self.assertLessEqual(len(got.version), VERSION_CAP)
             self.assertTrue(got.version[0].isdigit())
+
+
+class ParserGapTests(unittest.TestCase):
+    def test_http_server_controls_do_not_survive(self):
+        raw = "HTTP/1.0 200 OK\r\nServer: nginx\x1b\x00\u202e/1.25.1\r\n\r\n".encode("utf-8")
+        got = parse("http", raw)
+        self.assertNotIn("\x1b", got.raw)
+        self.assertNotIn("\x00", got.raw)
+        self.assertNotIn("\u202e", got.raw)
+        self.assertNotIn("\x1b", got.product or "")
+        self.assertIsNone(got.product)
+
+    def test_version_and_product_charsets_reject_markup(self):
+        marked = parse("http", b"HTTP/1.1 200 OK\r\nServer: nginx/1.2<script>=\r\n\r\n")
+        self.assertEqual(marked.product, "nginx")
+        self.assertIsNone(marked.version)
+        junk = parse("http", b"HTTP/1.1 200 OK\r\nServer: -2+3/1.0\r\n\r\n")
+        self.assertIsNone(junk.product)
+        self.assertIsNone(junk.version)
+
+    def test_caps_drop_what_falls_past_them(self):
+        cut = b"220 " + b"A" * 250 + b" vsFTPd 2.3.4\r\n"
+        self.assertIsNone(parse("ftp", cut).product)
+        self.assertEqual(parse("ftp", b"220 vsFTPd 2.3.4\r\n").product, "vsFTPd")
+        short = parse("ssh", b"SSH-2.0-OpenSSH_" + b"1" * VERSION_CAP + b"\r\n")
+        self.assertEqual(short.version, "1" * VERSION_CAP)
+        long = parse("ssh", b"SSH-2.0-OpenSSH_" + b"1" * (VERSION_CAP + 1) + b"\r\n")
+        self.assertEqual(long.product, "OpenSSH")
+        self.assertIsNone(long.version)
+        headers = b"HTTP/1.1 200 OK\r\n" + b"X: y\r\n" * 63 + b"Server: nginx/1.25.1\r\n\r\n"
+        self.assertIsNone(parse("http", headers).product)
+        early = b"HTTP/1.1 200 OK\r\n" + b"X: y\r\n" * 10 + b"Server: nginx/1.25.1\r\n\r\n"
+        self.assertEqual(parse("http", early).product, "nginx")
+        tokens = b"220 " + b"A " * 20 + b"vsFTPd 1.0\r\n"
+        self.assertIsNone(parse("ftp", tokens).product)
+
+    def test_ssh_prefix_and_protocol_version(self):
+        self.assertEqual(parse("ssh", b"XYZ-2.0-OpenSSH_9.6\r\n").parse_status, "rejected")
+        self.assertIsNone(parse("ssh", b"XYZ-2.0-OpenSSH_9.6\r\n").product)
+        self.assertEqual(parse("ssh", b"SSH-1.5-OpenSSH_9.6\r\n").parse_status, "rejected")
+        self.assertEqual(parse("ssh", b"SSH-1.99-OpenSSH_9.6\r\n").product, "OpenSSH")
+        self.assertEqual(parse("ssh", b"SSH-2.0-OpenSSH_9.6\r\n").version, "9.6")
+
+    def test_server_after_the_blank_line_is_ignored(self):
+        body = b"HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2024 00:00:00 GMT\r\n\r\nServer: Apache/2.4.58\r\n"
+        self.assertIsNone(parse("http", body).product)
+        apache = b"HTTP/1.1 200 OK\r\nDate: Mon, 01 Jan 2024 00:00:00 GMT\r\nServer: Apache/2.4.58\r\n\r\n"
+        got = parse("http", apache)
+        self.assertEqual((got.product, got.version), ("Apache", "2.4.58"))
+        lower = parse("http", b"HTTP/1.0 200 OK\r\nserver: nginx/1.25.1\r\n\r\n")
+        self.assertEqual((lower.product, lower.version), ("nginx", "1.25.1"))
+
+    def test_2201_is_not_a_greeting_and_sendmail_keeps_its_version(self):
+        self.assertEqual(parse("ftp", b"2201 vsFTPd 3.0.5\r\n").parse_status, "rejected")
+        self.assertIsNone(parse("ftp", b"2201 vsFTPd 3.0.5\r\n").product)
+        mail = parse("smtp", b"220 mail.example ESMTP Sendmail 8.15.2/8.15.2; Mon, 1 Jan 2024\r\n")
+        self.assertEqual((mail.product, mail.version), ("Sendmail", "8.15.2"))
+        marked = parse("ssh", b"SSH-2.0-OpenSSH_9.6?1\r\n")
+        self.assertIsNone(marked.version)
+
+    def test_a_str_banner_is_refused(self):
+        with self.assertRaises(TypeError):
+            parse("ssh", "SSH-2.0-OpenSSH_9.6\r\n")
 
 
 class ParserSourceTests(unittest.TestCase):
