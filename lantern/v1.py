@@ -1182,17 +1182,21 @@ class ExportInterrupted(BaseException):
         super().__init__(signum)
 
 
-def _block_termination() -> bool:
-    """Block SIGINT and SIGTERM until the new file is recorded. POSIX only."""
+def _block_termination():
+    """Block SIGINT and SIGTERM until the new file is recorded. POSIX only.
+
+    Returns the previous mask, or None when this platform has no mask.
+    The caller restores that exact set with ``SIG_SETMASK``. Unblocking
+    would clear a block the caller already held.
+    """
     if not hasattr(signal, "pthread_sigmask"):
-        return False
-    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
-    return True
+        return None
+    return signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
 
 
-def _unblock_termination(blocked: bool) -> None:
-    if blocked:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+def _unblock_termination(previous) -> None:
+    if previous is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def _termination_signals() -> tuple[int, ...]:
@@ -1295,18 +1299,30 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 if hasattr(os, "O_BINARY"):
                     flags |= os.O_BINARY
                 blocked = _block_termination()
+                fd = None
                 try:
-                    if directory is not None:
-                        fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
-                    else:
-                        fd = os.open(destination, flags, 0o600)
-                    partial = destination
-                except KeyboardInterrupt:
-                    # os.open created the file and then a simulated signal
-                    # fired before we could record it. The path is known
-                    # because this create is exclusive.
-                    _unlink_quiet(destination)
-                    raise
+                    try:
+                        if directory is not None:
+                            fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
+                        else:
+                            fd = os.open(destination, flags, 0o600)
+                        # Record the path before the mask is restored, so a
+                        # signal that was pending is delivered only after
+                        # cleanup knows this file.
+                        partial = destination
+                    except BaseException as exc:
+                        # KeyboardInterrupt and ExportInterrupted are not
+                        # Exception. OSError from a failed exclusive create
+                        # is, and must not delete a file this call did not make.
+                        # The destination did not exist when this window
+                        # started, so unlinking it removes only our file.
+                        if not isinstance(exc, Exception):
+                            if fd is not None:
+                                os.close(fd)
+                                fd = None
+                            _unlink_quiet(destination)
+                            partial = None
+                        raise
                 finally:
                     _unblock_termination(blocked)
                 try:
@@ -1314,16 +1330,21 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 finally:
                     os.close(fd)
             else:
-                before = {path.name for path in parent.glob(".lantern-export-*")}
                 blocked = _block_termination()
+                fd = None
                 try:
-                    fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
-                    temporary_path = Path(temporary)
-                except KeyboardInterrupt:
-                    for path in parent.glob(".lantern-export-*"):
-                        if path.name not in before:
-                            _unlink_quiet(path)
-                    raise
+                    try:
+                        fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
+                        temporary_path = Path(temporary)
+                    except BaseException as exc:
+                        # Only the file this call created. Another
+                        # ``.lantern-export-*`` in the directory is not ours.
+                        if fd is not None and not isinstance(exc, Exception):
+                            os.close(fd)
+                            fd = None
+                            _unlink_quiet(temporary_path)
+                            temporary_path = None
+                        raise
                 finally:
                     _unblock_termination(blocked)
                 try:
