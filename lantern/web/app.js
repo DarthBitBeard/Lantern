@@ -347,7 +347,7 @@ async function loadInventory() {
   let response;
   try {
     response = await fetch(
-      `/api/v1/devices?scan_id=${encodeURIComponent(scanId)}&limit=1000`,
+      `/api/v1/devices?scan_id=${encodeURIComponent(scanId)}&limit=1024`,
       { headers: { "X-Lantern-Token": lanternToken() } },
     );
   } catch (err) {
@@ -377,6 +377,7 @@ function assetEditor(device) {
   details.appendChild(body);
   details.addEventListener("toggle", () => {
     if (details.open) fillAssetEditor(device, body);
+    else editorDirty = false;
   });
   return details;
 }
@@ -396,17 +397,17 @@ function fillAssetEditor(device, body) {
 function assetForm(device, record) {
   const error = node("p", { className: "asset-error", text: "" });
   const owner = node("input", {
-    type: "text", maxlength: "80", value: record.owner || "",
+    type: "text", value: record.owner || "",
     "aria-label": "Owner",
   });
   const location = node("input", {
-    type: "text", maxlength: "80", value: record.location || "",
+    type: "text", value: record.location || "",
     "aria-label": "Location",
   });
   const tags = Array.isArray(record.tags) ? record.tags.map((tag) => String(tag)) : [];
   const chips = node("div", { className: "tag-chips" });
   const tagInput = node("input", {
-    type: "text", maxlength: "32", "aria-label": "Add a tag",
+    type: "text", "aria-label": "Add a tag",
     placeholder: "tag",
   });
   const criticality = node("select", { "aria-label": "Criticality" });
@@ -415,8 +416,8 @@ function assetForm(device, record) {
     criticality.appendChild(node("option", { value: level, text: level }));
   }
   criticality.value = record.criticality || "";
-  const notes = node("textarea", {
-    maxlength: "500", "aria-label": "Notes",
+  const notes = node("input", {
+    type: "text", "aria-label": "Notes",
   });
   notes.value = record.notes || "";
   const counter = node("p", { className: "hint", text: `${notes.value.length}/500` });
@@ -485,8 +486,29 @@ function assetForm(device, record) {
     renderDevices();
   }
 
+  function applyRecord(latest) {
+    record.updated_at = latest.updated_at == null ? null : latest.updated_at;
+    record.owner = latest.owner || null;
+    record.location = latest.location || null;
+    record.notes = latest.notes || null;
+    record.criticality = latest.criticality || null;
+    record.tags = Array.isArray(latest.tags) ? latest.tags.slice() : [];
+    owner.value = record.owner || "";
+    location.value = record.location || "";
+    notes.value = record.notes || "";
+    counter.textContent = `${notes.value.length}/500`;
+    criticality.value = record.criticality || "";
+    tags.splice(0, tags.length, ...record.tags.map((tag) => String(tag)));
+    drawChips();
+  }
+
   async function save() {
+    if (saveButton.disabled) return;
     error.textContent = "";
+    if (owner.value.length > 80 || location.value.length > 80 || notes.value.length > 500) {
+      error.textContent = FIELD_COPY.too_long;
+      return;
+    }
     const payload = {
       updated_at: record.updated_at == null ? null : record.updated_at,
       owner: owner.value,
@@ -495,6 +517,7 @@ function assetForm(device, record) {
       tags: tags.slice(),
       criticality: criticality.value ? criticality.value : null,
     };
+    saveButton.disabled = true;
     let response;
     try {
       response = await fetch(`/api/v1/assets/${encodeURIComponent(record.key)}`, {
@@ -507,9 +530,11 @@ function assetForm(device, record) {
       });
     } catch (err) {
       error.textContent = "The dashboard could not save.";
+      saveButton.disabled = false;
       return;
     }
     const data = await response.json().catch(() => ({}));
+    saveButton.disabled = false;
     if (response.status === 200) {
       device.owner = data.owner || null;
       device.location = data.location || null;
@@ -525,35 +550,37 @@ function assetForm(device, record) {
     if (response.status === 409) {
       forgetInventory();
       editorDirty = false;
-      await loadInventory();
-      renderDevices();
-      setMessage(inventoryCopy(409, data));
+      const items = await loadInventory();
+      const latest = inventoryFor(device, items);
+      if (latest) applyRecord(latest);
+      error.textContent = inventoryCopy(409, data);
       return;
     }
     error.textContent = inventoryCopy(response.status, data);
   }
 
+  drawChips();
+  const saveButton = node("button", { type: "button", text: "Save" });
+  const cancelButton = node("button", { type: "button", className: "secondary", text: "Cancel" });
+  const addButton = node("button", { type: "button", className: "secondary", text: "Add tag" });
+  saveButton.addEventListener("click", save);
+  cancelButton.addEventListener("click", cancel);
+  addButton.addEventListener("click", addTag);
   form.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
       cancel();
-    } else if (event.key === "Enter" && event.target !== notes && event.target !== tagInput) {
-      event.preventDefault();
-      save();
+      return;
     }
+    if (event.key !== "Enter" || event.target === notes || event.target === tagInput) return;
+    if (event.target === cancelButton || event.target === addButton) return;
+    if (event.target && event.target.getAttribute && event.target.getAttribute("aria-label") === "Remove tag") return;
+    event.preventDefault();
+    save();
   });
-
-  drawChips();
-  const saveButton = node("button", { type: "button", text: "Save" });
-  const cancelButton = node("button", { type: "button", className: "secondary", text: "Cancel" });
-  saveButton.addEventListener("click", save);
-  cancelButton.addEventListener("click", cancel);
   form.appendChild(node("label", {}, ["Owner", owner]));
   form.appendChild(node("label", {}, ["Location", location]));
-  form.appendChild(node("label", {}, ["Tags", chips, tagInput, node("button", {
-    type: "button", className: "secondary", text: "Add tag",
-  })]));
-  form.lastChild.lastChild.addEventListener("click", addTag);
+  form.appendChild(node("label", {}, ["Tags", chips, tagInput, addButton]));
   form.appendChild(node("label", {}, ["Criticality", criticality]));
   form.appendChild(node("label", {}, ["Notes", notes, counter]));
   form.appendChild(node("div", { className: "asset-actions" }, [saveButton, cancelButton]));

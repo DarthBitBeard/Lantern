@@ -23,6 +23,23 @@ ASSET_ROW_CAP = 10_000
 CRITICALITIES = ("low", "medium", "high", "critical")
 ASSET_FIELDS = ("owner", "location", "tags", "criticality", "notes")
 
+
+class AssetConflict(Exception):
+    """The stored ``updated_at`` is not the one the caller last read."""
+
+
+def _same_instant(stored, expected) -> bool:
+    """``Z`` and ``+00:00`` are the same instant. ``None`` only matches ``None``."""
+    def norm(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text.endswith("Z"):
+            return text[:-1] + "+00:00"
+        return text
+
+    return norm(stored) == norm(expected)
+
 _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 _TAG_RE = re.compile(r"^[a-z0-9._-]{1,32}$")
 # Cc control, Cf format (bidi overrides, word joiner, soft hyphen, BOM, …),
@@ -244,6 +261,8 @@ def set_asset(
     criticality: str | None = None,
     notes: str | None = None,
     clears: frozenset[str] | set[str] | None = None,
+    expected_updated_at: str | None = None,
+    check_updated_at: bool = False,
 ) -> dict:
     """Update the fields that were passed. None means leave that field alone.
 
@@ -251,6 +270,10 @@ def set_asset(
     ``ASSET_ROW_CAP`` rows exist. Updating a row that is already stored is
     still allowed. A row with every inventory field empty is removed, which
     is the same end state as ``clear_asset``.
+
+    When ``check_updated_at`` is set, the compare and the write share this
+    ``BEGIN IMMEDIATE``. A mismatch, including ``None`` over a stored stamp,
+    raises ``AssetConflict`` and writes nothing.
     """
     blanked = set(clears or ())
     # Count and write share one reserved lock so two `asset set` processes
@@ -258,6 +281,10 @@ def set_asset(
     conn.execute("BEGIN IMMEDIATE")
     try:
         current = get_asset(conn, asset_key)
+        if check_updated_at:
+            stored_at = current["updated_at"] if current else None
+            if not _same_instant(stored_at, expected_updated_at):
+                raise AssetConflict()
         if current is None:
             count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             if count >= ASSET_ROW_CAP:

@@ -753,6 +753,7 @@ const elements = {};
 const network = [];
 let nextStatus = 200;
 let nextBody = {};
+const planned = [];
 function make(tag) {
   const node = {
     tagName: String(tag || "div").toUpperCase(),
@@ -802,11 +803,14 @@ const context = {
   URL: { createObjectURL: () => "blob:test" },
   fetch: async (path, opts) => {
     const method = (opts && opts.method) || "GET";
-    network.push({ method, path, body: opts && opts.body });
+    network.push({ method, path, body: opts && opts.body, headers: (opts && opts.headers) || {} });
+    const step = planned.length ? planned.shift() : null;
+    const status = step ? step.status : nextStatus;
+    const body = step ? step.body : nextBody;
     return {
-      ok: nextStatus >= 200 && nextStatus < 300,
-      status: nextStatus,
-      json: async () => nextBody,
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
       text: async () => "",
     };
   },
@@ -826,10 +830,13 @@ const device = {
   criticality: "high", open_ports: [], findings: [],
 };
 nextStatus = 200;
-nextBody = { items: [{
-  key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T00:00:00Z",
-  owner: payload, location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
-}] };
+nextBody = { items: [
+  { key: "aa:bb:cc:dd:ee:02", key_type: "ip", updated_at: "1999-01-01T00:00:00Z", owner: "Wrong" },
+  {
+    key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T00:00:00Z",
+    owner: payload, location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
+  },
+] };
 context.showScan({
   id: 7, subnet: "10.1.0.0/24", started_at: "2026-11-10T00:00:00Z", demo: true,
   devices: [device],
@@ -896,6 +903,104 @@ if ("label" in sent || "trusted" in sent || sent.owner !== "unsaved") {
 if (!post.path.startsWith("/api/v1/assets/")) {
   console.error(post.path);
   process.exit(9);
+}
+if (post.path.includes("?") || post.path.toLowerCase().includes("token")) {
+  console.error("token in query", post.path);
+  process.exit(10);
+}
+if (!post.path.includes("aa%3A")) {
+  console.error("key was not encoded", post.path);
+  process.exit(11);
+}
+if (!post.headers["X-Lantern-Token"] || sent.updated_at !== "2026-11-10T00:00:00Z") {
+  console.error("stamp or token", sent, post.headers);
+  process.exit(12);
+}
+const gets = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices"));
+if (!gets.length || !gets[0].path.includes("limit=1024")) {
+  console.error(gets);
+  process.exit(13);
+}
+let form = null;
+walk(elements.devices, (node) => { if (node.className === "asset-form") form = node; });
+planned.push({ status: 409, body: { error: { message: "SECRET-SERVER-TEXT", code: "conflict" } } });
+planned.push({ status: 200, body: { items: [{
+  key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T02:00:00Z",
+  owner: "Latest", location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
+}] } });
+let detailsAfter = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") detailsAfter = node; });
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!detailsAfter || !detailsAfter.open || owner.value !== "Latest") {
+  console.error("409 form", detailsAfter && detailsAfter.open, owner.value);
+  process.exit(14);
+}
+if (textIncludes(elements.devices, "SECRET-SERVER-TEXT")) {
+  console.error("server text shown");
+  process.exit(15);
+}
+const beforeCancel = network.length;
+let cancel = null;
+let add = null;
+walk(form, (node) => {
+  if (node.textContent === "Cancel") cancel = node;
+  if (node.textContent === "Add tag") add = node;
+});
+for (const fn of form.listeners.keydown || []) {
+  fn({ key: "Enter", target: cancel, preventDefault() {} });
+  fn({ key: "Enter", target: add, preventDefault() {} });
+}
+if (network.length !== beforeCancel) {
+  console.error("enter on a button saved");
+  process.exit(16);
+}
+const tagBox = [];
+walk(form, (node) => { if (node.getAttribute && node.getAttribute("aria-label") === "Add a tag") tagBox.push(node); });
+tagBox[0].value = "Not A Tag";
+for (const fn of tagBox[0].listeners.keydown || []) {
+  fn({ key: "Enter", target: tagBox[0], preventDefault() {} });
+}
+if (!textIncludes(form, "This value is not allowed.")) {
+  console.error("tag check missing");
+  process.exit(17);
+}
+owner.value = "unsaved-again";
+for (const fn of owner.listeners.input || []) fn();
+details.open = false;
+for (const fn of details.listeners.toggle || []) fn();
+elements["tag-filter"].value = "missing-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  const shapes = (elements.devices.children || []).map((child) => child.className || child.tagName);
+  console.error("collapsed editor blocked redraw", JSON.stringify(shapes), textIncludes(elements.devices, "unsaved-again"));
+  process.exit(19);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+let reopened = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") reopened = node; });
+reopened.open = true;
+for (const fn of reopened.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+walk(elements.devices, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") owner = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") save = node;
+});
+nextStatus = 200;
+nextBody = {
+  owner: "SavedOwner", location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", updated_at: "2026-11-10T01:00:00Z",
+};
+owner.value = "SavedOwner";
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (!text.includes("SavedOwner")) {
+  console.error("card", text);
+  process.exit(18);
 }
 function textIncludes(node, needle) {
   let found = false;

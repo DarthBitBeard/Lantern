@@ -2,6 +2,7 @@
 
 import json
 import re
+import socket
 import tempfile
 import threading
 import unittest
@@ -60,12 +61,12 @@ class AssetWriteTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _request(self, method, path, body=None, token=None, origin=None, host=None, cookie=None):
+    def _request(self, method, path, body=None, token=None, origin=None, host=None, cookie=None, content_type=None):
         headers = {}
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = content_type or "application/json"
         if token is not None:
             headers["X-Lantern-Token"] = token
         if origin is not None:
@@ -377,6 +378,102 @@ class AssetWriteTests(unittest.TestCase):
         self.assertEqual(info["label"], "Living room")
         self.assertTrue(info["trusted"])
 
-        status, body, _ = self._request("POST", "/api/v1/devices", {"updated_at": None}, token=self.token)
+        status, body, headers = self._request("POST", "/api/v1/devices", {"updated_at": None}, token=self.token)
         self.assertEqual(status, 405, body)
+        self.assertEqual(headers["Allow"], "GET, HEAD")
         self.assertNotIn("access-control", body.lower())
+
+    def test_one_of_two_same_stamp_writes_wins(self):
+        mac = "aa:bb:cc:dd:ee:10"
+        status, body, _ = self._post(mac, {"updated_at": None, "owner": "Sam"}, token=self.token)
+        self.assertEqual(status, 200, body)
+        stamp = json.loads(body)["updated_at"]
+        results = []
+
+        def once(owner):
+            results.append(self._post(mac, {"updated_at": stamp, "owner": owner}, token=self.token))
+
+        threads = [threading.Thread(target=once, args=(name,)) for name in ("One", "Two")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        statuses = sorted(item[0] for item in results)
+        self.assertEqual(statuses, [200, 409], results)
+        winner = json.loads([item[1] for item in results if item[0] == 200][0])
+        self.assertEqual(self._asset("mac:" + mac)["owner"], winner["owner"])
+        self.assertEqual(json.loads([item[1] for item in results if item[0] == 409][0])["error"]["code"], "conflict")
+
+    def test_a_null_stamp_over_a_stored_row_is_409(self):
+        mac = "aa:bb:cc:dd:ee:10"
+        status, body, _ = self._post(mac, {"updated_at": None, "owner": "Sam"}, token=self.token)
+        self.assertEqual(status, 200, body)
+        status, body, _ = self._post(mac, {"updated_at": None, "owner": "Ada"}, token=self.token)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "conflict")
+        self.assertEqual(self._asset("mac:" + mac)["owner"], "Sam")
+
+    def test_tags_are_deduped_before_the_cap_and_must_be_text(self):
+        mac = "aa:bb:cc:dd:ee:10"
+        tags = [f"t{index}" for index in range(10)] + ["t0"]
+        status, body, _ = self._post(mac, {"updated_at": None, "tags": tags}, token=self.token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(json.loads(body)["tags"]), 10)
+        status, body, _ = self._post(
+            mac,
+            {"updated_at": json.loads(body)["updated_at"], "tags": [f"u{index}" for index in range(11)]},
+            token=self.token,
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(json.loads(body)["error"]["fields"]["tags"], "too_many")
+        status, body, _ = self._post(mac, {"updated_at": None, "tags": [1]}, token=self.token)
+        self.assertEqual(status, 422, body)
+        self.assertEqual(json.loads(body)["error"]["fields"]["tags"], "invalid")
+
+    def test_oversized_wrong_type_and_chunked_posts(self):
+        mac = "aa:bb:cc:dd:ee:10"
+        status, body, _ = self._post(
+            mac, {"updated_at": None, "owner": "x" * 70000}, token=self.token,
+        )
+        self.assertEqual(status, 413, body)
+        payload = json.loads(body)
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["error"]["code"], "too_large")
+        self.assertEqual(payload["error"]["message"], "Too large.")
+        status, body, _ = self._request(
+            "POST", "/api/v1/assets/" + quote(mac, safe=""),
+            {"updated_at": None, "owner": "Sam"},
+            token=self.token, content_type="text/plain",
+        )
+        self.assertEqual(status, 415, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "unsupported_media_type")
+        status, body, headers = self._request(
+            "PUT", "/api/v1/assets/" + quote(mac, safe=""), token=self.token,
+        )
+        self.assertEqual(status, 405, body)
+        self.assertEqual(headers["Allow"], "POST")
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            sock.sendall((
+                f"POST /api/v1/assets/{quote(mac, safe='')} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                f"X-Lantern-Token: {self.token}\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "0\r\n\r\n"
+            ).encode("ascii"))
+            raw = b""
+            while True:
+                piece = sock.recv(4096)
+                if not piece:
+                    break
+                raw += piece
+        finally:
+            sock.close()
+        text = raw.decode("utf-8", "replace")
+        self.assertIn(" 400 ", text.split("\r\n", 1)[0])
+        self.assertIn('"api_version"', text)
+        self.assertIn("bad_request", text)
+        self.assertNotIn("Bad request.", text)

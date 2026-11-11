@@ -994,7 +994,10 @@ class LanternHandler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 self._send_v1_error(403, "forbidden")
                 return
-            self._send_v1_error(405, "method_not_allowed", headers={"Allow": "GET, HEAD"})
+            from .v1 import asset_post_key
+
+            allow = "POST" if asset_post_key(path) else "GET, HEAD"
+            self._send_v1_error(405, "method_not_allowed", headers={"Allow": allow})
             return
         if (self.lan_bound or self.strict_auth) and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
@@ -1302,7 +1305,10 @@ class LanternHandler(BaseHTTPRequestHandler):
         except RequestTooLarge:
             self._send_v1_error(413, "too_large")
             return
-        except (UnsupportedMediaType, ValueError):
+        except UnsupportedMediaType:
+            self._send_v1_error(415, "unsupported_media_type")
+            return
+        except ValueError:
             self._send_v1_error(400, "bad_request")
             return
         raw_key = asset_post_key(path)
@@ -1387,7 +1393,15 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding():
+        if "Transfer-Encoding" in self.headers:
+            self.close_connection = True
+            if self._is_v1(parsed.path):
+                if not self._token_ok():
+                    self._send_v1_error(403, "forbidden")
+                    return
+                self._send_v1_error(400, "bad_request")
+                return
+            self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
             return
         if self._is_v1(parsed.path):
             self._dispatch_v1("POST", parsed, {})

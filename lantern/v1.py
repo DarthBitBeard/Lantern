@@ -30,6 +30,7 @@ from .assets import (
     NOTES_MAX,
     OWNER_MAX,
     TAG_LIMIT,
+    AssetConflict,
     get_asset,
     normalize_mac,
     resolve_asset_key,
@@ -63,7 +64,7 @@ API_VERSION = 1
 MAX_V1_ROWS = 100_000
 MAX_V1_RESPONSE_BYTES = 32 * 1024 * 1024
 DEFAULT_LIMIT = 200
-MAX_LIMIT = 1000
+MAX_LIMIT = 1024
 _NUM_RE = re.compile(r"^[0-9]{1,9}$")
 _DDE_RE = re.compile(r"""(?i)^\s*["']*\s*[=+\-@].*\|""")
 _PATH_ERRNOS = frozenset({
@@ -104,7 +105,8 @@ MESSAGES = {
     "not_found": "Not found.",
     "method_not_allowed": "Method not allowed.",
     "conflict": "Conflict.",
-    "too_large": "The response is too large.",
+    "too_large": "Too large.",
+    "unsupported_media_type": "Unsupported media type.",
     "busy": "An export is already running.",
     "validation": "The request is not valid.",
     "server_error": "Server error.",
@@ -303,10 +305,6 @@ def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
         raise V1Error(422, "validation", fields)
 
     current = get_asset(conn, asset_key)
-    current_at = current["updated_at"] if current else None
-    if _instant(current_at) != _instant(seen):
-        raise V1Error(409, "conflict")
-
     clears = {
         name for name in ("owner", "location", "criticality", "notes")
         if name in parsed and parsed[name] is None
@@ -319,10 +317,18 @@ def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
         kwargs["tags"] = parsed["tags"]
     if kwargs or (clears and current is not None):
         try:
-            saved = set_asset(conn, asset_key, kind, clears=clears, **kwargs)
+            saved = set_asset(
+                conn, asset_key, kind, clears=clears,
+                expected_updated_at=seen, check_updated_at=True, **kwargs,
+            )
+        except AssetConflict:
+            raise V1Error(409, "conflict") from None
         except ValueError as exc:
             raise V1Error(422, "validation", {"request": "too_many"}) from exc
     else:
+        stored_at = current["updated_at"] if current else None
+        if _instant(stored_at) != _instant(seen):
+            raise V1Error(409, "conflict")
         saved = current or {
             "owner": None, "location": None, "tags": [], "criticality": None,
             "notes": None, "updated_at": None,
