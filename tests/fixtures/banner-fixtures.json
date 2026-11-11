@@ -65,11 +65,11 @@
    "expect": {
     "accepted": true,
     "service": "ssh",
-    "product": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "product": null,
     "version": null,
     "parse_status": "unknown"
    },
-   "notes": "Cut to 256 B before decode; product capped 40."
+   "notes": "Cut to 256 B before decode. A product longer than 40 characters is dropped, not shortened."
   },
   {
    "id": "fx05-ssh-huge-version",
