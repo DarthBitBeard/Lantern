@@ -167,29 +167,123 @@ class ExportWindowTests(unittest.TestCase):
         self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [other])
 
     def test_sigint_in_the_create_window_is_delivered_after_the_path_is_recorded(self):
+        """A real SIGINT while the new file exists, in a one-thread child.
+
+        The signal has to stay pending until the path is recorded. Removing
+        the mask delivers it inside ``os.open``, and recording the path
+        after the unblock leaves the file behind.
+        """
         if not hasattr(signal, "pthread_sigmask"):
             self.skipTest("pthread_sigmask is POSIX-only")
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code = textwrap.dedent("""
+            import os, signal, sys
+            from pathlib import Path
+            from lantern import v1
+
+            dest = Path(sys.argv[1]) / "out.json"
+            real = os.open
+            saw = {}
+
+            def opening(path, flags, *args, **kwargs):
+                fd = real(path, flags, *args, **kwargs)
+                if flags & os.O_CREAT:
+                    held = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    saw["blocked"] = signal.SIGINT in held
+                    os.kill(os.getpid(), signal.SIGINT)
+                    saw["pending"] = True
+                return fd
+
+            v1.os.open = opening
+            try:
+                v1.write_export_file(str(dest), b"{}", force=False)
+                print("code=none")
+            except SystemExit as exc:
+                print(f"code={exc.code}")
+            print(f"blocked={saw.get('blocked')}")
+            print(f"pending={saw.get('pending')}")
+            print(f"exists={dest.exists()}")
+            print(f"temps={len(list(Path(sys.argv[1]).glob('.lantern-export-*')))}")
+        """)
+        proc = subprocess.run(
+            [sys.executable, "-c", code, tmp],
+            cwd=ROOT, check=False, capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout
+        self.assertEqual(proc.returncode, 0, proc.stderr + out)
+        self.assertIn("code=130", out)
+        self.assertIn("blocked=True", out)
+        self.assertIn("pending=True", out)
+        self.assertIn("exists=False", out)
+        self.assertIn("temps=0", out)
+
+    def test_sigint_in_the_temp_window_is_delivered_after_that_name_is_recorded(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("pthread_sigmask is POSIX-only")
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code = textwrap.dedent("""
+            import os, signal, sys, tempfile
+            from pathlib import Path
+            from lantern import v1
+
+            folder = Path(sys.argv[1])
+            dest = folder / "out.json"
+            dest.write_bytes(b"old")
+            real = tempfile.mkstemp
+            saw = {}
+
+            def pausing(*args, **kwargs):
+                fd, name = real(*args, **kwargs)
+                held = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                saw["blocked"] = signal.SIGINT in held
+                os.kill(os.getpid(), signal.SIGINT)
+                saw["pending"] = True
+                return fd, name
+
+            v1.tempfile.mkstemp = pausing
+            try:
+                v1.write_export_file(str(dest), b"new", force=True)
+                print("code=none")
+            except SystemExit as exc:
+                print(f"code={exc.code}")
+            temps = [path.name for path in folder.glob(".lantern-export-*")]
+            print(f"blocked={saw.get('blocked')}")
+            print(f"pending={saw.get('pending')}")
+            print(f"old={dest.read_bytes() == b'old'}")
+            print(f"temps={temps}")
+        """)
+        proc = subprocess.run(
+            [sys.executable, "-c", code, tmp],
+            cwd=ROOT, check=False, capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout
+        self.assertEqual(proc.returncode, 0, proc.stderr + out)
+        self.assertIn("code=130", out)
+        self.assertIn("blocked=True", out)
+        self.assertIn("pending=True", out)
+        self.assertIn("old=True", out)
+        self.assertIn("temps=[]", out)
+
+    def test_export_interrupted_during_create_removes_the_new_file(self):
         tmp = _real_tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         real = os.open
 
-        def opening(path, flags, *args, **kwargs):
+        def boom(path, flags, *args, **kwargs):
             fd = real(path, flags, *args, **kwargs)
             if flags & os.O_CREAT:
-                # Pending while the mask is held. Delivered when the
-                # previous mask is restored, which is after the path is
-                # recorded. If the mask is missing, this kills the call
-                # before that record and the new file is left behind.
-                os.kill(os.getpid(), signal.SIGINT)
+                os.close(fd)
+                raise v1.ExportInterrupted(signal.SIGINT)
             return fd
 
-        with mock.patch("lantern.v1.os.open", opening):
+        with mock.patch("lantern.v1.os.open", boom):
             with self.assertRaises(SystemExit) as caught:
                 v1.write_export_file(str(dest), b"{}", force=False)
         self.assertEqual(caught.exception.code, 130)
         self.assertFalse(dest.exists())
-        self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
 
     def test_a_mask_the_caller_held_is_still_held(self):
         if not hasattr(signal, "pthread_sigmask"):
