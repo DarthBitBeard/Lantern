@@ -65,10 +65,11 @@ class DocLinkTests(unittest.TestCase):
 
     def test_favicon_has_no_script_and_a_dark_outline(self):
         svg = (ROOT / "lantern" / "web" / "favicon.svg").read_text(encoding="utf-8")
-        self.assertNotIn("<script", svg.lower())
-        self.assertNotIn("href=", svg.lower())
-        self.assertIn("#F5F1E8", svg)
-        self.assertIn("prefers-color-scheme: dark", svg)
+        code = re.sub(r"<!--.*?-->", "", svg, flags=re.DOTALL)
+        self.assertNotIn("<script", code.lower())
+        self.assertNotIn("href=", code.lower())
+        self.assertIn("#F5F1E8", code)
+        self.assertIn("prefers-color-scheme: dark", code)
 
         def channel(value):
             value = value / 255
@@ -84,7 +85,7 @@ class DocLinkTests(unittest.TestCase):
 
         self.assertAlmostEqual(ratio("#0B1F3A", "#FFFFFF"), 16.52, places=2)
         self.assertGreaterEqual(ratio("#F5F1E8", "#202124"), 3)
-        self.assertIn(".hex { stroke: #F5F1E8; }", svg)
+        self.assertIn(".hex { stroke: #F5F1E8; }", code)
 
     def test_docker_healthcheck_does_not_carry_a_token(self):
         docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
