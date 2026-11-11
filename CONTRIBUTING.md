@@ -27,8 +27,9 @@ See the README "Run and debug" section for DB path, ports, and debugger tips.
 
 ```bash
 python3 tests/run_tests.py
-# CI uses warnings as errors:
-python3 -W error tests/run_tests.py
+# Same command CI runs today (`.github/workflows/ci.yml`).
+# `python3 -W error tests/run_tests.py` treats ResourceWarning as an error.
+# CI does not pass `-W error` until that runner change is on main.
 ```
 
 `python3 -m unittest discover -s tests` also works. `python3 -m unittest discover -s tests -t .` fails because `tests/` has no `__init__.py`, so the start directory is not importable. Do not add `-t .`.

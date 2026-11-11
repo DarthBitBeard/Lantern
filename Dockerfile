@@ -53,10 +53,12 @@ RUN pip install --no-cache-dir --require-hashes -r .github/requirements-build.tx
 
 VOLUME ["/data"]
 EXPOSE 8068
-# Alive means something accepts TCP on the dashboard port. The check does
-# not send a token and does not add a route that skips auth.
+# Alive means TCP accept on the dashboard port. The default is
+# 127.0.0.1:8068, the same address as CMD. LANTERN_HEALTH_HOST and
+# LANTERN_HEALTH_PORT override that pair when the listen port changes.
+# The check does not send a token and does not add a route that skips auth.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD python -c "import socket; s=socket.create_connection(('127.0.0.1', 8068), 2); s.close()"
+  CMD python -c "import os,socket; host=os.environ.get('LANTERN_HEALTH_HOST','127.0.0.1'); port=int(os.environ.get('LANTERN_HEALTH_PORT','8068')); s=socket.create_connection((host, port), 2); s.close()"
 USER lantern
 
 CMD ["lantern", "web", "--host", "127.0.0.1", "--port", "8068", "--db", "/data/lantern.db"]

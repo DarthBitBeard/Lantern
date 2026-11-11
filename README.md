@@ -37,6 +37,17 @@ Both use the scan history in `%LOCALAPPDATA%\Lantern\lantern.db`. Uninstall from
 
 The installer and `lantern.exe` are not code-signed, so SmartScreen may warn "Windows protected your PC". Choose "More info", then "Run anyway", after checking the SHA-256 in the release notes. The build is `.github/workflows/windows-package.yml`, which installs, runs, and uninstalls the package on a clean runner.
 
+### Docker
+
+```bash
+docker build -t lantern .
+# Listens on 127.0.0.1:8068. The image has no token.
+# Point LANTERN_API_TOKEN_FILE at a mode-0400 file, or the process exits 2.
+docker compose up
+```
+
+The image HEALTHCHECK opens a TCP connection to `127.0.0.1:8068`, the port in the image command. It does not send a token. `LANTERN_HEALTH_HOST` and `LANTERN_HEALTH_PORT` change that pair when you also change the listen port. `docker-compose.yml` sets `init: true` so SIGTERM reaches Lantern.
+
 ### From source
 
 No third-party dependencies. Python 3.11 or newer.
@@ -87,7 +98,7 @@ Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <comma
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
-The database is schema 6. Opening an older file upgrades it in place and writes `.vN.bak` first. Schema 5 stores the gateway and what a device announced. Schema 6 stores the switch map. Details are in [Database and migrations](docs/running.md#run-and-debug).
+The database is schema 6. Opening an older file upgrades it in place and writes `.vN.bak` first. Schema 5 stores the gateway and what a device announced. Schema 6 stores the switch map. Details are in [Database and migrations](docs/running.md#database-and-migrations).
 
 Lantern only scans private RFC1918 networks, at most 1024 addresses, and it does not guess passwords or send exploits. The full rules are in [Safety rules](docs/safety.md#safety-rules-enforced-in-code) and the [Threat model](docs/safety.md#threat-model).
 
