@@ -1,8 +1,14 @@
 """README links, schema wording, search length, favicon, and Docker health."""
 
 import io
+import os
 import re
+import shutil
+import socket
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -76,8 +82,9 @@ class DocLinkTests(unittest.TestCase):
             lighter, darker = sorted((luminance(left), luminance(right)), reverse=True)
             return (lighter + 0.05) / (darker + 0.05)
 
-        self.assertGreaterEqual(ratio("#0B1F3A", "#FFFFFF"), 3)
+        self.assertAlmostEqual(ratio("#0B1F3A", "#FFFFFF"), 16.52, places=2)
         self.assertGreaterEqual(ratio("#F5F1E8", "#202124"), 3)
+        self.assertIn(".hex { stroke: #F5F1E8; }", svg)
 
     def test_docker_healthcheck_does_not_carry_a_token(self):
         docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -88,6 +95,32 @@ class DocLinkTests(unittest.TestCase):
         self.assertIn("127.0.0.1", blob)
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("init: true", compose)
+        self.assertIn("LANTERN_HEALTH_PORT", docker)
+        self.assertIn("127.0.0.1:8068", (ROOT / "README.md").read_text(encoding="utf-8"))
+
+    def test_healthcheck_fails_with_no_server_and_passes_when_one_listens(self):
+        docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        match = re.search(r'CMD python -c "([^"]+)"', docker)
+        self.assertIsNotNone(match)
+        command = match.group(1)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = str(probe.getsockname()[1])
+        probe.close()
+        env = {**os.environ, "LANTERN_HEALTH_PORT": port}
+        missing = subprocess.run(
+            [sys.executable, "-c", command], env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        server = socket.socket()
+        server.bind(("127.0.0.1", int(port)))
+        server.listen(1)
+        threading.Thread(target=lambda: server.accept()[0].close(), daemon=True).start()
+        self.addCleanup(server.close)
+        ready = subprocess.run(
+            [sys.executable, "-c", command], env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(ready.returncode, 0, ready.stderr)
 
 
 class PolishCliTests(unittest.TestCase):
@@ -115,3 +148,54 @@ class PolishCliTests(unittest.TestCase):
         self.assertIn("Cannot read LANTERN_API_TOKEN_FILE", text)
         self.assertNotIn("lantern-missing-token-9f3a", text)
         self.assertNotIn("/tmp/", text)
+        with mock.patch("lantern.cli.Path.is_symlink", side_effect=OSError(13, "denied")):
+            with self.assertRaises(ValueError) as caught:
+                cli.read_private_file("/var/lantern-token-path", "LANTERN_API_TOKEN_FILE")
+        text = str(caught.exception)
+        self.assertEqual(text, "Cannot read LANTERN_API_TOKEN_FILE. Refusing to start.")
+        self.assertNotIn("lantern-token-path", text)
+        self.assertNotIn("/var/", text)
+
+    def test_search_trims_to_200_characters_before_matching(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n");
+const cut = lines.findIndex((line) => line.startsWith('$("scan-form")'));
+if (cut < 0) process.exit(2);
+const elements = {};
+function el(id) {
+  if (!elements[id]) elements[id] = { value: "" };
+  return elements[id];
+}
+const context = {
+  document: {
+    getElementById: el,
+    createElement() { return { style: {} }; },
+    createTextNode(text) { return { textContent: String(text) }; },
+    querySelector() { return { getAttribute() { return ""; } }; },
+    body: { setAttribute() {} },
+  },
+  sessionStorage: { getItem() { return ""; }, setItem() {}, removeItem() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(lines.slice(0, cut).join("\n"), context);
+const device = {
+  ip: "10.0.0.8", trusted: false, tags: [], notes: "needle",
+  open_ports: [], findings: [],
+};
+el("search").value = "x".repeat(200) + "needle";
+el("filter").value = "all";
+if (context.deviceMatches(device)) process.exit(3);
+el("search").value = "  needle  ";
+if (!context.deviceMatches(device)) process.exit(4);
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(ROOT / "lantern" / "web" / "app.js")],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
