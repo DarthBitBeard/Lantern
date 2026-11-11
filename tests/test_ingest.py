@@ -166,6 +166,10 @@ class CorruptShapeTests(unittest.TestCase):
             ("UPDATE devices SET open_ports = ?", '[{"port": 65536}]'),
             ("UPDATE devices SET open_ports = ?", '[{"port": -1}]'),
             ("UPDATE devices SET findings = ?", "[{}]"),
+            ("UPDATE devices SET findings = ?", '[{"severity": "low"}]'),
+            ("UPDATE devices SET findings = ?", '[{"port": 80, "service": 1, "severity": "low", "title": "t", "fix": "f"}]'),
+            ("UPDATE devices SET findings = ?", '[{"port": 80, "service": "http", "severity": "low", "title": "t", "fix": "f", "banner": 1}]'),
+            ("UPDATE devices SET open_ports = ?", '[{"port": 80, "banner": 1}]'),
             ("UPDATE devices SET findings = ?", "not json"),
             ("UPDATE devices SET open_ports = ?", "not json"),
         )
@@ -403,19 +407,84 @@ class DescriptionDeadlineTests(unittest.TestCase):
         self.addCleanup(lambda: [item.close() for item in held])
         return port
 
+    def _silent(self) -> int:
+        """Accept the request and then say nothing, so the client waits."""
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(8)
+        port = server.getsockname()[1]
+        held = []
+        stop = threading.Event()
+
+        def run():
+            server.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                held.append(conn)
+                try:
+                    conn.recv(4096)
+                except OSError:
+                    return
+
+        threading.Thread(target=run, daemon=True).start()
+        self.addCleanup(stop.set)
+        self.addCleanup(server.close)
+        self.addCleanup(lambda: [item.close() for item in held])
+        return port
+
+    def test_the_description_phase_shares_one_deadline(self):
+        self.assertEqual(identify.DESCRIPTION_PHASE_DEADLINE, 15.0)
+        fast = self._serve_body(b"<root><friendlyName>TV</friendlyName></root>")
+        slow = [self._silent() for _ in range(3)]
+        locations = {"10.1.0.1": f"http://127.0.0.1:{fast}/d.xml"}
+        for index, port in enumerate(slow, start=2):
+            locations[f"10.1.0.{index}"] = f"http://127.0.0.1:{port}/d.xml"
+        started = time.monotonic()
+        with mock.patch.object(identify, "DESCRIPTION_WORKERS", 1), \
+                mock.patch.object(identify, "DESCRIPTION_DEADLINE", 2.5), \
+                mock.patch.object(identify, "DESCRIPTION_PHASE_DEADLINE", 0.45):
+            bodies = identify.fetch_descriptions(locations)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.6, elapsed)
+        self.assertIn(b"friendlyName", bodies["10.1.0.1"])
+        self.assertEqual(bodies.get("10.1.0.2", b""), b"")
+
 
 class PortShapeTests(unittest.TestCase):
     def test_bool_range_and_bare_number_are_corrupt(self):
         from lantern import store
 
         self.assertEqual(store._require_ports([{"port": 0}]), [{"port": 0}])
-        self.assertEqual(store._require_ports([{"port": 65535}]), [{"port": 65535}])
-        for value in ([{"port": True}], [{"port": False}], [{"port": -1}], [{"port": 65536}], [22], "nope"):
+        self.assertEqual(store._require_ports([{"port": 65535, "banner": ""}]), [{"port": 65535, "banner": ""}])
+        for value in (
+            [{"port": True}], [{"port": False}], [{"port": -1}], [{"port": 65536}],
+            [22], "nope", [{"port": 80, "banner": 1}], [{"port": 80, "banner": None}],
+        ):
             with self.assertRaises(CorruptScanError):
                 store._require_ports(value)
-        with self.assertRaises(CorruptScanError):
-            store._require_findings([{}])
-        self.assertEqual(store._require_findings([{"severity": "low"}]), [{"severity": "low"}])
+        good = {
+            "port": 80, "service": "http", "severity": "low", "title": "Web", "fix": "Close it.",
+        }
+        self.assertEqual(store._require_findings([good]), [good])
+        self.assertEqual(store._require_findings([{**good, "banner": "ok"}]), [{**good, "banner": "ok"}])
+        for value in (
+            [{}],
+            [{"severity": "low"}],
+            [{**good, "port": True}],
+            [{**good, "service": 1}],
+            [{**good, "title": None}],
+            [{**good, "fix": ["x"]}],
+            [{key: good[key] for key in good if key != "title"}],
+            [{**good, "banner": 1}],
+            [{**good, "banner": None}],
+        ):
+            with self.assertRaises(CorruptScanError):
+                store._require_findings(value)
 
 
 class LenientTopologyTests(unittest.TestCase):
@@ -581,6 +650,27 @@ class V1DataErrorTests(unittest.TestCase):
         self.assertEqual(status, 500, body)
         self.assertEqual(json.loads(body)["error"], "The saved scan could not be read.")
         self.assertNotIn("raw json", body)
+
+    def test_v1_corrupt_tags_keep_the_envelope(self):
+        tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "t.db")
+        conn = connect(db)
+        save_scan(conn, "10.1.0.0/24", [_device()])
+        conn.execute(
+            "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+            " VALUES ('mac:aa:bb:cc:dd:ee:05', 'mac', NULL, NULL, ?, NULL, NULL, 't')",
+            ("[1]",),
+        )
+        conn.commit()
+        conn.close()
+        base, token = self._serve(db)
+        status, body = self._ask(base, "/api/v1/devices", token)
+        payload = json.loads(body)
+        self.assertEqual(status, 500, body)
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["error"]["code"], "server_error")
+        self.assertNotIn("[1]", body)
 
 
 class BlobUrlTests(unittest.TestCase):

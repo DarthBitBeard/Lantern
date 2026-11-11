@@ -7,7 +7,8 @@ for a few seconds:
 * SSDP (UPnP): one M-SEARCH to 239.255.255.250:1900. A reply may name a
   description URL; Lantern fetches that XML only from the device that sent
   the reply, only over plain HTTP on a private address, with a short timeout
-  and a 64 KiB cap, and refuses any document with a DTD.
+  and a 64 KiB cap, and refuses any document with a DTD. One fetch stops
+  after 5 seconds. Every fetch in the scan shares a 15 second limit.
 * mDNS (Bonjour): DNS-SD queries to 224.0.0.251:5353, sent from an ordinary
   port. Responders answer such "legacy unicast" queries straight back to
   that port (RFC 6762 section 6.7), so Lantern never binds port 5353, which
@@ -30,7 +31,7 @@ import time
 import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 SSDP_GROUP = ("239.255.255.250", 1900)
 MDNS_GROUP = ("224.0.0.251", 5353)
@@ -39,6 +40,10 @@ DESCRIPTION_TIMEOUT = 2.0
 DESCRIPTION_MAX_BYTES = 64 * 1024
 DESCRIPTION_HEADER_MAX = 8 * 1024
 DESCRIPTION_DEADLINE = 5.0
+# Every description fetch in one scan shares this budget. Pending fetches
+# are abandoned when it runs out, so a crowd of slow devices cannot hold
+# the scan for one deadline per device.
+DESCRIPTION_PHASE_DEADLINE = 15.0
 DESCRIPTION_WORKERS = 8
 MAX_DEVICES = 1024  # same cap as the scan itself
 MAX_TEXT = 80
@@ -231,21 +236,17 @@ def parse_description(xml_bytes: bytes) -> dict:
     return result
 
 
-def _deadline_left(started: float) -> float:
-    return DESCRIPTION_DEADLINE - (time.monotonic() - started)
-
-
-def _io_timeout(started: float, timeout: float) -> float | None:
+def _io_timeout(deadline: float, timeout: float) -> float | None:
     """Per-read cap, and never longer than the time left on the deadline."""
-    remaining = _deadline_left(started)
+    remaining = deadline - time.monotonic()
     if remaining <= 0:
         return None
     return min(float(timeout), remaining)
 
 
-def _recv_some(sock: socket.socket, started: float, limit: int, timeout: float) -> bytes | None:
+def _recv_some(sock: socket.socket, deadline: float, limit: int, timeout: float) -> bytes | None:
     """One read of the status line, a header, or the body."""
-    wait = _io_timeout(started, timeout)
+    wait = _io_timeout(deadline, timeout)
     if wait is None or limit <= 0:
         return None
     sock.settimeout(wait)
@@ -255,10 +256,10 @@ def _recv_some(sock: socket.socket, started: float, limit: int, timeout: float) 
         return None
 
 
-def _send_all(sock: socket.socket, payload: bytes, started: float, timeout: float) -> bool:
+def _send_all(sock: socket.socket, payload: bytes, deadline: float, timeout: float) -> bool:
     view = memoryview(payload)
     while view:
-        wait = _io_timeout(started, timeout)
+        wait = _io_timeout(deadline, timeout)
         if wait is None:
             return False
         sock.settimeout(wait)
@@ -285,16 +286,23 @@ def _http_headers(head: bytes) -> tuple[bytes, dict[bytes, bytes]] | None:
     return lines[0], headers
 
 
-def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> bytes:
+def fetch_description(
+    location: str,
+    timeout: float = DESCRIPTION_TIMEOUT,
+    deadline: float | None = None,
+) -> bytes:
     """GET one description document. Returns b"" on any failure or oversize body.
 
     The request is raw HTTP/1.0. ``timeout`` caps the connect and every later
     read and write. The status line, headers, and body also share
     ``DESCRIPTION_DEADLINE``: each wait is the shorter of ``timeout`` and the
-    time still left.     A stalled read returns b"", not the bytes gathered so
-    far. Headers stop at ``DESCRIPTION_HEADER_MAX``. A chunked response is
-    refused. A body longer than ``DESCRIPTION_MAX_BYTES`` (64 KiB) is refused
-    whether or not it sends Content-Length. A body of exactly that size is kept.
+    time still left. ``deadline``, when set, is an earlier absolute
+    ``time.monotonic`` limit (the shared description-phase budget) and cannot
+    extend the per-fetch deadline. A stalled read returns b"", not the bytes
+    gathered so far. Headers stop at ``DESCRIPTION_HEADER_MAX``. A chunked
+    response is refused. A body longer than ``DESCRIPTION_MAX_BYTES`` (64 KiB)
+    is refused whether or not it sends Content-Length. A body of exactly that
+    size is kept.
     """
     parts = urllib.parse.urlsplit(location)
     if parts.scheme not in ("http", ""):
@@ -322,18 +330,25 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
     except UnicodeEncodeError:
         return b""
     started = time.monotonic()
+    if deadline is None:
+        deadline = started + DESCRIPTION_DEADLINE
+    else:
+        deadline = min(float(deadline), started + DESCRIPTION_DEADLINE)
+    wait = _io_timeout(deadline, timeout)
+    if wait is None:
+        return b""
     try:
-        sock = socket.create_connection((host, port), timeout=timeout)
+        sock = socket.create_connection((host, port), timeout=wait)
     except OSError:
         return b""
     try:
-        if not _send_all(sock, request, started, timeout):
+        if not _send_all(sock, request, deadline, timeout):
             return b""
         buf = bytearray()
         while b"\r\n\r\n" not in buf:
             if len(buf) >= DESCRIPTION_HEADER_MAX:
                 return b""
-            piece = _recv_some(sock, started, DESCRIPTION_HEADER_MAX - len(buf), timeout)
+            piece = _recv_some(sock, deadline, DESCRIPTION_HEADER_MAX - len(buf), timeout)
             if not piece:
                 return b""
             buf += piece
@@ -363,7 +378,7 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
             return b""
         body = bytearray(buf[marker + 4:])
         while len(body) < want:
-            piece = _recv_some(sock, started, min(4096, want - len(body)), timeout)
+            piece = _recv_some(sock, deadline, min(4096, want - len(body)), timeout)
             if piece is None:
                 return b""
             if not piece:
@@ -374,6 +389,43 @@ def fetch_description(location: str, timeout: float = DESCRIPTION_TIMEOUT) -> by
         return b""
     finally:
         sock.close()
+
+
+def fetch_descriptions(locations: dict[str, str]) -> dict[str, bytes]:
+    """Fetch every description URL. The set shares one time budget.
+
+    Each fetch still stops at ``DESCRIPTION_DEADLINE``. When
+    ``DESCRIPTION_PHASE_DEADLINE`` passes, a fetch that has not finished is
+    dropped and one that has not started does not start.
+    """
+    if not locations:
+        return {}
+    phase_deadline = time.monotonic() + DESCRIPTION_PHASE_DEADLINE
+    bodies: dict[str, bytes] = {}
+    with ThreadPoolExecutor(max_workers=DESCRIPTION_WORKERS) as pool:
+        futures = {
+            pool.submit(
+                fetch_description, url, DESCRIPTION_TIMEOUT, phase_deadline,
+            ): sender
+            for sender, url in locations.items()
+        }
+        pending = set(futures)
+        while pending:
+            remaining = phase_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for future in done:
+                sender = futures[future]
+                try:
+                    bodies[sender] = future.result()
+                except Exception:
+                    bodies[sender] = b""
+        for future in pending:
+            future.cancel()
+    return bodies
 
 
 def _collect(sock: socket.socket, seconds: float) -> list[tuple[bytes, str]]:
@@ -442,9 +494,7 @@ def ssdp_identities(network, local_ip: str | None, seconds: float = LISTEN_SECON
             locations[sender] = location
 
     if locations:
-        with ThreadPoolExecutor(max_workers=DESCRIPTION_WORKERS) as pool:
-            bodies = dict(zip(locations, pool.map(fetch_description, locations.values())))
-        for sender, body in bodies.items():
+        for sender, body in fetch_descriptions(locations).items():
             merge_identity(results[sender], parse_description(body))
     return results
 

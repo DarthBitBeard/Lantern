@@ -742,6 +742,12 @@ def _port_number(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 65535
 
 
+def _optional_text(item: dict, key: str) -> None:
+    """A banner may be absent. When it is stored, it is text."""
+    if key in item and not isinstance(item[key], str):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+
+
 def _require_ports(value):
     """Each open port is an object with a numeric ``port``. A bare number is not."""
     if not isinstance(value, list):
@@ -749,16 +755,25 @@ def _require_ports(value):
     for item in value:
         if not isinstance(item, dict) or not _port_number(item.get("port")):
             raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        _optional_text(item, "banner")
     return value
 
 
 def _require_findings(value):
-    """Each finding is an object that names a severity. An empty object is not."""
+    """Each finding names a port and the text fields a report prints.
+
+    A hand-edited row that omits one, or stores a banner that is not text,
+    is the same unreadable-scan error as any other wrong shape.
+    """
     if not isinstance(value, list):
         raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     for item in value:
-        if not isinstance(item, dict) or not isinstance(item.get("severity"), str):
+        if not isinstance(item, dict) or not _port_number(item.get("port")):
             raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        for key in ("service", "severity", "title", "fix"):
+            if not isinstance(item.get(key), str):
+                raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        _optional_text(item, "banner")
     return value
 
 
