@@ -166,16 +166,25 @@ jobs:
           if (-not (Test-Path "$data\lantern.db")) { throw "uninstall removed the scan database" }
           Write-Host "Install, run, and uninstall OK. Scan data kept in $data."
 
-      - name: Checksums
+      - name: Checksums and SBOM
         run: |
-          Get-FileHash build/exe/lantern.exe, (Get-Item build/installer/*-setup.exe).FullName -Algorithm SHA256 |
-            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) }
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path build/manifest | Out-Null
+          Copy-Item build/exe/lantern.exe build/manifest/lantern.exe -Force
+          $setup = Get-Item build/installer/*-setup.exe
+          Copy-Item $setup.FullName (Join-Path build/manifest $setup.Name) -Force
+          $py = python -c "import sys; print('.'.join(str(part) for part in sys.version_info[:3]))"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/release_manifest.py --out build/manifest --python-runtime $py --requirements .github/requirements-pyinstaller.txt (Join-Path build/manifest lantern.exe) (Join-Path build/manifest $setup.Name)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/release_manifest.py --out build/manifest --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lantern-${{ env.LANTERN_VERSION }}-windows-x64
-          path: |
-            build/exe/lantern.exe
-            build/installer/*-setup.exe
+          # One folder: the exe, the installer, SHA256SUMS, and the SBOM.
+          # sha256sum -c reads the bare names next to the checksum file.
+          path: build/manifest/
           if-no-files-found: error
           retention-days: 30

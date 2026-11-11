@@ -15,6 +15,7 @@ A malformed reply raises `SnmpError` and is never partly used.
 
 from __future__ import annotations
 
+import inspect
 import secrets
 import socket
 import time
@@ -263,11 +264,12 @@ def udp_transport(host: str, port: int, timeout: float):
     The socket is connected, so the OS drops datagrams from any other
     address or port.
     """
-    def exchange(packet: bytes, accept) -> bytes:
+    def exchange(packet: bytes, accept, timeout_override: float | None = None) -> bytes:
+        limit = timeout if timeout_override is None else timeout_override
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect((host, port))
             sock.send(packet)
-            deadline = time.monotonic() + timeout
+            deadline = time.monotonic() + limit
             while True:
                 left = deadline - time.monotonic()
                 if left <= 0:
@@ -292,12 +294,33 @@ class Client:
                  timeout: float = TIMEOUT, retries: int = RETRIES, transport=None):
         self.host = host
         self.community = community.encode("utf-8")
+        self.timeout = timeout
         self.retries = retries
         self.transport = transport or udp_transport(host, port, timeout)
 
-    def _request(self, pdu: int, oids, max_repetitions: int = 0):
+    def _exchange(self, packet: bytes, accept, timeout: float):
+        """Call the transport. A third argument is the remaining budget.
+
+        Transports written before the budget was passed take two arguments
+        and keep their own timeout.
+        """
+        params = inspect.signature(self.transport).parameters
+        if len(params) >= 3 or any(
+            item.kind is inspect.Parameter.VAR_POSITIONAL for item in params.values()
+        ):
+            return self.transport(packet, accept, timeout)
+        return self.transport(packet, accept)
+
+    def _request(self, pdu: int, oids, max_repetitions: int = 0, deadline: float | None = None):
         last: Exception | None = None
         for _ in range(self.retries + 1):
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise last or SnmpError("timed out")
+                timeout = min(self.timeout, remaining)
+            else:
+                timeout = self.timeout
             request_id = secrets.randbelow(2 ** 31 - 1) + 1
             packet = encode_request(pdu, request_id, self.community, oids,
                                     max_repetitions=max_repetitions)
@@ -315,7 +338,7 @@ class Client:
                 return True
 
             try:
-                self.transport(packet, accept)
+                self._exchange(packet, accept, timeout)
             except SnmpError as exc:
                 last = exc
                 continue
@@ -325,11 +348,11 @@ class Client:
             return varbinds
         raise last or SnmpError("no reply")
 
-    def get(self, oids) -> dict:
+    def get(self, oids, *, deadline: float | None = None) -> dict:
         """Values by OID; objects the agent does not have are left out."""
         wanted = [parse_oid(oid) for oid in oids]
         found = {}
-        for oid, value in self._request(GET, wanted):
+        for oid, value in self._request(GET, wanted, deadline=deadline):
             if not isinstance(value, _Missing):
                 found[oid] = value
         return found
@@ -342,7 +365,7 @@ class Client:
         while True:
             if deadline is not None and time.monotonic() > deadline:
                 raise SnmpError("walk took too long")
-            varbinds = self._request(GET_BULK, [current], MAX_REPETITIONS)
+            varbinds = self._request(GET_BULK, [current], MAX_REPETITIONS, deadline=deadline)
             if not varbinds:
                 return rows
             for oid, value in varbinds:

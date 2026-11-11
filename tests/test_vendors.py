@@ -187,5 +187,63 @@ class UpdateToolTests(unittest.TestCase):
         self.assertTrue((ROOT / "lantern" / "data" / "oui.tsv.gz").is_file())
 
 
+class VendorBundleTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        vendors._table = None
+        vendors._bundle_path = None
+
+    def tearDown(self):
+        vendors._table = None
+        vendors._bundle_path = None
+        self.tmp.cleanup()
+
+    def _write(self, payload: bytes) -> None:
+        path = Path(self.tmp.name) / "oui.tsv.gz"
+        path.write_bytes(payload)
+        vendors._bundle_path = path
+        vendors._table = None
+
+    def test_a_gzip_bomb_is_refused_and_lookup_is_unknown(self):
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
+            handle.write(b"A" * 800)
+        self._write(buf.getvalue())
+        original = vendors.MAX_VENDOR_BYTES
+        vendors.MAX_VENDOR_BYTES = 100
+        try:
+            with self.assertRaises(ValueError) as caught:
+                vendors._load()
+            self.assertIn("larger than Lantern", str(caught.exception))
+            self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+        finally:
+            vendors.MAX_VENDOR_BYTES = original
+
+    def test_a_truncated_or_corrupt_table_is_unknown(self):
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
+            handle.write(b"001122\tAcme\n" * 40)
+        raw = buf.getvalue()
+        self._write(raw[: len(raw) // 2])
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+        corrupt = bytearray(raw)
+        corrupt[len(corrupt) // 2] ^= 0xFF
+        self._write(bytes(corrupt))
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+        self._write(b"not-gzip")
+        self.assertIsNone(vendors.lookup("00:11:22:33:44:55"))
+
+    def test_a_vendor_name_with_esc_is_cleaned(self):
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
+            handle.write(b"001122\tAcme\x1bCorp\n")
+        self._write(buf.getvalue())
+        found = vendors.lookup("00:11:22:33:44:55")
+        self.assertIsNotNone(found)
+        self.assertNotIn("\x1b", found["vendor"])
+        self.assertNotIn("\x1b", found["vendor_name"])
+        self.assertIn("Acme", found["vendor"])
+
+
 if __name__ == "__main__":
     unittest.main()

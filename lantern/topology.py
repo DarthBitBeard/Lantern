@@ -125,7 +125,10 @@ def query_switch(ip: str, community: str, *, client_factory=None) -> dict:
     deadline = time.monotonic() + SWITCH_DEADLINE
     try:
         client = (client_factory or Client)(ip, community)
-        system = client.get([SYS_NAME, SYS_DESCR, BRIDGE_ADDRESS, LLDP_LOC_CHASSIS_SUBTYPE, LLDP_LOC_CHASSIS_ID])
+        system = client.get(
+            [SYS_NAME, SYS_DESCR, BRIDGE_ADDRESS, LLDP_LOC_CHASSIS_SUBTYPE, LLDP_LOC_CHASSIS_ID],
+            deadline=deadline,
+        )
         if not system:
             raise SnmpError("the switch answered but shares no system details")
         result["name"] = _text(system.get(SYS_NAME))

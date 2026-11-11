@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The test runner fails when no tests are discovered, when a thread raises, or when an unclosed database is reported. CI runs the suite with warnings as errors. Release builds write `SHA256SUMS` and a CycloneDX SBOM next to the files they name, as workflow artifacts only; nothing is published. `--check` fails when that checksum file is missing or empty. The Windows SBOM names PyInstaller and the bundled Python. A switch's SNMP budget is a hard limit. The vendor table refuses a gzip that expands past 16 MiB, and a truncated or corrupt table leaves the vendor unknown.
+
 ## 1.4.0 - 2026-11-07
 
 A hardening and polish release: dashboard tag and criticality filters and the brand artwork, error messages that no longer print database paths, device caps applied after filters, export cleanup on Ctrl-C or SIGTERM, and pinned CI and Docker builds. No schema change: a 1.3.0 database opens as is. Everything 1.0 promised stays compatible.

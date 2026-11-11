@@ -2112,8 +2112,10 @@ class StrictAuthTests(unittest.TestCase):
         server = make_server(
             Path(self.tmp.name) / "legacy.db", host="127.0.0.1", port=0, strict_auth=False,
         )
-        self.addCleanup(server.shutdown)
+        # LIFO: shutdown runs before server_close. Closing the socket first
+        # wakes serve_forever on Windows with WinError 10038.
         self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
         self.assertFalse(server.RequestHandlerClass.strict_auth)
         port = server.server_address[1]
         threading.Thread(target=server.serve_forever, daemon=True).start()
