@@ -4,7 +4,9 @@ Localhost and fake data only. SIGINT and SIGTERM to a subprocess are skipped
 on Windows, where those signals do not interrupt a child the same way.
 """
 
+import io
 import os
+import select
 import shutil
 import signal
 import socket
@@ -17,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lantern import v1
+from lantern import cli, v1
 from lantern.store import connect, save_scan
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +57,10 @@ class InterruptTests(unittest.TestCase):
         )
         os.close(ready_w)
         try:
+            if not select.select([ready_r], [], [], 5)[0]:
+                proc.kill()
+                proc.wait(timeout=5)
+                self.fail("child was not ready")
             os.read(ready_r, 1)
             os.kill(proc.pid, signal.SIGINT)
             try:
@@ -142,23 +148,62 @@ class ExportWindowTests(unittest.TestCase):
         self.assertFalse(dest.exists())
         self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
 
-    def test_interrupt_during_mkstemp_removes_the_temp_file(self):
+    def test_interrupt_during_mkstemp_removes_only_that_temp_file(self):
         tmp = _real_tempdir()
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = Path(tmp) / "out.json"
         dest.write_bytes(b"old")
-        real = tempfile.mkstemp
+        other = Path(tmp) / ".lantern-export-keep"
+        other.write_bytes(b"keep")
 
-        def boom(*args, **kwargs):
-            fd, name = real(*args, **kwargs)
-            os.close(fd)
+        def boom(_fd, _payload):
             raise KeyboardInterrupt
 
-        with mock.patch("lantern.v1.tempfile.mkstemp", boom):
+        with mock.patch("lantern.v1._write_fd", boom):
             with self.assertRaises(KeyboardInterrupt):
                 v1.write_export_file(str(dest), b"new", force=True)
         self.assertEqual(dest.read_bytes(), b"old")
+        self.assertEqual(other.read_bytes(), b"keep")
+        self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [other])
+
+    def test_sigint_in_the_create_window_is_delivered_after_the_path_is_recorded(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("pthread_sigmask is POSIX-only")
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = Path(tmp) / "out.json"
+        real = os.open
+
+        def opening(path, flags, *args, **kwargs):
+            fd = real(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                # Pending while the mask is held. Delivered when the
+                # previous mask is restored, which is after the path is
+                # recorded. If the mask is missing, this kills the call
+                # before that record and the new file is left behind.
+                os.kill(os.getpid(), signal.SIGINT)
+            return fd
+
+        with mock.patch("lantern.v1.os.open", opening):
+            with self.assertRaises(SystemExit) as caught:
+                v1.write_export_file(str(dest), b"{}", force=False)
+        self.assertEqual(caught.exception.code, 130)
+        self.assertFalse(dest.exists())
         self.assertEqual(list(Path(tmp).glob(".lantern-export-*")), [])
+
+    def test_a_mask_the_caller_held_is_still_held(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("pthread_sigmask is POSIX-only")
+        tmp = _real_tempdir()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = Path(tmp) / "out.json"
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            v1.write_export_file(str(dest), b"{}", force=False)
+            current = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+            self.assertIn(signal.SIGINT, current)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
     def test_signal_mask_is_restored(self):
         if not hasattr(signal, "pthread_sigmask"):
@@ -170,6 +215,19 @@ class ExportWindowTests(unittest.TestCase):
         v1.write_export_file(str(dest), b"{}", force=False)
         after = signal.pthread_sigmask(signal.SIG_BLOCK, [])
         self.assertEqual(before, after)
+
+
+class ConnectInterruptTests(unittest.TestCase):
+    def test_ctrl_c_during_connect_exits_130(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "t.db")
+            err = io.StringIO()
+            with mock.patch("lantern.cli.connect", side_effect=KeyboardInterrupt), \
+                    mock.patch("sys.stderr", err):
+                code = cli.main(["--db", db, "history"])
+        self.assertEqual(code, 130)
+        self.assertIn("interrupted", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 class WebTermTests(unittest.TestCase):
