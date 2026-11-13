@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 
 from . import __version__
-from .assets import CRITICALITIES, normalize_mac, strip_for_text
+from .assets import CRITICALITIES, normalize_mac, stored_tags, strip_for_text
 from .classify import annotate_scan, classify, gateway_score
 from .identify import empty_identity, identity_is_empty
 from .vendors import is_private_mac, lookup as vendor_lookup
@@ -37,6 +37,7 @@ from .store import (
     list_scans,
     load_scan,
     previous_scan_id,
+    CorruptScanError,
 )
 
 API_VERSION = 1
@@ -354,6 +355,32 @@ def _seen_bounds(conn) -> dict[tuple[str, str], tuple[str, str]]:
     return found
 
 
+def _stored_ports(raw):
+    from .store import _require_ports
+
+    try:
+        value = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise CorruptScanError("The saved scan could not be read.") from exc
+    return _require_ports(value)
+
+
+def _stored_findings(raw):
+    from .store import _require_findings
+
+    try:
+        value = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise CorruptScanError("The saved scan could not be read.") from exc
+    return _require_findings(value)
+
+
+def _stored_object(raw):
+    from .store import _require_object
+
+    return _require_object(raw)
+
+
 def _assets(conn) -> dict[str, dict]:
     found = {}
     for key, owner, location, tags, criticality, notes, updated in conn.execute(
@@ -362,7 +389,7 @@ def _assets(conn) -> dict[str, dict]:
         found[key] = {
             "owner": owner,
             "location": location,
-            "tags": json.loads(tags or "[]"),
+            "tags": stored_tags(tags),
             "criticality": criticality,
             "notes": notes,
             "updated_at": updated,
@@ -547,18 +574,15 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
     else:
         router, guessed = (best[2], True) if best else (None, False)
     for ip, mac, hostname, label, ports_json, findings_json, identity_json in fetched:
-        findings = json.loads(findings_json or "[]")
-        try:
-            identity = json.loads(identity_json) if identity_json else None
-        except ValueError:
-            identity = None
+        findings = _stored_findings(findings_json)
+        identity = _stored_object(identity_json)
         device = {
             "ip": ip,
             "mac": mac,
             "hostname": hostname,
             "label": label,
-            "open_ports": json.loads(ports_json or "[]"),
-            "findings": findings if isinstance(findings, list) else [],
+            "open_ports": _stored_ports(ports_json),
+            "findings": findings,
             "identity": identity,
         }
         _overlay_trust(device, trusted)
@@ -672,15 +696,9 @@ def _decode_stored_device(conn, device_id, ip, mac, hostname, label) -> dict:
         "SELECT open_ports, findings, identity FROM devices WHERE id = ?",
         (device_id,),
     ).fetchone()
-    findings = json.loads(findings_json or "[]")
-    try:
-        ports = json.loads(ports_json or "[]")
-    except ValueError:
-        ports = []
-    try:
-        identity = json.loads(identity_json) if identity_json else None
-    except ValueError:
-        identity = None
+    findings = _stored_findings(findings_json)
+    ports = _stored_ports(ports_json)
+    identity = _stored_object(identity_json)
     return {
         "ip": ip,
         "mac": mac,

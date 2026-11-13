@@ -711,7 +711,7 @@ def save_scan(
                     scan_id,
                     device["ip"],
                     device.get("mac"),
-                    device.get("hostname"),
+                    _clean_hostname(device.get("hostname")),
                     device.get("label"),
                     json.dumps(device.get("open_ports", [])),
                     json.dumps(device.get("findings", [])),
@@ -723,12 +723,79 @@ def save_scan(
     return scan_id
 
 
+def _clean_hostname(value) -> str | None:
+    """PTR and other hostnames: no controls, no bidi, at most 253 characters."""
+    from .identify import clean_text
+
+    return clean_text(value, 253)
+
+
 def ip_sort_key(ip: str):
     """Sort IPv4 addresses numerically, so .2 comes before .10."""
     try:
         return (0, int(ipaddress.ip_address(ip)))
     except ValueError:
         return (1, ip)
+
+
+def _port_number(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 65535
+
+
+def _optional_text(item: dict, key: str) -> None:
+    """A banner may be absent. When it is stored, it is text."""
+    if key in item and not isinstance(item[key], str):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+
+
+def _require_ports(value):
+    """Each open port is an object with a numeric ``port``. A bare number is not."""
+    if not isinstance(value, list):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    for item in value:
+        if not isinstance(item, dict) or not _port_number(item.get("port")):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        _optional_text(item, "banner")
+    return value
+
+
+def _require_findings(value):
+    """Each finding names a port and the text fields a report prints.
+
+    A hand-edited row that omits one, or stores a banner that is not text,
+    is the same unreadable-scan error as any other wrong shape.
+    """
+    if not isinstance(value, list):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    for item in value:
+        if not isinstance(item, dict) or not _port_number(item.get("port")):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        for key in ("service", "severity", "title", "fix"):
+            if not isinstance(item.get(key), str):
+                raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        _optional_text(item, "banner")
+    return value
+
+
+def _require_object(raw: str | None) -> dict | None:
+    """A stored JSON object, or None when the column is empty.
+
+    A value that is JSON but not an object is corrupt. Callers used to
+    swallow that and keep going.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        # A broken identity or topology blob is treated as missing, as before.
+        # A value that parses but is not an object is corrupt.
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    return value
 
 
 def _load_identity(raw: str | None) -> dict | None:
@@ -766,9 +833,9 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
                 "mac": mac,
                 "hostname": hostname,
                 "label": label,
-                "open_ports": ports,
-                "findings": found,
-                "identity": _load_identity(identity),
+                "open_ports": _require_ports(ports),
+                "findings": _require_findings(found),
+                "identity": _require_object(identity),
             }
         )
     devices.sort(key=lambda d: ip_sort_key(d["ip"]))
@@ -779,7 +846,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
         "demo": bool(row[2]),
         "scope_name": row[3],
         "network": {"gateway_ip": row[4], "gateway_mac": row[5], "local_ip": row[6]},
-        "topology": _load_identity(row[7]),
+        "topology": _require_object(row[7]),
         "devices": devices,
     }
 

@@ -166,8 +166,17 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
 <p><small>Lantern is defensive only. It scans your own private network, with your permission. It never guesses passwords or sends exploits.</small></p>"""
 
 
+_REPORT_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+    "base-uri 'none'; form-action 'none'"
+)
+
+
 def _html_document(body: str) -> str:
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+    # frame-ancestors is ignored in a meta policy. The HTTP header on
+    # /api/report?format=html still sends it.
+    return f"""<!doctype html><html lang="en"><head><meta http-equiv="Content-Security-Policy" content="{_REPORT_CSP}">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lantern scan report</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}}

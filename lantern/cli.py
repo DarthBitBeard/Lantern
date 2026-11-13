@@ -133,14 +133,16 @@ def _print_topology(scan: dict, topo: dict) -> None:
         placed.setdefault((where["switch"], where["port"]), []).append(mac)
 
     def show(switch: dict, indent: str, lead: str) -> None:
-        name = switch.get("name") or switch["ip"]
+        name = assetlib.strip_for_text(switch.get("name")) or assetlib.strip_for_text(switch.get("ip"))
+        uplink = assetlib.strip_for_text(switch.get("port_to_parent"))
+        ip_text = assetlib.strip_for_text(switch.get("ip"))
         if switch.get("parent"):
-            up = f", uplink {switch.get('port_to_parent') or '?'}"
+            up = f", uplink {uplink or '?'}"
         elif switch.get("port_to_parent"):
-            up = f", router on {switch['port_to_parent']}"
+            up = f", router on {uplink}"
         else:
             up = ""
-        print(f"{lead}{name} ({switch['ip']}){up}")
+        print(f"{lead}{name} ({ip_text}){up}")
         rows = []
         for (ip, port), macs in placed.items():
             if ip != switch["ip"]:
@@ -148,25 +150,31 @@ def _print_topology(scan: dict, topo: dict) -> None:
             labels = []
             for mac in sorted(macs):
                 device = devices.get(mac) or {}
-                label = device.get("label") or device.get("hostname") or ""
-                labels.append(f"{device.get('ip', mac)}{(' ' + label) if label else ''}")
+                label = assetlib.strip_for_text(device.get("label") or device.get("hostname") or "")
+                shown_ip = assetlib.strip_for_text(device.get("ip")) or assetlib.strip_for_text(mac)
+                labels.append(f"{shown_ip}{(' ' + label) if label else ''}")
             where = locations[macs[0]]
             note = (f" (shared: {where['mac_count']} addresses, likely a Wi-Fi access point "
                     "or unmanaged switch)") if where.get("shared") else ""
-            rows.append((port, f"{indent}  {port}{note}: " + ", ".join(labels), None))
+            shown_port = assetlib.strip_for_text(port) or "?"
+            rows.append((port, f"{indent}  {shown_port}{note}: " + ", ".join(labels), None))
         for child in children.get(switch["ip"], []):
             rows.append((child.get("parent_port") or "", None, child))
         for port, line, child in sorted(rows, key=lambda r: _port_sort_key(r[0])):
             if child is None:
                 print(line)
             else:
-                show(child, indent + "  ", f"{indent}  {port or '?'} -> ")
+                shown_port = assetlib.strip_for_text(port) or "?"
+                show(child, indent + "  ", f"{indent}  {shown_port} -> ")
 
     for root_switch in children.get(None, []):
         show(root_switch, "  ", "  ")
     for s in switches:
         if s.get("error"):
-            print(f"  {s['ip']}: {s['error']}")
+            print(
+                f"  {assetlib.strip_for_text(s.get('ip'))}: "
+                f"{assetlib.strip_for_text(s.get('error'))}"
+            )
     switch_ips = {s["ip"] for s in switches}
     gateway = (scan.get("network") or {}).get("gateway_ip")
     loose = [d for mac, d in devices.items()
@@ -880,9 +888,9 @@ def _print_text_scan(scan: dict, diff: dict | None) -> None:
     print(f"Scan {scan['id']}: {len(devices)} devices on {scan['subnet']}"
           f"{' (demo data)' if scan['demo'] else ''}")
     for device in devices:
-        name = device.get("label") or device.get("hostname") or ""
+        name = assetlib.strip_for_text(device.get("label") or device.get("hostname") or "")
         if not name and device.get("vendor"):
-            name = f"({device['vendor']})"
+            name = f"({assetlib.strip_for_text(device['vendor'])})"
         ports = ", ".join(str(p["port"]) for p in device["open_ports"]) or "none"
         worst = device["findings"][0]["severity"] if device["findings"] else "none"
         print(f"  {device['ip']:<15} {name:<24} ports: {ports}  worst: {worst}")
@@ -1576,6 +1584,8 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         except ValueError as exc:
             return _err(str(exc))
         scans = list_scans(conn, scope_name)
+        for scan in scans:
+            scan["subnet"] = assetlib.strip_for_text(scan.get("subnet") or "")
         if args.format == "json":
             print(json.dumps({"scans": scans}, indent=2))
             return 0
@@ -1591,8 +1601,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
         scope_width = max(16, *(len(name) for name in shown_scopes))
         print(f"{'id':>4}  {'started (UTC)':<26} {'subnet':<18} {'scope':<{scope_width}} {'devices':>7}  demo")
         for scan, scope_label in zip(scans, shown_scopes):
+            subnet = assetlib.strip_for_text(scan.get("subnet") or "")
             print(
-                f"{scan['id']:>4}  {scan['started_at'][:26]:<26} {scan['subnet']:<18} "
+                f"{scan['id']:>4}  {scan['started_at'][:26]:<26} {subnet:<18} "
                 f"{scope_label:<{scope_width}} "
                 f"{scan['device_count']:>7}  {'yes' if scan['demo'] else ''}"
             )

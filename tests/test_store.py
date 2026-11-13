@@ -344,7 +344,7 @@ def _write_v030(path: Path) -> None:
             "router.home",
             "Router",
             '[{"port": 80, "open": true, "banner": "ok"}]',
-            '[{"severity": "info", "title": "Web", "fix": "none"}]',
+            '[{"port": 80, "service": "http", "severity": "info", "title": "Web", "fix": "none"}]',
         ),
     )
     raw.execute(
