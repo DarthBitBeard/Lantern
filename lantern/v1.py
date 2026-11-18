@@ -1157,7 +1157,7 @@ def prepare_export_path(path: str, force: bool) -> Path:
     except OSError as exc:
         raise ExportPathError("The export path is not allowed.") from exc
     if _is_link(parent_info):
-        raise ExportPathError("The export directory itself must not be a symlink.")
+        raise ExportPathError(_directory_symlink_message(parent))
     try:
         info = os.lstat(candidate)
     except FileNotFoundError:
@@ -1174,6 +1174,51 @@ def prepare_export_path(path: str, force: bool) -> Path:
         if info.st_nlink > 1:
             raise ExportPathError("The export path must not be a hard link.")
     return candidate
+
+
+def _directory_symlink_message(parent: Path) -> str:
+    """Refuse the export directory and name the real directory, when it can be resolved.
+
+    macOS ``/tmp`` is a symlink to ``/private/tmp``. The hint is that real
+    path with control, bidi, and zero-width characters removed.
+    """
+    message = "The export directory itself must not be a symlink."
+    try:
+        resolved = os.path.realpath(parent)
+    except OSError:
+        return message
+    hint = strip_for_text(resolved)
+    if not hint:
+        return message
+    return f"{message} {hint}"
+
+
+def _refuse_replaced_directory(parent: Path) -> None:
+    """Look again before a path-based create or replace.
+
+    Windows cannot hold a directory fd, so the check in
+    ``prepare_export_path`` is otherwise check-then-use. A symlink or
+    reparse point that appears in that window is refused.
+    """
+    try:
+        info = os.lstat(parent)
+    except OSError as exc:
+        raise ExportPathError("The export path is not allowed.") from exc
+    if _is_link(info):
+        raise ExportPathError(_directory_symlink_message(parent))
+
+
+def _output_open_is_a_symlink(destination: Path, exc: OSError) -> bool:
+    """O_NOFOLLOW reports a symlink as ELOOP, or as EEXIST when O_EXCL is set."""
+    if exc.errno == errno.ELOOP:
+        return True
+    if exc.errno != errno.EEXIST:
+        return False
+    try:
+        info = os.lstat(destination)
+    except OSError:
+        return False
+    return _is_link(info)
 
 
 def _is_link(info) -> bool:
@@ -1323,6 +1368,9 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
     partial = None
     success = False
     interrupted: int | None = None
+    # True only while opening the output file, so ELOOP there is the file
+    # and not the directory.
+    file_open = False
     try:
         with _during_export_write():
             if os.open in getattr(os, "supports_dir_fd", ()):
@@ -1332,6 +1380,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 if hasattr(os, "O_NOFOLLOW"):
                     flags |= os.O_NOFOLLOW
                 directory = os.open(parent, flags)
+            if directory is None:
+                _refuse_replaced_directory(parent)
             if not force:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                 if hasattr(os, "O_NOFOLLOW"):
@@ -1344,10 +1394,12 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 fd = None
                 try:
                     try:
+                        file_open = True
                         if directory is not None:
                             fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
                         else:
                             fd = os.open(destination, flags, 0o600)
+                        file_open = False
                         # Record the path before the mask is restored, so a
                         # signal that was pending is delivered only after
                         # cleanup knows this file.
@@ -1419,12 +1471,15 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                         src_dir_fd=directory, dst_dir_fd=directory,
                     )
                 else:
+                    _refuse_replaced_directory(parent)
                     os.replace(temporary_path, destination)
                 temporary_path = None
             success = True
     except OSError as exc:
+        if file_open and _output_open_is_a_symlink(destination, exc):
+            raise ExportPathError("The output file must not be a symlink.") from exc
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise ExportPathError("The export directory itself must not be a symlink.") from exc
+            raise ExportPathError(_directory_symlink_message(parent)) from exc
         if exc.errno in _PATH_ERRNOS:
             raise ExportPathError("The export path is not allowed.") from exc
         raise ExportPathError("The export could not be written.") from exc

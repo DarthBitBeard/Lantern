@@ -3,16 +3,19 @@
 Local directories only. Nothing is scanned.
 """
 
+import errno
 import os
 import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from lantern.assets import strip_for_text
 from lantern.v1 import ExportInterrupted, ExportPathError, write_export_file
 
 
@@ -88,7 +91,8 @@ class ExportSymlinkTests(unittest.TestCase):
         # is refused. This tree is the same shape, under the test root.
         private = self.root / "private"
         private.mkdir()
-        real_tmp = private / "tmp"
+        # A bidi mark in the real directory name must not reach the message.
+        real_tmp = private / "tmp\u202e"
         real_tmp.mkdir()
         tmp_link = self.root / "tmp"
         tmp_link.symlink_to(real_tmp, target_is_directory=True)
@@ -99,7 +103,10 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertEqual((real_tmp / "child" / "out.json").read_bytes(), b"ok")
         with self.assertRaises(ExportPathError) as caught:
             write_export_file(str(tmp_link / "direct.json"), b"no", force=False)
-        self.assertIn("directory itself", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn("directory itself", message)
+        self.assertIn(strip_for_text(os.path.realpath(tmp_link)), message)
+        self.assertNotIn("\u202e", message)
         self.assertFalse((real_tmp / "direct.json").exists())
         readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")
         self.assertIn("/private/tmp", readme)
@@ -282,39 +289,139 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertFalse(secret.exists())
         self.assertEqual((folder / "out.json").read_bytes(), b"old")
 
+    def test_eloop_on_the_output_file_names_the_file(self):
+        folder = self.root / "folder"
+        folder.mkdir()
+        real_open = os.open
+
+        def opener(path, flags, mode=0o777, *, dir_fd=None):
+            name = path if isinstance(path, str) else Path(path).name
+            if name == "out.json":
+                raise OSError(errno.ELOOP, "loop")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with _OpenPatch(opener):
+            with self.assertRaises(ExportPathError) as caught:
+                write_export_file(str(folder / "out.json"), b"x", force=False)
+        message = str(caught.exception)
+        self.assertIn("output file", message)
+        self.assertNotIn("directory itself", message)
+
+        secret = folder / "secret"
+        secret.write_bytes(b"secret")
+
+        def plant(path, flags, mode=0o777, *, dir_fd=None):
+            name = path if isinstance(path, str) else Path(path).name
+            if name == "late.json":
+                link = folder / "late.json"
+                if not link.is_symlink():
+                    link.symlink_to(secret)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with _OpenPatch(plant):
+            with self.assertRaises(ExportPathError) as caught:
+                write_export_file(str(folder / "late.json"), b"new", force=False)
+        message = str(caught.exception)
+        self.assertIn("output file", message)
+        self.assertNotIn("directory itself", message)
+        self.assertEqual(secret.read_bytes(), b"secret")
+
+    def test_path_write_rechecks_the_directory_before_create_and_replace(self):
+        # Windows has no directory fd. Force that path and swap the directory
+        # on the re-check lstat: once before create, once before replace.
+        self._swap_on_recheck(force=False, swap_on=2)
+        self._swap_on_recheck(force=True, swap_on=3)
+
+    def _swap_on_recheck(self, *, force: bool, swap_on: int):
+        slot = self.root / f"slot-{int(force)}"
+        slot.mkdir()
+        decoy = self.root / f"decoy-{int(force)}"
+        decoy.mkdir()
+        real = self.root / f"real-{int(force)}"
+        dest = slot / "out.json"
+        if force:
+            dest.write_bytes(b"old")
+        seen = {"n": 0}
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == slot:
+                seen["n"] += 1
+                if seen["n"] == swap_on:
+                    os.rename(slot, real)
+                    os.symlink(decoy, slot, target_is_directory=True)
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch("lantern.v1.os.supports_dir_fd", frozenset()):
+            with mock.patch("lantern.v1.os.lstat", lstat):
+                with self.assertRaises(ExportPathError) as caught:
+                    write_export_file(str(dest), b"new", force=force)
+        self.assertIn("directory itself", str(caught.exception))
+        self.assertFalse((decoy / "out.json").exists())
+        if force:
+            self.assertEqual((real / "out.json").read_bytes(), b"old")
+        else:
+            self.assertFalse((real / "out.json").exists())
+
     def test_windows_reparse_and_case_are_best_effort(self):
         if os.name != "nt":
             self.skipTest("Windows reparse points and 8.3 names")
+        ran = []
+        skipped = []
         folder = self.root / "Folder"
         folder.mkdir()
         dest = folder / "out.json"
         write_export_file(str(dest), b"ok", force=False)
         other_case = Path(str(dest).swapcase()) if str(dest) != str(dest).swapcase() else dest
-        write_export_file(str(other_case), b"case", force=True)
-        self.assertEqual(dest.read_bytes(), b"case")
+        if other_case == dest:
+            skipped.append("letter case")
+        else:
+            write_export_file(str(other_case), b"case", force=True)
+            self.assertEqual(dest.read_bytes(), b"case")
+            ran.append("letter case")
 
         short = _short_path(folder)
-        if short is not None:
+        if short is None:
+            skipped.append("8.3 short name")
+        else:
             write_export_file(str(Path(short) / "out.json"), b"short", force=True)
             self.assertEqual(dest.read_bytes(), b"short")
+            ran.append("8.3 short name")
 
         target = self.root / "junction-target"
         target.mkdir()
         junction = self.root / "junction"
-        _make_junction(junction, target)
-        with self.assertRaises(ExportPathError) as caught:
-            write_export_file(str(junction / "out.json"), b"no", force=False)
-        self.assertIn("directory itself", str(caught.exception))
-        self.assertFalse((target / "out.json").exists())
+        try:
+            _make_junction(junction, target)
+        except unittest.SkipTest as exc:
+            skipped.append(f"final-directory junction ({exc})")
+        else:
+            with self.assertRaises(ExportPathError) as caught:
+                write_export_file(str(junction / "out.json"), b"no", force=False)
+            self.assertIn("directory itself", str(caught.exception))
+            self.assertFalse((target / "out.json").exists())
+            ran.append("final-directory junction")
 
         real = self.root / "real-parent"
         real.mkdir()
         ancestor = self.root / "ancestor-junction"
-        _make_junction(ancestor, real)
-        child = ancestor / "child"
-        child.mkdir()
-        write_export_file(str(child / "out.json"), b"ok", force=False)
-        self.assertEqual((real / "child" / "out.json").read_bytes(), b"ok")
+        try:
+            _make_junction(ancestor, real)
+        except unittest.SkipTest as exc:
+            skipped.append(f"ancestor junction ({exc})")
+        else:
+            child = ancestor / "child"
+            child.mkdir()
+            write_export_file(str(child / "out.json"), b"ok", force=False)
+            self.assertEqual((real / "child" / "out.json").read_bytes(), b"ok")
+            ran.append("ancestor junction")
+
+        # unittest captures stdout. Write past that so the Windows CI log shows it.
+        print(
+            "windows export path ran: " + (", ".join(ran) if ran else "none")
+            + "; skipped: " + (", ".join(skipped) if skipped else "none"),
+            file=sys.__stderr__,
+        )
 
 
 if __name__ == "__main__":
