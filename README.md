@@ -363,6 +363,15 @@ This discovers every `tests/test_*.py` (`unittest`): risk rules and safety guard
 
 GitHub Actions runs that same suite on Linux, macOS, and Windows for Python 3.11, 3.12, and 3.13. A second job builds an sdist and a wheel, installs the wheel in a clean directory (so it is not importing the checkout), and runs `lantern demo`. The demo uses fake data; CI does not scan a network.
 
+## Mobile (experimental)
+
+An early Capacitor base for iOS and Android lives in `mobile/`. The
+phone is a remote client only: it shows the dashboard and talks to a
+Lantern server at home over the LAN or Tailscale. It does no
+scanning itself. See `mobile/README.md` and
+`mobile/docs/ADR-001-mobile-architecture.md`. It has not been built
+or tested on a phone yet.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: keep it stdlib only, keep it defensive, keep the plain English fixes, and add a test for new behavior.
