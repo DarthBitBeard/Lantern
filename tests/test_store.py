@@ -406,7 +406,10 @@ class MigrationTests(unittest.TestCase):
                     ("192.168.1.99", "de:ad:be:ef:00:99", None, None),
                 ],
             )
-            self.assertEqual(scan["devices"][0]["open_ports"], [{"port": 80, "open": True, "banner": "ok"}])
+            self.assertEqual(
+                scan["devices"][0]["open_ports"],
+                [{"port": 80, "open": True, "banner": "ok", "fingerprint": None}],
+            )
             self.assertEqual(scan["devices"][0]["findings"][0]["title"], "Web")
             self.assertEqual(
                 get_trusted(conn),
@@ -600,7 +603,7 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("devices_ip_scan_mac", self._index_names(conn))
             scan = load_scan(conn, 1)
             self.assertEqual(scan["scope_name"], "home")
-            self.assertEqual(scan["devices"][0]["open_ports"], [{"port": 22}])
+            self.assertEqual(scan["devices"][0]["open_ports"], [{"port": 22, "fingerprint": None}])
             self.assertEqual(conn.execute("SELECT owner FROM assets").fetchone()[0], "Dana")
         finally:
             conn.close()
@@ -786,11 +789,11 @@ class MigrationTests(unittest.TestCase):
             connect(self.path)
         self.assertIn("newer", str(ctx.exception))
         self.assertIn(
-            "Refusing to change it (schema 99 vs 6).",
+            f"Refusing to change it (schema 99 vs {SCHEMA_VERSION}).",
             str(ctx.exception),
         )
         self.assertNotIn("Refusing to change it.", str(ctx.exception))
-        self.assertIn("schema 99 vs 6", str(ctx.exception))
+        self.assertIn(f"schema 99 vs {SCHEMA_VERSION}", str(ctx.exception))
         self.assertIn("Upgrade Lantern to open this file.", str(ctx.exception))
         self.assertNotIn(self.path.name, str(ctx.exception))
         self.assertEqual(list(Path(self.tmp.name).glob("*.bak")), [])
@@ -1139,6 +1142,213 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(before, after)
         with self.assertRaises(TypeError):
             write_private_file(dest, object())
+
+
+class FingerprintStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "lantern.db"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _device(self, fingerprints):
+        ports = []
+        for fingerprint in fingerprints:
+            port = fingerprint["port"]
+            ports.append({
+                "port": port,
+                "open": True,
+                "banner": fingerprint.get("raw", ""),
+                "fingerprint": fingerprint,
+            })
+        return {"ip": "10.7.0.8", "mac": "aa:bb:cc:dd:ee:70", "open_ports": ports, "findings": []}
+
+    def test_a_fingerprint_is_stored_beside_the_port_and_reloaded(self):
+        conn = connect(self.path)
+        try:
+            original = self._device([{
+                "port": 22,
+                "service": "ssh",
+                "product": "OpenSSH",
+                "version": "9.6",
+                "raw": "SSH-2.0-OpenSSH_9.6",
+                "parse_status": "ok",
+            }])
+            scan_id = save_scan(conn, "10.7.0.0/24", [original])
+            stored = conn.execute("SELECT open_ports FROM devices").fetchone()[0]
+            self.assertNotIn("fingerprint", stored)
+            self.assertIn("fingerprint", original["open_ports"][0])
+            loaded = load_scan(conn, scan_id)["devices"][0]["open_ports"][0]
+            self.assertEqual(loaded["fingerprint"], {
+                "service": "ssh",
+                "product": "OpenSSH",
+                "version": "9.6",
+                "raw_banner": "SSH-2.0-OpenSSH_9.6",
+                "parse_status": "ok",
+            })
+            plain = save_scan(conn, "10.7.0.0/24", [_dev("10.7.0.9", ports=(80,))])
+            bare = load_scan(conn, plain)["devices"][0]["open_ports"][0]
+            self.assertIsNone(bare["fingerprint"])
+        finally:
+            conn.close()
+
+    def test_a_long_name_bad_status_and_a_65th_row_are_refused(self):
+        conn = connect(self.path)
+        try:
+            too_long = self._device([{
+                "port": 22,
+                "service": "ssh",
+                "product": "B" * 41,
+                "version": "1",
+                "parse_status": "ok",
+            }])
+            with self.assertRaises(ValueError):
+                save_scan(conn, "10.7.0.0/24", [too_long])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0], 0)
+            garbage = self._device([{
+                "port": 21,
+                "service": "ftp",
+                "product": "vsFTPd",
+                "version": "?3.0.5?",
+                "parse_status": "ok",
+            }])
+            with self.assertRaises(ValueError):
+                save_scan(conn, "10.7.0.0/24", [garbage])
+            many = self._device([
+                {"port": 1000 + n, "service": "ssh", "product": "OpenSSH",
+                 "version": "1", "parse_status": "unknown"}
+                for n in range(65)
+            ])
+            with self.assertRaises(ValueError):
+                save_scan(conn, "10.7.0.0/24", [many])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM service_fingerprints").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_a_corrupt_fingerprint_row_cannot_be_loaded(self):
+        from lantern.store import CorruptScanError
+
+        conn = connect(self.path)
+        try:
+            scan_id = save_scan(conn, "10.7.0.0/24", [self._device([{
+                "port": 22, "service": "ssh", "product": "OpenSSH",
+                "version": "9.6", "parse_status": "ok",
+            }])])
+            conn.execute("UPDATE service_fingerprints SET parse_status = 'nope'")
+            conn.commit()
+            with self.assertRaises(CorruptScanError):
+                load_scan(conn, scan_id)
+        finally:
+            conn.close()
+
+    def test_delete_and_prune_remove_fingerprint_rows(self):
+        conn = connect(self.path)
+        try:
+            old = save_scan(conn, "10.7.0.0/24", [self._device([{
+                "port": 22, "service": "ssh", "product": "OpenSSH",
+                "version": "9.6", "parse_status": "ok",
+            }])])
+            kept = save_scan(conn, "10.7.0.0/24", [_dev("10.7.0.2", ports=(80,))])
+            started = "2020-01-01T00:00:00+00:00"
+            with conn:
+                conn.execute("UPDATE scans SET started_at = ? WHERE id = ?", (started, old))
+            doomed = scans_to_prune(conn, older_than_days=30, now=datetime(2026, 11, 3, tzinfo=timezone.utc))
+            self.assertEqual(doomed, [old])
+            self.assertEqual(delete_scans(conn, doomed), 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM service_fingerprints").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM devices WHERE scan_id = ?", (old,)).fetchone()[0], 0)
+            self.assertEqual([row["id"] for row in list_scans(conn)], [kept])
+        finally:
+            conn.close()
+
+    def test_schema_6_upgrades_to_7_and_a_fault_rolls_back(self):
+        from lantern.store import (
+            _migration_1_v030_baseline,
+            _migration_2_scope_name,
+            _migration_3_assets,
+            _migration_4_device_ip_index,
+            _migration_5_network_map,
+            _migration_6_topology,
+        )
+
+        def seed(raw):
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo, scope_name) VALUES (?, ?, ?, ?)",
+                ("2026-11-01T00:00:00+00:00", "10.6.0.0/24", 0, "home"),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?)",
+                ("10.6.0.8", "aa:bb:cc:dd:ee:06", "box.lan", None, '[{"port": 22}]', "[]"),
+            )
+
+        migrations = {
+            1: _migration_1_v030_baseline,
+            2: _migration_2_scope_name,
+            3: _migration_3_assets,
+            4: _migration_4_device_ip_index,
+            5: _migration_5_network_map,
+            6: _migration_6_topology,
+        }
+        raw = sqlite3.connect(self.path)
+        try:
+            apply_migrations(raw, migrations=migrations, target=6, db_path=self.path)
+            seed(raw)
+            raw.commit()
+        finally:
+            raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+        def boom(conn):
+            conn.execute("CREATE TABLE exploded (id INTEGER)")
+            raise RuntimeError("nope")
+
+        raw = sqlite3.connect(self.path)
+        try:
+            with self.assertRaises(RuntimeError):
+                apply_migrations(
+                    raw, migrations={**migrations, 7: boom}, target=7, db_path=self.path,
+                )
+            self.assertEqual(schema_version(raw), 6)
+            self.assertIsNone(raw.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'exploded'"
+            ).fetchone())
+            self.assertIsNone(raw.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'service_fingerprints'"
+            ).fetchone())
+        finally:
+            raw.close()
+
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), 7)
+            self.assertIsNotNone(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'service_fingerprints'"
+            ).fetchone())
+            self.assertEqual(load_scan(conn, 1)["devices"][0]["hostname"], "box.lan")
+            self.assertIsNone(load_scan(conn, 1)["devices"][0]["open_ports"][0]["fingerprint"])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM service_fingerprints").fetchone()[0], 0)
+        finally:
+            conn.close()
+        first = Path(str(self.path) + ".v6.bak")
+        self.assertTrue(first.is_file())
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
+        saved = sqlite3.connect(first)
+        try:
+            self.assertEqual(saved.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
+            self.assertIsNone(saved.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'service_fingerprints'"
+            ).fetchone())
+        finally:
+            saved.close()
+        again = connect(self.path)
+        try:
+            self.assertEqual(schema_version(again), 7)
+        finally:
+            again.close()
 
 
 if __name__ == "__main__":

@@ -38,9 +38,11 @@ from pathlib import Path
 # plus this version table. Schema 2 adds scans.scope_name. Schema 3 adds
 # the asset table, which is not tied to a scan id. Schema 4 adds an index on
 # the device table and changes no rows. Schema 5 adds the gateway and device
-# identities for the map; schema 6 adds scans.topology (the switch map). The package version stays put until a
-# release; the schema version moves only when the tables or indexes change.
-SCHEMA_VERSION = 6
+# identities for the map; schema 6 adds scans.topology (the switch map).
+# Schema 7 adds service_fingerprints. Nothing in a scan writes that table
+# until a caller puts a fingerprint on a port. The package version stays put
+# until a release; the schema version moves only when the tables or indexes change.
+SCHEMA_VERSION = 7
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -584,6 +586,14 @@ def _migration_5_network_map(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE devices ADD COLUMN identity TEXT")
 
 
+# Banner parses only. A device keeps at most this many rows.
+MAX_FINGERPRINTS_PER_DEVICE = 64
+_FP_SERVICES = frozenset({"ssh", "http", "ftp", "smtp"})
+_FP_STATUSES = frozenset({"ok", "unknown", "rejected"})
+_FP_PRODUCT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
+_FP_VERSION_CHARS = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._+~-")
+
+
 def _migration_6_topology(conn: sqlite3.Connection) -> None:
     """Schema 6: `scans.topology`, the switch map for that scan (JSON).
 
@@ -596,6 +606,28 @@ def _migration_6_topology(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE scans ADD COLUMN topology TEXT")
 
 
+def _migration_7_service_fingerprints(conn: sqlite3.Connection) -> None:
+    """Schema 7: one row per parsed banner. Existing scans gain no rows."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS service_fingerprints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id INTEGER NOT NULL,
+            port INTEGER NOT NULL,
+            service TEXT,
+            product TEXT,
+            version TEXT,
+            raw_banner TEXT,
+            parse_status TEXT NOT NULL,
+            collected_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS fp_device ON service_fingerprints (device_id)"
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
@@ -603,6 +635,7 @@ _MIGRATIONS: dict[int, Migration] = {
     4: _migration_4_device_ip_index,
     5: _migration_5_network_map,
     6: _migration_6_topology,
+    7: _migration_7_service_fingerprints,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -674,6 +707,68 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _fingerprint_token(value, *, cap: int, chars: set[str], first: str):
+    """None, or a short token. Anything else is refused, not shortened."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > cap:
+        raise ValueError("A fingerprint field is not allowed.")
+    if first == "digit" and not value[0].isdigit():
+        raise ValueError("A fingerprint field is not allowed.")
+    if first == "alnum" and not value[0].isalnum():
+        raise ValueError("A fingerprint field is not allowed.")
+    if any(char not in chars for char in value):
+        raise ValueError("A fingerprint field is not allowed.")
+    return value
+
+
+def _checked_fingerprint(raw: dict, port_number) -> tuple:
+    port = raw["port"] if "port" in raw else port_number
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("A fingerprint field is not allowed.")
+    service = raw.get("service")
+    if service is not None and service not in _FP_SERVICES:
+        raise ValueError("A fingerprint field is not allowed.")
+    product = _fingerprint_token(
+        raw.get("product"), cap=40, chars=_FP_PRODUCT_CHARS, first="alnum",
+    )
+    version = _fingerprint_token(
+        raw.get("version"), cap=64, chars=_FP_VERSION_CHARS, first="digit",
+    )
+    banner = raw.get("raw", raw.get("raw_banner"))
+    if banner is not None and (not isinstance(banner, str) or len(banner) > 120):
+        raise ValueError("A fingerprint field is not allowed.")
+    status = raw.get("parse_status")
+    if status not in _FP_STATUSES:
+        raise ValueError("A fingerprint field is not allowed.")
+    return (port, service, product, version, banner, status)
+
+
+def _split_fingerprints(ports):
+    """Return ports for the JSON column, and fingerprints to store beside it.
+
+    The caller's list is not modified. A fingerprint is not written into
+    ``open_ports``, so the banner parse is not stored twice.
+    """
+    if not isinstance(ports, list):
+        return ports, []
+    stored = []
+    found = []
+    for port in ports:
+        if not isinstance(port, dict) or "fingerprint" not in port:
+            stored.append(port)
+            continue
+        item = dict(port)
+        raw = item.pop("fingerprint")
+        stored.append(item)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError("A fingerprint field is not allowed.")
+        found.append(_checked_fingerprint(raw, item.get("port")))
+    return stored, found
+
+
 def save_scan(
     conn: sqlite3.Connection,
     subnet: str,
@@ -703,23 +798,31 @@ def save_scan(
             ),
         )
         scan_id = cur.lastrowid
-        conn.executemany(
-            "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings, identity)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
+        for device in devices:
+            stored_ports, fingerprints = _split_fingerprints(device.get("open_ports", []))
+            if len(fingerprints) > MAX_FINGERPRINTS_PER_DEVICE:
+                raise ValueError("A device can store at most 64 fingerprints.")
+            inserted = conn.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings, identity)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scan_id,
                     device["ip"],
                     device.get("mac"),
                     _clean_hostname(device.get("hostname")),
                     device.get("label"),
-                    json.dumps(device.get("open_ports", [])),
+                    json.dumps(stored_ports),
                     json.dumps(device.get("findings", [])),
                     json.dumps(device["identity"]) if device.get("identity") else None,
+                ),
+            )
+            for fingerprint in fingerprints:
+                conn.execute(
+                    "INSERT INTO service_fingerprints"
+                    " (device_id, port, service, product, version, raw_banner, parse_status, collected_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (inserted.lastrowid, *fingerprint, _now()),
                 )
-                for device in devices
-            ],
-        )
     return scan_id
 
 
@@ -818,8 +921,9 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
     if not row:
         return None
     devices = []
-    for ip, mac, hostname, label, open_ports, findings, identity in conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
+    device_ids = []
+    for device_id, ip, mac, hostname, label, open_ports, findings, identity in conn.execute(
+        "SELECT id, ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
         (scan_id,),
     ):
         try:
@@ -838,6 +942,8 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
                 "identity": _require_object(identity),
             }
         )
+        device_ids.append(device_id)
+    _attach_fingerprints(conn, scan_id, devices, device_ids)
     devices.sort(key=lambda d: ip_sort_key(d["ip"]))
     return {
         "id": scan_id,
@@ -1003,6 +1109,53 @@ def scans_to_prune(
     return sorted(doomed)
 
 
+def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: list[int]) -> None:
+    """Put each stored parse on its port. A port with no row gets None."""
+    rows = conn.execute(
+        "SELECT device_id, port, service, product, version, raw_banner, parse_status"
+        " FROM service_fingerprints WHERE device_id IN"
+        " (SELECT id FROM devices WHERE scan_id = ?)",
+        (scan_id,),
+    ).fetchall()
+    by_device: dict[int, dict[int, dict]] = {}
+    for device_id, port, service, product, version, raw_banner, status in rows:
+        try:
+            checked = _checked_fingerprint(
+                {
+                    "port": port,
+                    "service": service,
+                    "product": product,
+                    "version": version,
+                    "raw_banner": raw_banner,
+                    "parse_status": status,
+                },
+                port,
+            )
+        except ValueError as exc:
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE) from exc
+        slot = by_device.setdefault(device_id, {})
+        if checked[0] in slot:
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+        slot[checked[0]] = {
+            "service": checked[1],
+            "product": checked[2],
+            "version": checked[3],
+            "raw_banner": checked[4],
+            "parse_status": checked[5],
+        }
+    for device, device_id in zip(devices, device_ids):
+        found = by_device.pop(device_id, {})
+        ports = device["open_ports"]
+        if isinstance(ports, list):
+            for port in ports:
+                if not isinstance(port, dict):
+                    continue
+                number = port.get("port")
+                port["fingerprint"] = found.pop(number, None)
+        if found:
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+
+
 def delete_scans(conn: sqlite3.Connection, scan_ids: list[int]) -> int:
     """Delete scans and their device rows in one transaction. Returns the scan count.
 
@@ -1012,6 +1165,11 @@ def delete_scans(conn: sqlite3.Connection, scan_ids: list[int]) -> int:
     if not ids:
         return 0
     with conn:
+        conn.executemany(
+            "DELETE FROM service_fingerprints WHERE device_id IN"
+            " (SELECT id FROM devices WHERE scan_id = ?)",
+            ids,
+        )
         conn.executemany("DELETE FROM devices WHERE scan_id = ?", ids)
         conn.executemany("DELETE FROM scans WHERE id = ?", ids)
     return len(ids)
