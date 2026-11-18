@@ -76,10 +76,16 @@ def _tokens(text: str) -> list[str]:
     return text.split(None, _TOKEN_CAP)
 
 
-def _strip_ends(token: str) -> str:
-    while token and token[0] in "()?":
+def _strip_ends(token: str, *, marks: str = "()?") -> str:
+    """Drop wrapping marks from a product token.
+
+    ``?`` is stripped here so a bidi mark in front of ``Exim`` still
+    matches the table. A version does not use this: ``?`` stays, and
+    the version is rejected.
+    """
+    while token and token[0] in marks:
         token = token[1:]
-    while token and token[-1] in "()?":
+    while token and token[-1] in marks:
         token = token[:-1]
     return token
 
@@ -160,12 +166,23 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
         return _result("http", name or None, version if slash else None, value)
     line = _sanitise(_first_line(text))
     greeting = _tokens(line)
-    if not greeting or greeting[0] != "220":
+    # RFC 959 and RFC 5321 use ``220-`` on every reply line but the last.
+    # ``2201`` is not that form.
+    if not greeting or not (greeting[0] == "220" or greeting[0].startswith("220-")):
         return _rejected(service_hint, line)
-    tokens = [_strip_ends(token) for token in _tokens(line)]
+    raw_tokens = []
+    for token in _tokens(line):
+        if token.startswith("220-"):
+            token = token[4:]
+        if token:
+            raw_tokens.append(token)
     table = _PRODUCTS[service_hint]
-    for index, token in enumerate(tokens):
-        if token in table:
-            version = tokens[index + 1] if index + 1 < len(tokens) else None
-            return _result(service_hint, token, version, line)
+    for index, token in enumerate(raw_tokens):
+        name = _strip_ends(token)
+        if name in table:
+            version = None
+            if index + 1 < len(raw_tokens):
+                # Parentheses wrap a version. ``?`` is left so garbage is rejected.
+                version = _strip_ends(raw_tokens[index + 1], marks="()")
+            return _result(service_hint, name, version, line)
     return _result(service_hint, None, None, line)
