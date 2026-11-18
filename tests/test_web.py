@@ -739,7 +739,6 @@ if (network.length) {
         self.assertNotIn("innerHTML", source)
         self.assertNotIn("outerHTML", source)
         self.assertNotIn("insertAdjacentHTML", source)
-        self.assertNotIn("data.error.message", source)
         self.assertNotIn("Access-Control", source)
         node = shutil.which("node")
         if node is None:
@@ -921,6 +920,16 @@ if (!gets.length || !gets[0].path.includes("limit=1024")) {
   console.error(gets);
   process.exit(13);
 }
+nextStatus = 500;
+nextBody = { error: { message: "SECRET-SERVER-TEXT", code: "server_error" } };
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (text.includes("SECRET-SERVER-TEXT") || !text.includes("The dashboard could not save.")) {
+  console.error("server error text", text);
+  process.exit(20);
+}
 let form = null;
 walk(elements.devices, (node) => { if (node.className === "asset-form") form = node; });
 planned.push({ status: 409, body: { error: { message: "SECRET-SERVER-TEXT", code: "conflict" } } });
@@ -941,16 +950,42 @@ if (textIncludes(elements.devices, "SECRET-SERVER-TEXT")) {
   console.error("server text shown");
   process.exit(15);
 }
+let shownOwner = null;
+walk(elements.devices, (node) => {
+  if (node.className === "shown-owner") shownOwner = node;
+});
+if (!shownOwner || shownOwner.textContent !== "Owner: Latest") {
+  console.error("409 card", shownOwner && shownOwner.textContent);
+  process.exit(21);
+}
+planned.push({ status: 422, body: { error: { code: "validation", fields: { notes: "too_long" } } } });
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const refill = JSON.parse(network.filter((item) => item.method === "POST").pop().body);
+if (refill.updated_at !== "2026-11-10T02:00:00Z") {
+  console.error("409 stamp", refill.updated_at);
+  process.exit(22);
+}
 const beforeCancel = network.length;
 let cancel = null;
 let add = null;
+let criticality = null;
+let removeTag = null;
 walk(form, (node) => {
   if (node.textContent === "Cancel") cancel = node;
   if (node.textContent === "Add tag") add = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Criticality") criticality = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Remove tag") removeTag = node;
 });
+if (!criticality || !removeTag) {
+  console.error("missing criticality or remove");
+  process.exit(23);
+}
 for (const fn of form.listeners.keydown || []) {
   fn({ key: "Enter", target: cancel, preventDefault() {} });
   fn({ key: "Enter", target: add, preventDefault() {} });
+  fn({ key: "Enter", target: criticality, preventDefault() {} });
+  fn({ key: "Enter", target: removeTag, preventDefault() {} });
 }
 if (network.length !== beforeCancel) {
   console.error("enter on a button saved");
@@ -1001,6 +1036,183 @@ walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
 if (!text.includes("SavedOwner")) {
   console.error("card", text);
   process.exit(18);
+}
+
+// A fresh scan, so the checks below are not tangled with the editor above.
+const left = {
+  ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
+  owner: "Ada", location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", open_ports: [], findings: [],
+};
+const right = {
+  ip: "10.1.0.3", mac: "aa:bb:cc:dd:ee:03", hostname: "printer", trusted: false,
+  owner: "Bea", location: "Hall", tags: ["print"], notes: "",
+  criticality: "low", open_ports: [], findings: [],
+};
+function inventoryItem(device, owner, stamp) {
+  return {
+    key: device.mac, key_type: "mac", updated_at: stamp,
+    owner, location: device.location, tags: device.tags.slice(),
+    notes: device.notes, criticality: device.criticality,
+  };
+}
+nextStatus = 200;
+nextBody = { items: [
+  inventoryItem(left, "Ada", "2026-11-12T00:00:00Z"),
+  inventoryItem(right, "Bea", "2026-11-12T00:00:00Z"),
+] };
+context.showScan({
+  id: 11, subnet: "10.1.0.0/24", started_at: "2026-11-12T00:00:00Z", demo: true,
+  devices: [left, right],
+}, null);
+const editors = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") editors.push(node); });
+if (editors.length !== 2) {
+  console.error("editors", editors.length);
+  process.exit(24);
+}
+editors[0].open = true;
+for (const fn of editors[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let ada = null;
+walk(editors[0], (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ada = node;
+});
+if (!ada || ada.value !== "Ada") {
+  console.error("ada", ada && ada.value);
+  process.exit(25);
+}
+ada.value = "keep-a";
+for (const fn of ada.listeners.input || []) fn();
+editors[1].open = true;
+for (const fn of editors[1].listeners.toggle || []) fn();
+editors[1].open = false;
+for (const fn of editors[1].listeners.toggle || []) fn();
+elements["tag-filter"].value = "missing";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "keep-a") || !String(elements.message.textContent || "").includes("Save or cancel")) {
+  console.error("other card cleared the edit", ada.value, elements.message.textContent);
+  process.exit(26);
+}
+for (const fn of editors[0].listeners.keydown || []) {
+  // Escape is listened for on the form, which is inside the details.
+}
+let adaForm = null;
+walk(editors[0], (node) => { if (node.className === "asset-form") adaForm = node; });
+for (const fn of adaForm.listeners.keydown || []) fn({ key: "Escape", target: ada, preventDefault() {} });
+elements["tag-filter"].value = "no-such-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  console.error("escape left the editor dirty");
+  process.exit(27);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+const again = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") again.push(node); });
+again[0].open = true;
+for (const fn of again[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let ownerBox = null;
+let saveBox = null;
+let formBox = null;
+walk(again[0], (node) => {
+  if (node.className === "asset-form") formBox = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ownerBox = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") saveBox = node;
+});
+ownerBox.value = "typed";
+for (const fn of ownerBox.listeners.input || []) fn();
+let cancelBox = null;
+walk(formBox, (node) => { if (node.textContent === "Cancel") cancelBox = node; });
+for (const fn of cancelBox.listeners.click || []) fn();
+elements["tag-filter"].value = "no-such-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  console.error("cancel left the editor dirty");
+  process.exit(28);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+const third = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") third.push(node); });
+third[0].open = true;
+for (const fn of third[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+walk(third[0], (node) => {
+  if (node.className === "asset-form") formBox = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ownerBox = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") saveBox = node;
+});
+const postsAtEdit = network.filter((item) => item.method === "POST").length;
+ownerBox.value = "x".repeat(81);
+for (const fn of saveBox.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!textIncludes(formBox, "This is too long.") || network.filter((item) => item.method === "POST").length !== postsAtEdit) {
+  console.error("client length");
+  process.exit(29);
+}
+ownerBox.value = "Ada";
+for (const fn of ownerBox.listeners.input || []) fn();
+let tagField = null;
+let addBox = null;
+walk(formBox, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Add a tag") tagField = node;
+  if (node.textContent === "Add tag") addBox = node;
+});
+for (let index = 1; index <= 9; index += 1) {
+  tagField.value = "t" + index;
+  for (const fn of addBox.listeners.click || []) fn();
+}
+tagField.value = "overflow";
+for (const fn of addBox.listeners.click || []) fn();
+let chips = null;
+walk(formBox, (node) => { if (node.className === "tag-chips") chips = node; });
+if (!textIncludes(formBox, "Too many tags.") || textIncludes(chips, "overflow")) {
+  console.error("tag cap");
+  process.exit(30);
+}
+nextStatus = 422;
+nextBody = { error: { code: "validation", fields: { owner: "invalid" } } };
+const postsAtDouble = network.filter((item) => item.method === "POST").length;
+for (const fn of saveBox.listeners.click || []) fn();
+for (const fn of saveBox.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (network.filter((item) => item.method === "POST").length !== postsAtDouble + 1) {
+  console.error("double click");
+  process.exit(32);
+}
+const postsAtEnter = network.filter((item) => item.method === "POST").length;
+for (const fn of formBox.listeners.keydown || []) fn({ key: "Enter", target: ownerBox, preventDefault() {} });
+await new Promise((resolve) => setTimeout(resolve, 0));
+const entered = network.filter((item) => item.method === "POST");
+if (entered.length !== postsAtEnter + 1 || JSON.parse(entered[entered.length - 1].body).owner !== "Ada") {
+  console.error("enter owner", entered.length);
+  process.exit(31);
+}
+cancelBox = null;
+walk(formBox, (node) => { if (node.textContent === "Cancel") cancelBox = node; });
+for (const fn of cancelBox.listeners.click || []) fn();
+const getsBefore = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices")).length;
+nextStatus = 200;
+nextBody = { items: [inventoryItem(left, "FromEight", "2026-11-13T00:00:00Z")] };
+context.showScan({
+  id: 12, subnet: "10.1.0.0/24", started_at: "2026-11-13T00:00:00Z", demo: true,
+  devices: [left],
+}, null);
+let switched = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") switched = node; });
+switched.open = true;
+for (const fn of switched.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let switchedOwner = null;
+walk(switched, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") switchedOwner = node;
+});
+const getsAfter = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices")).length;
+if (!switchedOwner || switchedOwner.value !== "FromEight" || getsAfter <= getsBefore) {
+  console.error("stale inventory cache", switchedOwner && switchedOwner.value, getsAfter, getsBefore);
+  process.exit(33);
 }
 function textIncludes(node, needle) {
   let found = false;
@@ -2611,7 +2823,8 @@ vm.runInContext(app, context);
 const payload = "<script>alert(1)</script>";
 const allow = new Set(["device", "unknown", "kind", "meta", "ports", "port", "findings",
   "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary",
-  "asset-editor", "asset-editor-body", "asset-form", "tag-chips", "tag-chip", "asset-actions", "asset-error"]);
+  "asset-editor", "asset-editor-body", "asset-form", "tag-chips", "tag-chip", "asset-actions", "asset-error",
+  "shown-owner", "shown-location", "shown-criticality", "shown-tags", "shown-notes"]);
 function walk(node, visit) {
   if (!node) return;
   if (node.nodeType === 3) { visit(node); return; }

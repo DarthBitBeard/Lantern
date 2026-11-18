@@ -34,6 +34,8 @@ from .assets import (
     get_asset,
     normalize_mac,
     resolve_asset_key,
+    _same_instant,
+    _stamp_checked,
     set_asset,
     stored_tags,
     strip_for_text,
@@ -54,12 +56,14 @@ from .store import (
     get_trusted,
     apply_trust,
     ip_sort_key,
+    _now,
     latest_scan_id,
     list_scans,
     load_scan,
     previous_scan_id,
     CorruptScanError,
     set_trusted,
+    write_trusted,
 )
 
 API_VERSION = 1
@@ -178,6 +182,50 @@ def _text_code(value, limit: int):
     if len(value) > limit:
         return _FieldCode("too_long")
     return value
+
+
+def _touch_asset_stamp(conn, asset_key: str, kind: str, current: dict | None) -> dict:
+    """Move ``updated_at`` without changing inventory fields."""
+    now = _now()
+    if current is None:
+        conn.execute(
+            "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
+            " VALUES (?, ?, NULL, NULL, '[]', NULL, NULL, ?)",
+            (asset_key, kind, now),
+        )
+    else:
+        conn.execute(
+            "UPDATE assets SET updated_at = ? WHERE asset_key = ?",
+            (now, asset_key),
+        )
+    saved = get_asset(conn, asset_key)
+    if saved is None:
+        raise V1Error(500, "server_error")
+    return saved
+
+
+def _write_label_with_stamp(conn, asset_key, kind, seen, writing_trust, bare, label, trusted):
+    """Compare the stamp and write a label in one reserved transaction."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = get_asset(conn, asset_key)
+        stored_at = current["updated_at"] if current else None
+        if not _same_instant(stored_at, seen):
+            raise AssetConflict()
+        _stamp_checked()
+        if writing_trust:
+            write_trusted(conn, bare, label if isinstance(label, str) else None, trusted)
+            saved = _touch_asset_stamp(conn, asset_key, kind, current)
+        else:
+            saved = current or {
+                "owner": None, "location": None, "tags": [], "criticality": None,
+                "notes": None, "updated_at": None,
+            }
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return saved
 
 
 def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
@@ -317,6 +365,21 @@ def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
             kwargs[name] = parsed[name]
     if "tags" in parsed:
         kwargs["tags"] = parsed["tags"]
+    bare = asset_key.split(":", 1)[1]
+    label = None
+    trusted = False
+    writing_trust = False
+    if kind == "mac":
+        info = get_trusted(conn).get(bare) or {}
+        label = info.get("label")
+        trusted = bool(info.get("trusted"))
+        if "label" in parsed or "trusted" in parsed:
+            writing_trust = True
+            if "label" in parsed:
+                label = parsed["label"]
+            if "trusted" in parsed:
+                trusted = bool(parsed["trusted"])
+
     if kwargs or (clears and current is not None):
         try:
             saved = set_asset(
@@ -327,28 +390,22 @@ def apply_asset_update(conn, raw_key: str, body: dict) -> dict:
             raise V1Error(409, "conflict") from None
         except ValueError as exc:
             raise V1Error(422, "validation", {"request": "too_many"}) from exc
-    else:
-        stored_at = current["updated_at"] if current else None
-        if _instant(stored_at) != _instant(seen):
-            raise V1Error(409, "conflict")
-        saved = current or {
-            "owner": None, "location": None, "tags": [], "criticality": None,
-            "notes": None, "updated_at": None,
-        }
-
-    bare = asset_key.split(":", 1)[1]
-    label = None
-    trusted = False
-    if kind == "mac":
-        info = get_trusted(conn).get(bare) or {}
-        label = info.get("label")
-        trusted = bool(info.get("trusted"))
-        if "label" in parsed or "trusted" in parsed:
-            if "label" in parsed:
-                label = parsed["label"]
-            if "trusted" in parsed:
-                trusted = bool(parsed["trusted"])
+        if writing_trust:
             set_trusted(conn, bare, label if isinstance(label, str) else None, trusted)
+            info = get_trusted(conn).get(bare) or {}
+            label = info.get("label")
+            trusted = bool(info.get("trusted"))
+    else:
+        # Label and trusted have no inventory field, so the stamp compare
+        # shares the transaction with the trust write. A second save of the
+        # same stamp then conflicts.
+        try:
+            saved = _write_label_with_stamp(
+                conn, asset_key, kind, seen, writing_trust, bare, label, trusted,
+            )
+        except AssetConflict:
+            raise V1Error(409, "conflict") from None
+        if writing_trust:
             info = get_trusted(conn).get(bare) or {}
             label = info.get("label")
             trusted = bool(info.get("trusted"))

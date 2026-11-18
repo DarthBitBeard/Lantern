@@ -383,26 +383,97 @@ class AssetWriteTests(unittest.TestCase):
         self.assertEqual(headers["Allow"], "GET, HEAD")
         self.assertNotIn("access-control", body.lower())
 
+    def _race_same_stamp(self, first, second):
+        """Hold the first write between its stamp check and its write.
+
+        The second write runs while the first is paused. With one shared
+        transaction the second blocks, then loses. Without that transaction
+        the second commits and the first writes anyway.
+        """
+        import lantern.assets as assets
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def hook():
+            started.set()
+            release.wait(5)
+
+        results = {}
+
+        def run(name, call):
+            results[name] = call()
+
+        previous = assets._after_stamp_check
+        assets._after_stamp_check = hook
+        try:
+            thread_a = threading.Thread(target=run, args=("a", first))
+            thread_b = threading.Thread(target=run, args=("b", second))
+            thread_a.start()
+            self.assertTrue(started.wait(5), "the first write did not reach the stamp check")
+            thread_b.start()
+            # The second write is blocked on the reserved lock. Release the
+            # first only after giving the second time to arrive.
+            thread_b.join(0.5)
+            release.set()
+            thread_a.join(5)
+            thread_b.join(5)
+        finally:
+            assets._after_stamp_check = previous
+            release.set()
+        self.assertEqual(sorted(results), ["a", "b"], results)
+        statuses = sorted(item[0] for item in results.values())
+        self.assertEqual(statuses, [200, 409], results)
+        winner = json.loads(results["a"][1] if results["a"][0] == 200 else results["b"][1])
+        loser = json.loads(results["a"][1] if results["a"][0] == 409 else results["b"][1])
+        self.assertEqual(loser["error"]["code"], "conflict")
+        return winner
+
     def test_one_of_two_same_stamp_writes_wins(self):
         mac = "aa:bb:cc:dd:ee:10"
         status, body, _ = self._post(mac, {"updated_at": None, "owner": "Sam"}, token=self.token)
         self.assertEqual(status, 200, body)
         stamp = json.loads(body)["updated_at"]
-        results = []
-
-        def once(owner):
-            results.append(self._post(mac, {"updated_at": stamp, "owner": owner}, token=self.token))
-
-        threads = [threading.Thread(target=once, args=(name,)) for name in ("One", "Two")]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        statuses = sorted(item[0] for item in results)
-        self.assertEqual(statuses, [200, 409], results)
-        winner = json.loads([item[1] for item in results if item[0] == 200][0])
+        winner = self._race_same_stamp(
+            lambda: self._post(mac, {"updated_at": stamp, "owner": "One"}, token=self.token),
+            lambda: self._post(mac, {"updated_at": stamp, "owner": "Two"}, token=self.token),
+        )
         self.assertEqual(self._asset("mac:" + mac)["owner"], winner["owner"])
-        self.assertEqual(json.loads([item[1] for item in results if item[0] == 409][0])["error"]["code"], "conflict")
+        self.assertIn(winner["owner"], ("One", "Two"))
+
+    def test_a_label_only_write_checks_the_stamp_inside_the_transaction(self):
+        mac = "aa:bb:cc:dd:ee:10"
+        status, body, _ = self._post(
+            mac, {"updated_at": None, "label": "First", "trusted": True}, token=self.token,
+        )
+        self.assertEqual(status, 200, body)
+        first = json.loads(body)
+        self.assertEqual(first["label"], "First")
+        self.assertIsNotNone(first["updated_at"])
+        status, body, _ = self._post(
+            mac, {"updated_at": None, "label": "Stale"}, token=self.token,
+        )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "conflict")
+        winner = self._race_same_stamp(
+            lambda: self._post(mac, {"updated_at": first["updated_at"], "label": "One"}, token=self.token),
+            lambda: self._post(mac, {"updated_at": first["updated_at"], "trusted": False}, token=self.token),
+        )
+        conn = connect(self.db)
+        try:
+            info = get_trusted(conn)[mac]
+        finally:
+            conn.close()
+        self.assertEqual(info["label"], winner["label"])
+        self.assertEqual(bool(info["trusted"]), bool(winner["trusted"]))
+
+    def test_device_list_accepts_1024_and_refuses_1025(self):
+        status, body, _ = self._request("GET", "/api/v1/devices?limit=1024", token=self.token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["limit"], 1024)
+        status, body, _ = self._request("GET", "/api/v1/devices?limit=1025", token=self.token)
+        self.assertEqual(status, 400, body)
+        self.assertEqual(json.loads(body)["error"]["code"], "bad_request")
 
     def test_a_null_stamp_over_a_stored_row_is_409(self):
         mac = "aa:bb:cc:dd:ee:10"

@@ -28,6 +28,17 @@ class AssetConflict(Exception):
     """The stored ``updated_at`` is not the one the caller last read."""
 
 
+# A test sets this to pause after the stamp compare and before the write.
+# It runs inside the same ``BEGIN IMMEDIATE`` as that compare.
+_after_stamp_check = None
+
+
+def _stamp_checked() -> None:
+    callback = _after_stamp_check
+    if callback is not None:
+        callback()
+
+
 def _same_instant(stored, expected) -> bool:
     """``Z`` and ``+00:00`` are the same instant. ``None`` only matches ``None``."""
     def norm(value):
@@ -296,6 +307,9 @@ def set_asset(
             stored_at = current["updated_at"] if current else None
             if not _same_instant(stored_at, expected_updated_at):
                 raise AssetConflict()
+            # Still holding the reserved lock. A second writer blocks here
+            # until this transaction commits, then sees the new stamp.
+            _stamp_checked()
         if current is None:
             count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             if count >= ASSET_ROW_CAP:

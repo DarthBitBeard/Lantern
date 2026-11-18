@@ -301,7 +301,7 @@ function switchPortLine(device) {
   return node("p", { text });
 }
 
-let editorDirty = false;
+const dirtyEditors = new Set();
 let v1Items = null;
 let v1ScanId = null;
 
@@ -369,20 +369,20 @@ function inventoryFor(device, items) {
   return items.find((item) => item && item.key_type === "ip" && item.key === device.ip) || null;
 }
 
-function assetEditor(device) {
+function assetEditor(device, refreshShown) {
   const details = node("details", { className: "asset-editor" });
   details.appendChild(node("summary", { text: "Edit inventory" }));
   const body = node("div", { className: "asset-editor-body" });
   body.appendChild(node("p", { className: "hint", text: "Open to edit owner, location, tags, criticality, and notes." }));
   details.appendChild(body);
   details.addEventListener("toggle", () => {
-    if (details.open) fillAssetEditor(device, body);
-    else editorDirty = false;
+    if (details.open) fillAssetEditor(device, body, details, refreshShown);
+    else dirtyEditors.delete(details);
   });
   return details;
 }
 
-function fillAssetEditor(device, body) {
+function fillAssetEditor(device, body, details, refreshShown) {
   mount(body, [node("p", { className: "hint", text: "Loading inventory…" })]);
   loadInventory().then((items) => {
     const record = inventoryFor(device, items);
@@ -390,11 +390,11 @@ function fillAssetEditor(device, body) {
       mount(body, [node("p", { className: "asset-error", text: "This device is not available to edit." })]);
       return;
     }
-    mount(body, [assetForm(device, record)]);
+    mount(body, [assetForm(device, record, details, refreshShown)]);
   });
 }
 
-function assetForm(device, record) {
+function assetForm(device, record, details, refreshShown) {
   const error = node("p", { className: "asset-error", text: "" });
   const owner = node("input", {
     type: "text", value: record.owner || "",
@@ -424,7 +424,7 @@ function assetForm(device, record) {
   const form = node("div", { className: "asset-form" });
 
   function markDirty() {
-    editorDirty = true;
+    dirtyEditors.add(details);
   }
   function drawChips() {
     mount(chips, tags.map((tag) => {
@@ -481,7 +481,7 @@ function assetForm(device, record) {
   });
 
   function cancel() {
-    editorDirty = false;
+    dirtyEditors.delete(details);
     error.textContent = "";
     renderDevices();
   }
@@ -500,6 +500,12 @@ function assetForm(device, record) {
     criticality.value = record.criticality || "";
     tags.splice(0, tags.length, ...record.tags.map((tag) => String(tag)));
     drawChips();
+    device.owner = record.owner;
+    device.location = record.location;
+    device.notes = record.notes;
+    device.criticality = record.criticality;
+    device.tags = record.tags.slice();
+    if (typeof refreshShown === "function") refreshShown();
   }
 
   async function save() {
@@ -542,14 +548,14 @@ function assetForm(device, record) {
       device.tags = Array.isArray(data.tags) ? data.tags : [];
       device.criticality = data.criticality || null;
       forgetInventory();
-      editorDirty = false;
+      dirtyEditors.delete(details);
       setMessage("Saved.");
       renderDevices();
       return;
     }
     if (response.status === 409) {
       forgetInventory();
-      editorDirty = false;
+      dirtyEditors.delete(details);
       const items = await loadInventory();
       const latest = inventoryFor(device, items);
       if (latest) applyRecord(latest);
@@ -573,7 +579,7 @@ function assetForm(device, record) {
       return;
     }
     if (event.key !== "Enter" || event.target === notes || event.target === tagInput) return;
-    if (event.target === cancelButton || event.target === addButton) return;
+    if (event.target === cancelButton || event.target === addButton || event.target === criticality) return;
     if (event.target && event.target.getAttribute && event.target.getAttribute("aria-label") === "Remove tag") return;
     event.preventDefault();
     save();
@@ -620,18 +626,23 @@ function renderDevice(device) {
   const meta = [device.ip, mac, device.hostname].filter(Boolean).join(" · ");
   children.push(node("p", { className: "meta", text: meta }));
   if (device.label && device.hostname) children.push(node("p", { text: `Hostname: ${device.hostname}` }));
-  if (device.owner) children.push(node("p", { text: `Owner: ${device.owner}` }));
-  if (device.location) children.push(node("p", { text: `Location: ${device.location}` }));
+  const shown = {};
+  function remember(name, el) {
+    shown[name] = el;
+    children.push(el);
+  }
+  if (device.owner) remember("owner", node("p", { className: "shown-owner", text: `Owner: ${device.owner}` }));
+  if (device.location) remember("location", node("p", { className: "shown-location", text: `Location: ${device.location}` }));
   if (device.criticality) {
-    children.push(node("p", {}, [
+    remember("criticality", node("p", { className: "shown-criticality" }, [
       "Criticality: ",
       badge(device.criticality, CRITICALITY_CLASS),
     ]));
   }
   if (Array.isArray(device.tags) && device.tags.length) {
-    children.push(node("p", { text: `Tags: ${device.tags.join(", ")}` }));
+    remember("tags", node("p", { className: "shown-tags", text: `Tags: ${device.tags.join(", ")}` }));
   }
-  if (device.notes) children.push(node("p", { text: `Notes: ${device.notes}` }));
+  if (device.notes) remember("notes", node("p", { className: "shown-notes", text: `Notes: ${device.notes}` }));
   children.push(switchPortLine(device));
   if (worst) {
     children.push(node("p", {}, ["Worst risk: ", badge(worst, BADGE_CLASS)]));
@@ -673,7 +684,27 @@ function renderDevice(device) {
     }));
   }
   const card = node("article", { className: device.trusted ? "device" : "device unknown" }, children);
-  card.appendChild(assetEditor(device));
+  function refreshShown() {
+    const specs = [
+      ["owner", device.owner ? `Owner: ${device.owner}` : ""],
+      ["location", device.location ? `Location: ${device.location}` : ""],
+      ["criticality", device.criticality ? `Criticality: ${device.criticality}` : ""],
+      ["tags", Array.isArray(device.tags) && device.tags.length ? `Tags: ${device.tags.join(", ")}` : ""],
+      ["notes", device.notes ? `Notes: ${device.notes}` : ""],
+    ];
+    for (const [name, text] of specs) {
+      let el = shown[name];
+      if (!el) {
+        el = node("p", { className: "shown-" + name });
+        shown[name] = el;
+        const editor = card.querySelector ? card.querySelector("details") : null;
+        if (card.insertBefore) card.insertBefore(el, editor);
+        else card.appendChild(el);
+      }
+      el.textContent = text;
+    }
+  }
+  card.appendChild(assetEditor(device, refreshShown));
   return card;
 }
 
@@ -697,7 +728,7 @@ function fillTagChoices() {
 
 function renderDevices() {
   const el = $("devices");
-  if (editorDirty) {
+  if (dirtyEditors.size) {
     setMessage("Save or cancel the inventory editor before the list changes.", true);
     return;
   }
@@ -737,7 +768,9 @@ function bindDeviceActions(el) {
 }
 
 function showScan(scan, diff) {
-  if (!scan || scan.id !== v1ScanId) forgetInventory();
+  // A missing scan drops the cache. A different scan id is refused by
+  // loadInventory, which only reuses items stored for that same id.
+  if (!scan) forgetInventory();
   currentScan = scan;
   currentDiff = diff;
   renderSummary(currentScan, currentDiff);
