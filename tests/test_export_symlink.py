@@ -295,12 +295,18 @@ class ExportSymlinkTests(unittest.TestCase):
         real_open = os.open
 
         def opener(path, flags, mode=0o777, *, dir_fd=None):
-            name = path if isinstance(path, str) else Path(path).name
+            name = Path(path).name
             if name == "out.json":
-                raise OSError(errno.ELOOP, "loop")
+                error = OSError(errno.ELOOP, "loop", str(path))
+                error.errno = errno.ELOOP
+                raise error
+            if dir_fd is None:
+                return real_open(path, flags, mode)
             return real_open(path, flags, mode, dir_fd=dir_fd)
 
-        with _OpenPatch(opener):
+        # Patching os.open drops the dir_fd fast path, which is the Windows
+        # path. The refusal is still the output file, not the directory.
+        with mock.patch("lantern.v1.os.open", opener):
             with self.assertRaises(ExportPathError) as caught:
                 write_export_file(str(folder / "out.json"), b"x", force=False)
         message = str(caught.exception)
@@ -309,16 +315,21 @@ class ExportSymlinkTests(unittest.TestCase):
 
         secret = folder / "secret"
         secret.write_bytes(b"secret")
+        link = folder / "late.json"
+        try:
+            link.symlink_to(secret)
+        except OSError:
+            return
+        link.unlink()
 
         def plant(path, flags, mode=0o777, *, dir_fd=None):
-            name = path if isinstance(path, str) else Path(path).name
-            if name == "late.json":
-                link = folder / "late.json"
-                if not link.is_symlink():
-                    link.symlink_to(secret)
+            if Path(path).name == "late.json" and not link.is_symlink():
+                link.symlink_to(secret)
+            if dir_fd is None:
+                return real_open(path, flags, mode)
             return real_open(path, flags, mode, dir_fd=dir_fd)
 
-        with _OpenPatch(plant):
+        with mock.patch("lantern.v1.os.open", plant):
             with self.assertRaises(ExportPathError) as caught:
                 write_export_file(str(folder / "late.json"), b"new", force=False)
         message = str(caught.exception)
@@ -372,11 +383,11 @@ class ExportSymlinkTests(unittest.TestCase):
         folder.mkdir()
         dest = folder / "out.json"
         write_export_file(str(dest), b"ok", force=False)
-        other_case = Path(str(dest).swapcase()) if str(dest) != str(dest).swapcase() else dest
-        if other_case == dest:
+        swapped = str(dest).swapcase()
+        if swapped == str(dest):
             skipped.append("letter case")
         else:
-            write_export_file(str(other_case), b"case", force=True)
+            write_export_file(swapped, b"case", force=True)
             self.assertEqual(dest.read_bytes(), b"case")
             ran.append("letter case")
 
