@@ -108,9 +108,16 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertIn(strip_for_text(os.path.realpath(tmp_link)), message)
         self.assertNotIn("\u202e", message)
         self.assertFalse((real_tmp / "direct.json").exists())
-        readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")
-        self.assertIn("/private/tmp", readme)
-        self.assertIn("export directory itself", readme)
+        root = Path(__file__).resolve().parents[1]
+        export_doc = (root / "docs" / "export.md").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("/private/tmp", export_doc)
+        self.assertIn("export directory itself", export_doc)
+        self.assertIn("replaces only a regular file", export_doc)
+        self.assertNotIn("directory reached through a symlink", export_doc)
+        self.assertNotIn("/private/tmp", readme)
+        self.assertNotIn("export directory itself", readme)
+        self.assertNotIn("directory reached through a symlink", readme)
 
     def test_the_final_directory_symlink_is_refused(self):
         target = self.root / "target"
@@ -210,6 +217,67 @@ class ExportSymlinkTests(unittest.TestCase):
                 write_export_file(str(slot / "out.json"), b"new", force=False)
         self.assertEqual((decoy / "out.json").read_bytes(), b"keep")
         self.assertFalse((self.root / "slot-real" / "out.json").exists())
+
+    def test_an_interrupt_inside_create_does_not_follow_a_swapped_directory(self):
+        # The swap happens inside the exclusive create. Cleanup must unlink
+        # through the directory fd. A path unlink would delete the decoy.
+        if os.open not in getattr(os, "supports_dir_fd", ()):
+            self.skipTest("dir_fd is required so cleanup stays on the opened directory")
+        slot = self.root / "slot"
+        slot.mkdir()
+        decoy = self.root / "decoy"
+        decoy.mkdir()
+        (decoy / "out.json").write_bytes(b"keep")
+        real_open = os.open
+
+        def opener(path, flags, mode=0o777, *, dir_fd=None):
+            name = path.name if isinstance(path, Path) else str(path)
+            if name == "out.json":
+                os.rename(slot, self.root / "slot-real")
+                os.symlink(decoy, slot, target_is_directory=True)
+                raise KeyboardInterrupt
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with _OpenPatch(opener):
+            with self.assertRaises(KeyboardInterrupt):
+                write_export_file(str(slot / "out.json"), b"new", force=False)
+        self.assertEqual((decoy / "out.json").read_bytes(), b"keep")
+        self.assertFalse((self.root / "slot-real" / "out.json").exists())
+
+    def test_an_interrupt_inside_temp_open_unlinks_the_opened_directory(self):
+        # After the directory is swapped, only the directory fd still names
+        # the temp file. A path unlink leaves that file behind.
+        if os.open not in getattr(os, "supports_dir_fd", ()):
+            self.skipTest("dir_fd is required for the POSIX temp file")
+        slot = self.root / "slot"
+        slot.mkdir()
+        decoy = self.root / "decoy"
+        decoy.mkdir()
+        (slot / "out.json").write_bytes(b"old")
+        moved = self.root / "slot-real"
+        real_open = os.open
+
+        def opener(path, flags, mode=0o777, *, dir_fd=None):
+            name = path.name if isinstance(path, Path) else str(path)
+            if name.startswith(".lantern-export-"):
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                os.close(fd)
+                os.rename(slot, moved)
+                os.symlink(decoy, slot, target_is_directory=True)
+                raise ExportInterrupted(signal.SIGINT)
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with _OpenPatch(opener):
+            with self.assertRaises(SystemExit) as caught:
+                write_export_file(str(slot / "out.json"), b"new", force=True)
+        self.assertEqual(caught.exception.code, 130)
+        self.assertEqual(list(moved.glob(".lantern-export-*")), [])
+        self.assertEqual((moved / "out.json").read_bytes(), b"old")
+        self.assertEqual(list(decoy.glob(".lantern-export-*")), [])
 
     def test_an_interrupt_inside_temp_open_removes_the_new_file(self):
         if os.open not in getattr(os, "supports_dir_fd", ()):
@@ -392,7 +460,8 @@ class ExportSymlinkTests(unittest.TestCase):
             ran.append("letter case")
 
         short = _short_path(folder)
-        if short is None:
+        short_existed = short is not None
+        if not short_existed:
             skipped.append("8.3 short name")
         else:
             write_export_file(str(Path(short) / "out.json"), b"short", force=True)
@@ -430,7 +499,8 @@ class ExportSymlinkTests(unittest.TestCase):
         # unittest captures stdout. Write past that so the Windows CI log shows it.
         print(
             "windows export path ran: " + (", ".join(ran) if ran else "none")
-            + "; skipped: " + (", ".join(skipped) if skipped else "none"),
+            + "; skipped: " + (", ".join(skipped) if skipped else "none")
+            + "; 8.3 short name existed: " + ("yes" if short_existed else "no"),
             file=sys.__stderr__,
         )
 
