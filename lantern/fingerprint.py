@@ -91,12 +91,11 @@ def _strip_ends(token: str, *, marks: str = "()?") -> str:
 
 
 def _version(value: str | None) -> str | None:
-    """A version is digits and ``._+~-``. ``?`` is not a version character.
+    """A version is digits and ``._+~-``. ``?`` and ``/`` are not version characters.
 
-    Sendmail writes ``8.15.2/8.15.2``. The part before ``/`` is the version.
+    Sendmail writes ``8.15.2/8.15.2``. The SMTP parser keeps the text before
+    ``/`` and then calls this check. Other protocols are not cut on ``/``.
     """
-    if value and "/" in value:
-        value = value.split("/", 1)[0]
     if not value or len(value) > VERSION_CAP or not value[0].isdigit():
         return None
     for char in value:
@@ -184,5 +183,7 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
             if index + 1 < len(raw_tokens):
                 # Parentheses wrap a version. ``?`` is left so garbage is rejected.
                 version = _strip_ends(raw_tokens[index + 1], marks="()")
+                if service_hint == "smtp":
+                    version = version.split("/", 1)[0]
             return _result(service_hint, name, version, line)
     return _result(service_hint, None, None, line)
