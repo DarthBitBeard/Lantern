@@ -1196,11 +1196,20 @@ def _write_fd(fd: int, payload: bytes) -> None:
         os.fchmod(fd, 0o600)
 
 
-def _unlink_quiet(path: Path | None) -> None:
+def _unlink_quiet(path: Path | None, *, dir_fd: int | None = None) -> None:
+    """Remove ``path``. With ``dir_fd``, unlink that name in the opened directory.
+
+    A path-based unlink follows a directory that was replaced with a
+    symlink after the check. The directory descriptor still names the
+    directory that was opened, so the cleanup stays there.
+    """
     if path is None:
         return
     try:
-        path.unlink(missing_ok=True)
+        if dir_fd is not None:
+            os.unlink(path.name, dir_fd=dir_fd)
+        else:
+            path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1353,7 +1362,7 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                             if fd is not None:
                                 os.close(fd)
                                 fd = None
-                            _unlink_quiet(destination)
+                            _unlink_quiet(destination, dir_fd=directory)
                             partial = None
                         raise
                 finally:
@@ -1365,28 +1374,38 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
             else:
                 blocked = _block_termination()
                 fd = None
+                name = None
                 try:
                     try:
                         if directory is not None:
                             name = ".lantern-export-" + secrets.token_hex(8)
+                            # The name is known before open. An interrupt
+                            # inside open, after the file exists and before
+                            # the fd is returned, still has to unlink it.
+                            temporary_path = parent / name
                             create = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                             if hasattr(os, "O_NOFOLLOW"):
                                 create |= os.O_NOFOLLOW
                             if hasattr(os, "O_BINARY"):
                                 create |= os.O_BINARY
                             fd = os.open(name, create, 0o600, dir_fd=directory)
-                            temporary_path = parent / name
                         else:
                             fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
                             temporary_path = Path(temporary)
                     except BaseException as exc:
                         # Only the file this call created. Another
                         # ``.lantern-export-*`` in the directory is not ours.
-                        if fd is not None and not isinstance(exc, Exception):
-                            os.close(fd)
-                            fd = None
-                            _unlink_quiet(temporary_path)
-                            temporary_path = None
+                        # OSError means the exclusive create did not keep a
+                        # file, so that path must not be removed.
+                        if not isinstance(exc, Exception):
+                            if fd is not None:
+                                os.close(fd)
+                                fd = None
+                            if directory is not None and name is not None:
+                                _unlink_quiet(parent / name, dir_fd=directory)
+                            else:
+                                _unlink_quiet(temporary_path)
+                        temporary_path = None
                         raise
                 finally:
                     _unblock_termination(blocked)
@@ -1413,8 +1432,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
         interrupted = exc.signum
     finally:
         if not success:
-            _unlink_quiet(temporary_path)
-            _unlink_quiet(partial)
+            _unlink_quiet(temporary_path, dir_fd=directory)
+            _unlink_quiet(partial, dir_fd=directory)
         if directory is not None:
             os.close(directory)
     if interrupted is not None:

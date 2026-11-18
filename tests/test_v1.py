@@ -190,7 +190,9 @@ class CsvTests(unittest.TestCase):
 class PathTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name).resolve()
+        # Keep the path mkdtemp returned. Resolving it would hide an
+        # ancestor symlink such as macOS /var -> /private/var.
+        self.root = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -854,7 +856,9 @@ class CliExportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = str(Path(self.tmp.name) / "lantern.db")
-        self.root = Path(self.tmp.name).resolve()
+        # Keep the path mkdtemp returned. Resolving it would hide an
+        # ancestor symlink such as macOS /var -> /private/var.
+        self.root = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
