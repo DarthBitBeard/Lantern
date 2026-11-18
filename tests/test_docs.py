@@ -3,6 +3,7 @@
 import io
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -98,29 +99,57 @@ class DocLinkTests(unittest.TestCase):
         self.assertIn("init: true", compose)
         self.assertIn("LANTERN_HEALTH_PORT", docker)
         self.assertIn("127.0.0.1:8068", (ROOT / "README.md").read_text(encoding="utf-8"))
+        # The default in the probe must be the image CMD port. A test that
+        # sets LANTERN_HEALTH_PORT would still pass if this default changed.
+        image_port = re.search(r'"--port", "(\d+)"', docker)
+        default_port = re.search(r"LANTERN_HEALTH_PORT','(\d+)'", docker)
+        self.assertIsNotNone(image_port)
+        self.assertIsNotNone(default_port)
+        self.assertEqual(default_port.group(1), image_port.group(1))
+
+    def _run_healthcheck(self, command: str, env: dict) -> subprocess.CompletedProcess:
+        """Run the Dockerfile CMD the way Docker's shell form does.
+
+        The whole line is the command, so a wrapper such as ``|| true``
+        after the quoted Python is part of what runs. Windows CI has no
+        ``/bin/sh``; it runs the Python body and still rejects that wrapper.
+        """
+        if os.name != "nt":
+            shell = command
+            if shell.startswith("python "):
+                shell = shlex.quote(sys.executable) + shell[len("python"):]
+            return subprocess.run(
+                ["/bin/sh", "-c", shell], env=env, capture_output=True, text=True, timeout=5,
+            )
+        self.assertIsNone(re.search(r"\|\|", command))
+        match = re.search(r'python -c "([^"]+)"', command)
+        self.assertIsNotNone(match)
+        return subprocess.run(
+            [sys.executable, "-c", match.group(1)],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
 
     def test_healthcheck_fails_with_no_server_and_passes_when_one_listens(self):
         docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        match = re.search(r'CMD python -c "([^"]+)"', docker)
-        self.assertIsNotNone(match)
-        command = match.group(1)
+        line = next(
+            (item.strip() for item in docker.splitlines() if item.strip().startswith("CMD python")),
+            None,
+        )
+        self.assertIsNotNone(line)
+        command = line[len("CMD "):]
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         port = str(probe.getsockname()[1])
         probe.close()
         env = {**os.environ, "LANTERN_HEALTH_PORT": port}
-        missing = subprocess.run(
-            [sys.executable, "-c", command], env=env, capture_output=True, text=True, timeout=5,
-        )
+        missing = self._run_healthcheck(command, env)
         self.assertEqual(missing.returncode, 1, missing.stderr)
         server = socket.socket()
         server.bind(("127.0.0.1", int(port)))
         server.listen(1)
         threading.Thread(target=lambda: server.accept()[0].close(), daemon=True).start()
         self.addCleanup(server.close)
-        ready = subprocess.run(
-            [sys.executable, "-c", command], env=env, capture_output=True, text=True, timeout=5,
-        )
+        ready = self._run_healthcheck(command, env)
         self.assertEqual(ready.returncode, 0, ready.stderr)
 
 
@@ -185,15 +214,22 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(lines.slice(0, cut).join("\n"), context);
-const device = {
-  ip: "10.0.0.8", trusted: false, tags: [], notes: "needle",
-  open_ports: [], findings: [],
-};
-el("search").value = "x".repeat(200) + "needle";
+function device(notes) {
+  return {
+    ip: "10.0.0.8", trusted: false, tags: [], notes,
+    open_ports: [], findings: [],
+  };
+}
 el("filter").value = "all";
-if (context.deviceMatches(device)) process.exit(3);
+// Notes of 200 x's must match a query of those x's plus extra characters.
+// Without the cut, the extra characters stay in the query and do not match.
+el("search").value = "x".repeat(200) + "needle";
+if (!context.deviceMatches(device("x".repeat(200)))) process.exit(3);
+// A query of 200 x's must not match 199. A shorter cut would.
+el("search").value = "x".repeat(200);
+if (context.deviceMatches(device("x".repeat(199)))) process.exit(5);
 el("search").value = "  needle  ";
-if (!context.deviceMatches(device)) process.exit(4);
+if (!context.deviceMatches(device("needle"))) process.exit(4);
 """
         proc = subprocess.run(
             [node, "-e", script, str(ROOT / "lantern" / "web" / "app.js")],
