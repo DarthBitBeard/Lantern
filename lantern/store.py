@@ -1027,19 +1027,24 @@ def get_trusted(conn: sqlite3.Connection) -> dict[str, dict]:
     return trusted
 
 
-def set_trusted(conn: sqlite3.Connection, mac: str, label: str | None, trusted: bool) -> None:
-    """Label a device and mark it trusted or unknown. MAC is the key."""
+def write_trusted(conn: sqlite3.Connection, mac: str, label: str | None, trusted: bool) -> None:
+    """Insert or replace one trust row. The caller owns the transaction."""
     mac = (mac or "").strip().lower()
     if not mac:
         raise ValueError("A MAC address is required to trust a device.")
+    conn.execute(
+        "INSERT INTO trusted_devices (mac, label, trusted, updated_at)"
+        " VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(mac) DO UPDATE SET label=excluded.label,"
+        " trusted=excluded.trusted, updated_at=excluded.updated_at",
+        (mac, (label or "").strip() or None, 1 if trusted else 0, _now()),
+    )
+
+
+def set_trusted(conn: sqlite3.Connection, mac: str, label: str | None, trusted: bool) -> None:
+    """Label a device and mark it trusted or unknown. MAC is the key."""
     with conn:
-        conn.execute(
-            "INSERT INTO trusted_devices (mac, label, trusted, updated_at)"
-            " VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(mac) DO UPDATE SET label=excluded.label,"
-            " trusted=excluded.trusted, updated_at=excluded.updated_at",
-            (mac, (label or "").strip() or None, 1 if trusted else 0, _now()),
-        )
+        write_trusted(conn, mac, label, trusted)
 
 
 def apply_trust(scan: dict | None, trusted: dict[str, dict]) -> dict | None:
