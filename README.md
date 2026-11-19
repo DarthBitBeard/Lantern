@@ -98,7 +98,7 @@ Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <comma
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
-The database is schema 6. Opening an older file upgrades it in place and writes `.vN.bak` first. Schema 5 stores the gateway and what a device announced. Schema 6 stores the switch map. Details are in [Database and migrations](docs/running.md#database-and-migrations).
+The database is schema 7. Opening an older file upgrades it in place and writes `.vN.bak` first. Schema 5 stores the gateway and what a device announced. Schema 6 stores the switch map. The previous layout was schema 6, and schema 7 adds `service_fingerprints`, one row per parsed banner. Details are in [Database and migrations](docs/running.md#database-and-migrations).
 
 Lantern only scans private RFC1918 networks, at most 1024 addresses, and it does not guess passwords or send exploits. The full rules are in [Safety rules](docs/safety.md#safety-rules-enforced-in-code) and the [Threat model](docs/safety.md#threat-model).
 
