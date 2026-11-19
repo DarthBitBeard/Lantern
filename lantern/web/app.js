@@ -238,7 +238,7 @@ function renderDiff(scan, diff) {
 }
 
 function deviceMatches(device) {
-  const q = $("search").value.trim().toLowerCase();
+  const q = $("search").value.trim().toLowerCase().slice(0, 200);
   const filter = $("filter").value;
   if (filter === "unknown" && device.trusted) return false;
   if (filter === "trusted" && !device.trusted) return false;

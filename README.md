@@ -37,6 +37,17 @@ Both use the scan history in `%LOCALAPPDATA%\Lantern\lantern.db`. Uninstall from
 
 The installer and `lantern.exe` are not code-signed, so SmartScreen may warn "Windows protected your PC". Choose "More info", then "Run anyway", after checking the SHA-256 in the release notes. The build is `.github/workflows/windows-package.yml`, which installs, runs, and uninstalls the package on a clean runner.
 
+### Docker
+
+```bash
+docker build -t lantern .
+# Listens on 127.0.0.1:8068. The image has no token.
+# Point LANTERN_API_TOKEN_FILE at a mode-0400 file, or the process exits 2.
+docker compose up
+```
+
+The image HEALTHCHECK opens a TCP connection to `127.0.0.1:8068`, the port in the image command. It does not send a token. `LANTERN_HEALTH_HOST` and `LANTERN_HEALTH_PORT` change that pair when you also change the listen port. `docker-compose.yml` sets `init: true` so SIGTERM reaches Lantern.
+
 ### From source
 
 No third-party dependencies. Python 3.11 or newer.
@@ -344,16 +355,27 @@ What this version does, and what it does not do.
 - **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
 - **Not in this version:** device fingerprinting, a vulnerability database or matcher, and a watch mode or local alerts. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
 
-## Versioning and compatibility
+## Troubleshooting
 
-From 1.0.0, Lantern follows semantic versioning for the things scripts and other tools rely on:
+- **The dashboard exits 2 before it listens.** Strict auth is on, and there is no terminal to print a token. Set `LANTERN_API_TOKEN_FILE` to a regular file, mode 0400 or 0600, that contains one token. Docker has no terminal, so the same exit 2 means the token file or `LANTERN_API_TOKEN` is missing. Do not put the token in the image or in `docker-compose.yml`.
+- **`Refusing to change it (schema …)`.** The database was written by a newer Lantern. This copy will not migrate it backwards. Upgrade Lantern, or restore the `.vN.bak` that the newer copy left beside the file.
+- **Database schema.** The database is at schema 7 after the upgrade; the previous layout was schema 6.
+- **`The saved scan could not be read.`** A stored scan row is not valid JSON, or the JSON has the wrong shape. The command exits 2. The dashboard returns HTTP 500 with that same line.
+- **A subnet is refused.** Only networks fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` are accepted, and a run is at most 1024 addresses. Public, loopback, and link-local ranges are refused.
 
-- **`/api/v1`**: routes, parameters, and JSON field names stay compatible for every 1.x release. New fields and routes may be added; nothing is renamed or removed. A breaking change would ship as `/api/v2` alongside v1, with `api_version` set to 2.
-- **Command line**: command names, flags, exit codes (0 ok, 1 partial or not found, 2 refused or usage error), and `--format json` output stay compatible for 1.x. Plain-text output is for people and may change.
-- **Export**: JSON and CSV column names stay compatible for 1.x.
-- **Database**: a newer 1.x opens any older Lantern database and upgrades it in place after writing a `.vN.bak` copy beside it. Migrations only move forward, so an older Lantern refuses a database that a newer one has upgraded. Keep the backup if you may need to roll back.
+## More detail
 
-The dashboard's own `/api/*` routes (without `v1`) serve the web page and may change in any release. Use `/api/v1` from scripts.
+- [Run and debug](docs/running.md#run-and-debug)
+- [Scan your own network](docs/scanning.md#scan-your-own-network)
+- [Device inventory](docs/inventory.md#device-inventory)
+- [Network map](docs/network-map.md#network-map) and [Switch map (managed switches)](docs/network-map.md#switch-map-managed-switches)
+- [Export and `/api/v1`](docs/export.md#export-and-apiv1)
+- [Safety rules, enforced in code](docs/safety.md#safety-rules-enforced-in-code)
+- [Threat model](docs/safety.md#threat-model)
+- [Web dashboard](docs/dashboard.md#web-dashboard)
+- [What it scans](docs/ports.md#what-it-scans)
+- [Limitations](docs/limitations.md#limitations)
+- [Versioning and compatibility](docs/versioning.md#versioning-and-compatibility)
 
 ## Tests
 
