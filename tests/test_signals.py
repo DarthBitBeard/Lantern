@@ -120,12 +120,8 @@ class InterruptTests(unittest.TestCase):
 
 
 def _real_tempdir():
-    """A directory whose path is not reached through a symlink.
-
-    macOS and Windows put the temp root behind a link. Export refuses that.
-    """
-    raw = tempfile.mkdtemp()
-    return os.path.realpath(raw)
+    """A private directory. An ancestor may be a symlink; the last component is not."""
+    return tempfile.mkdtemp()
 
 
 class ExportWindowTests(unittest.TestCase):
@@ -231,18 +227,19 @@ class ExportWindowTests(unittest.TestCase):
             folder = Path(sys.argv[1])
             dest = folder / "out.json"
             dest.write_bytes(b"old")
-            real = tempfile.mkstemp
+            real = os.open
             saw = {}
 
-            def pausing(*args, **kwargs):
-                fd, name = real(*args, **kwargs)
-                held = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-                saw["blocked"] = signal.SIGINT in held
-                os.kill(os.getpid(), signal.SIGINT)
-                saw["pending"] = True
-                return fd, name
+            def opening(path, flags, *args, **kwargs):
+                fd = real(path, flags, *args, **kwargs)
+                if os.path.basename(str(path)).startswith(".lantern-export-"):
+                    held = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    saw["blocked"] = signal.SIGINT in held
+                    os.kill(os.getpid(), signal.SIGINT)
+                    saw["pending"] = True
+                return fd
 
-            v1.tempfile.mkstemp = pausing
+            v1.os.open = opening
             try:
                 v1.write_export_file(str(dest), b"new", force=True)
                 print("code=none")
