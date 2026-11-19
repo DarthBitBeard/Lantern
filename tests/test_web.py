@@ -377,7 +377,7 @@ class WebTests(unittest.TestCase):
             "open_ports": [], "findings": [],
         }
 
-        def slow_scan(subnet, ports):
+        def slow_scan(subnet, ports, **_kwargs):
             self.assertEqual(subnet, "192.168.1.0/24")
             started.set()
             self.assertTrue(release.wait(10))

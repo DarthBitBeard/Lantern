@@ -195,14 +195,14 @@ class _SubnetGuess:
 
 
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
-                  switches: tuple | None = None) -> None:
+                  switches: tuple | None = None, fingerprint: bool = True) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock.
 
     ``switches`` is (switch addresses, SNMP community) from `lantern web
     --switch`, or None. The switch map is built after the sweep.
     """
     try:
-        devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS)
+        devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS, fingerprint=fingerprint)
         topo = None
         if switches:
             ips, community = switches
@@ -1461,7 +1461,10 @@ class LanternHandler(BaseHTTPRequestHandler):
         try:
             threading.Thread(
                 target=_run_scan_job,
-                args=(self.scan_job, self.db_path, subnet, bool(self.debug), self.switch_config),
+                args=(
+                    self.scan_job, self.db_path, subnet, bool(self.debug),
+                    self.switch_config, bool(self.fingerprint),
+                ),
                 name="lantern-scan",
                 daemon=True,
             ).start()
@@ -1662,6 +1665,7 @@ def make_server(
     write_timeout: float = REQUEST_TIMEOUT_SECONDS,
     write_deadline: float = WRITE_DEADLINE_SECONDS,
     switches: tuple | None = None,
+    fingerprint: bool = True,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -1728,6 +1732,7 @@ def make_server(
             "strict_auth": bool(strict_auth),
             "scan_job": _ScanJob(),
             "switch_config": tuple(switches) if switches else None,
+            "fingerprint": bool(fingerprint),
             "subnet_guess": _SubnetGuess(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
@@ -1770,6 +1775,7 @@ def serve(
     strict_auth: bool = False,
     open_url: str | None = None,
     switches: tuple | None = None,
+    fingerprint: bool = True,
 ) -> None:
     server = make_server(
         db_path,
@@ -1781,6 +1787,7 @@ def serve(
         lan_bound=lan_bound,
         strict_auth=strict_auth,
         switches=switches,
+        fingerprint=fingerprint,
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass

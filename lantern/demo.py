@@ -18,9 +18,38 @@ def _identity(name=None, model=None, manufacturer=None, services=(), source="mdn
     }
 
 
+# Offline fingerprints so a demo scan stores the same rows a live banner would.
+# The banner text stays empty: the report still prints banners only when a
+# probe recorded one. M6d is what shows these rows.
+_DEMO_FINGERPRINTS = {
+    ("192.168.1.1", 80): {
+        "service": "http", "product": "nginx", "version": "1.24.0",
+        "parse_status": "ok", "raw": "nginx/1.24.0",
+    },
+    ("192.168.1.20", 22): {
+        "service": "ssh", "product": "OpenSSH", "version": "9.6",
+        "parse_status": "ok", "raw": "SSH-2.0-OpenSSH_9.6",
+    },
+    ("192.168.1.20", 8096): {
+        "service": "http", "product": "Jellyfin", "version": "10.8.13",
+        "parse_status": "ok", "raw": "Jellyfin/10.8.13",
+    },
+    ("192.168.1.30", 80): {
+        "service": "http", "product": "HP", "version": "1.0",
+        "parse_status": "ok", "raw": "HP/1.0",
+    },
+}
+
+
 def _device(ip, mac, hostname, label, ports, identity=None):
     ports = sorted(ports)
-    open_ports = [{"port": p, "open": True, "banner": ""} for p in ports]
+    open_ports = []
+    for number in ports:
+        port = {"port": number, "open": True, "banner": ""}
+        parsed = _DEMO_FINGERPRINTS.get((ip, number))
+        if parsed:
+            port["fingerprint"] = dict(parsed)
+        open_ports.append(port)
     device = {
         "ip": ip, "mac": mac, "hostname": hostname, "label": label,
         "open_ports": open_ports, "findings": findings_for_ports(ports),

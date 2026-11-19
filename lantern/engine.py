@@ -32,8 +32,8 @@ TCP_DISCOVERY_WORKERS = 64
 HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to MAX_PORT_WORKERS sockets
 
 
-def scan_one(ip: str, macs: dict[str, str], ports) -> dict:
-    open_ports = scan_host(ip, ports)
+def scan_one(ip: str, macs: dict[str, str], ports, *, fingerprint: bool = True) -> dict:
+    open_ports = scan_host(ip, ports, fingerprint=fingerprint)
     return {
         "ip": ip,
         "mac": macs.get(ip),
@@ -44,7 +44,7 @@ def scan_one(ip: str, macs: dict[str, str], ports) -> dict:
     }
 
 
-def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
+def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = True) -> list[dict]:
     """Ping and port-scan these addresses. An empty list does not touch the network."""
     if not hosts:
         return []
@@ -75,7 +75,9 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS) -> list[dict]:
 
     ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
-        return list(pool.map(lambda ip: scan_one(ip, macs, ports), ordered))
+        return list(pool.map(
+            lambda ip: scan_one(ip, macs, ports, fingerprint=fingerprint), ordered,
+        ))
 
 
 def describe_network(network, devices: list[dict], identities: dict | None = None,
@@ -110,7 +112,13 @@ def describe_network(network, devices: list[dict], identities: dict | None = Non
     }
 
 
-def scan_subnet(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> tuple[list[dict], dict]:
+def scan_subnet(
+    subnet_text: str,
+    ports=DEFAULT_PORTS,
+    demo_mode: bool = False,
+    *,
+    fingerprint: bool = True,
+) -> tuple[list[dict], dict]:
     """Scan one private subnet. Returns (devices, network info for `save_scan`).
 
     SSDP and mDNS run alongside the ping and port sweep, so they add little
@@ -124,16 +132,22 @@ def scan_subnet(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) 
     local_ip = local_ipv4_in(network)
     with ThreadPoolExecutor(max_workers=1) as pool:
         identities = pool.submit(discover_identities, network, local_ip)
-        devices = scan_hosts(hosts, ports)
+        devices = scan_hosts(hosts, ports, fingerprint=fingerprint)
         found = identities.result()
     return devices, describe_network(network, devices, found, local_ip)
 
 
-def run_scan(subnet_text: str, ports=DEFAULT_PORTS, demo_mode: bool = False) -> list[dict]:
+def run_scan(
+    subnet_text: str,
+    ports=DEFAULT_PORTS,
+    demo_mode: bool = False,
+    *,
+    fingerprint: bool = True,
+) -> list[dict]:
     """Discover live hosts on one private subnet and port-scan each.
 
     The devices only; `scan_subnet` also returns the gateway and this
     machine's address. Raises ValueError for an invalid or unsafe subnet.
     Never touches the network in demo mode.
     """
-    return scan_subnet(subnet_text, ports, demo_mode)[0]
+    return scan_subnet(subnet_text, ports, demo_mode, fingerprint=fingerprint)[0]
