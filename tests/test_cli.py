@@ -345,13 +345,14 @@ class CliTests(unittest.TestCase):
             code = cli.main(["--db", str(db), "history"])
         text = err.getvalue()
         self.assertEqual(code, 2)
+        from lantern.store import SCHEMA_VERSION
         self.assertIn(
             "Database schema is newer than this Lantern. Refusing to change it "
-            "(schema 99 vs 6).",
+            f"(schema 99 vs {SCHEMA_VERSION}).",
             text,
         )
         self.assertNotIn("Refusing to change it.", text)
-        self.assertIn("schema 99 vs 6", text)
+        self.assertIn(f"schema 99 vs {SCHEMA_VERSION}", text)
         self.assertIn("Upgrade Lantern to open this file.", text)
         self.assertNotIn(marker, text)
         self.assertNotIn("secret-newer.db", text)

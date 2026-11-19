@@ -532,7 +532,7 @@ class StoreAndCliTests(unittest.TestCase):
     def test_schema_6_round_trip(self):
         conn = store.connect(self.db)
         try:
-            self.assertEqual(store.schema_version(conn), 6)
+            self.assertEqual(store.schema_version(conn), store.SCHEMA_VERSION)
             scan_id = store.save_scan(conn, "192.168.1.0/24", [dict(d) for d in DEVICES])
             self.assertIsNone(store.load_scan(conn, scan_id)["topology"])
             self.assertTrue(store.set_topology(conn, scan_id, {"switches": [], "router": None, "locations": {}}))
