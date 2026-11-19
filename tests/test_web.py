@@ -734,6 +734,503 @@ if (network.length) {
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
 
+    def test_asset_editor_uses_text_and_fixed_copy(self):
+        source = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("innerHTML", source)
+        self.assertNotIn("outerHTML", source)
+        self.assertNotIn("insertAdjacentHTML", source)
+        self.assertNotIn("Access-Control", source)
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; app.js was not executed")
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+async function main() {
+const app = fs.readFileSync(process.argv[1], "utf8");
+const elements = {};
+const network = [];
+let nextStatus = 200;
+let nextBody = {};
+const planned = [];
+function make(tag) {
+  const node = {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [], className: "", textContent: "", value: "", disabled: false,
+    hidden: true, attributes: {}, listeners: {}, open: false,
+    addEventListener(type, fn) {
+      node.listeners[type] = node.listeners[type] || [];
+      node.listeners[type].push(fn);
+    },
+    getAttribute(name) { return node.attributes[name] || ""; },
+    setAttribute(name, value) {
+      node.attributes[name] = String(value);
+      if (name === "value") node.value = String(value);
+    },
+    appendChild(child) { node.children.push(child); return child; },
+    removeChild(child) {
+      node.children = node.children.filter((item) => item !== child);
+      return child;
+    },
+    get firstChild() { return node.children[0] || null; },
+    get lastChild() { return node.children[node.children.length - 1] || null; },
+    querySelectorAll() { return []; },
+  };
+  return node;
+}
+function walk(node, visit) {
+  if (!node) return;
+  visit(node);
+  for (const child of node.children || []) walk(child, visit);
+}
+function el(id) {
+  if (!elements[id]) elements[id] = Object.assign(make("div"), { id, value: "" });
+  return elements[id];
+}
+const context = {
+  sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  document: {
+    getElementById: el,
+    createElement: make,
+    createTextNode(text) { return { nodeType: 3, textContent: String(text), children: [] }; },
+    querySelector() { return { getAttribute() { return "strict"; } }; },
+    querySelectorAll() { return []; },
+    body: { setAttribute() {} },
+  },
+  window: { open() {}, location: { hash: "", pathname: "/", search: "" } },
+  history: { replaceState() {} },
+  URL: { createObjectURL: () => "blob:test" },
+  fetch: async (path, opts) => {
+    const method = (opts && opts.method) || "GET";
+    network.push({ method, path, body: opts && opts.body, headers: (opts && opts.headers) || {} });
+    const step = planned.length ? planned.shift() : null;
+    const status = step ? step.status : nextStatus;
+    const body = step ? step.body : nextBody;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+      text: async () => "",
+    };
+  },
+  XMLHttpRequest: function XMLHttpRequest() {
+    this.open = () => { network.push({ method: "XHR", path: "", body: "" }); };
+    this.send = () => {};
+  },
+  console,
+  setTimeout,
+};
+vm.createContext(context);
+vm.runInContext(app, context);
+const payload = '<img src=x onerror="alert(1)">';
+const device = {
+  ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
+  owner: payload, location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", open_ports: [], findings: [],
+};
+nextStatus = 200;
+nextBody = { items: [
+  { key: "aa:bb:cc:dd:ee:02", key_type: "ip", updated_at: "1999-01-01T00:00:00Z", owner: "Wrong" },
+  {
+    key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T00:00:00Z",
+    owner: payload, location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
+  },
+] };
+context.showScan({
+  id: 7, subnet: "10.1.0.0/24", started_at: "2026-11-10T00:00:00Z", demo: true,
+  devices: [device],
+}, null);
+if (network.length) {
+  console.error("showScan fetched", network);
+  process.exit(2);
+}
+let details = null;
+walk(elements.devices, (node) => {
+  if (node.tagName === "DETAILS") details = node;
+});
+if (!details) {
+  console.error("missing editor");
+  process.exit(3);
+}
+details.open = true;
+for (const fn of details.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const tags = [];
+let text = "";
+let owner = null;
+walk(elements.devices, (node) => {
+  if (node.tagName) tags.push(node.tagName);
+  text += "\n" + (node.textContent || "");
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") owner = node;
+});
+if (tags.includes("IMG") || tags.includes("SCRIPT")) {
+  console.error(tags);
+  process.exit(4);
+}
+if (!text.includes(payload) || !owner || owner.value !== payload) {
+  console.error(text);
+  process.exit(5);
+}
+owner.value = "unsaved";
+for (const fn of owner.listeners.input || []) fn();
+elements["tag-filter"].value = "missing";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "unsaved")) {
+  console.error("filter rebuilt a dirty editor");
+  process.exit(6);
+}
+nextStatus = 422;
+nextBody = { error: { message: "SECRET-SERVER-TEXT", code: "validation", fields: { owner: "too_long" } } };
+let save = null;
+walk(elements.devices, (node) => {
+  if (node.tagName === "BUTTON" && node.textContent === "Save") save = node;
+});
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (!text.includes("This is too long.") || text.includes("SECRET-SERVER-TEXT")) {
+  console.error(text);
+  process.exit(7);
+}
+const post = network.filter((item) => item.method === "POST").pop();
+const sent = JSON.parse(post.body);
+if ("label" in sent || "trusted" in sent || sent.owner !== "unsaved") {
+  console.error(post.body);
+  process.exit(8);
+}
+if (!post.path.startsWith("/api/v1/assets/")) {
+  console.error(post.path);
+  process.exit(9);
+}
+if (post.path.includes("?") || post.path.toLowerCase().includes("token")) {
+  console.error("token in query", post.path);
+  process.exit(10);
+}
+if (!post.path.includes("aa%3A")) {
+  console.error("key was not encoded", post.path);
+  process.exit(11);
+}
+if (!post.headers["X-Lantern-Token"] || sent.updated_at !== "2026-11-10T00:00:00Z") {
+  console.error("stamp or token", sent, post.headers);
+  process.exit(12);
+}
+const gets = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices"));
+if (!gets.length || !gets[0].path.includes("limit=1024")) {
+  console.error(gets);
+  process.exit(13);
+}
+nextStatus = 500;
+nextBody = { error: { message: "SECRET-SERVER-TEXT", code: "server_error" } };
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (text.includes("SECRET-SERVER-TEXT") || !text.includes("The dashboard could not save.")) {
+  console.error("server error text", text);
+  process.exit(20);
+}
+let form = null;
+walk(elements.devices, (node) => { if (node.className === "asset-form") form = node; });
+planned.push({ status: 409, body: { error: { message: "SECRET-SERVER-TEXT", code: "conflict" } } });
+planned.push({ status: 200, body: { items: [{
+  key: "aa:bb:cc:dd:ee:02", key_type: "mac", updated_at: "2026-11-10T02:00:00Z",
+  owner: "Latest", location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
+}] } });
+let detailsAfter = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") detailsAfter = node; });
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!detailsAfter || !detailsAfter.open || owner.value !== "Latest") {
+  console.error("409 form", detailsAfter && detailsAfter.open, owner.value);
+  process.exit(14);
+}
+if (textIncludes(elements.devices, "SECRET-SERVER-TEXT")) {
+  console.error("server text shown");
+  process.exit(15);
+}
+let shownOwner = null;
+walk(elements.devices, (node) => {
+  if (node.className === "shown-owner") shownOwner = node;
+});
+if (!shownOwner || shownOwner.textContent !== "Owner: Latest") {
+  console.error("409 card", shownOwner && shownOwner.textContent);
+  process.exit(21);
+}
+planned.push({ status: 422, body: { error: { code: "validation", fields: { notes: "too_long" } } } });
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const refill = JSON.parse(network.filter((item) => item.method === "POST").pop().body);
+if (refill.updated_at !== "2026-11-10T02:00:00Z") {
+  console.error("409 stamp", refill.updated_at);
+  process.exit(22);
+}
+const beforeCancel = network.length;
+let cancel = null;
+let add = null;
+let criticality = null;
+let removeTag = null;
+walk(form, (node) => {
+  if (node.textContent === "Cancel") cancel = node;
+  if (node.textContent === "Add tag") add = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Criticality") criticality = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Remove tag") removeTag = node;
+});
+if (!criticality || !removeTag) {
+  console.error("missing criticality or remove");
+  process.exit(23);
+}
+for (const fn of form.listeners.keydown || []) {
+  fn({ key: "Enter", target: cancel, preventDefault() {} });
+  fn({ key: "Enter", target: add, preventDefault() {} });
+  fn({ key: "Enter", target: criticality, preventDefault() {} });
+  fn({ key: "Enter", target: removeTag, preventDefault() {} });
+}
+if (network.length !== beforeCancel) {
+  console.error("enter on a button saved");
+  process.exit(16);
+}
+const tagBox = [];
+walk(form, (node) => { if (node.getAttribute && node.getAttribute("aria-label") === "Add a tag") tagBox.push(node); });
+tagBox[0].value = "Not A Tag";
+for (const fn of tagBox[0].listeners.keydown || []) {
+  fn({ key: "Enter", target: tagBox[0], preventDefault() {} });
+}
+if (!textIncludes(form, "This value is not allowed.")) {
+  console.error("tag check missing");
+  process.exit(17);
+}
+owner.value = "unsaved-again";
+for (const fn of owner.listeners.input || []) fn();
+details.open = false;
+for (const fn of details.listeners.toggle || []) fn();
+elements["tag-filter"].value = "missing-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  const shapes = (elements.devices.children || []).map((child) => child.className || child.tagName);
+  console.error("collapsed editor blocked redraw", JSON.stringify(shapes), textIncludes(elements.devices, "unsaved-again"));
+  process.exit(19);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+let reopened = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") reopened = node; });
+reopened.open = true;
+for (const fn of reopened.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+walk(elements.devices, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") owner = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") save = node;
+});
+nextStatus = 200;
+nextBody = {
+  owner: "SavedOwner", location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", updated_at: "2026-11-10T01:00:00Z",
+};
+owner.value = "SavedOwner";
+for (const fn of save.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+text = "";
+walk(elements.devices, (node) => { text += "\n" + (node.textContent || ""); });
+if (!text.includes("SavedOwner")) {
+  console.error("card", text);
+  process.exit(18);
+}
+
+// A fresh scan, so the checks below are not tangled with the editor above.
+const left = {
+  ip: "10.1.0.2", mac: "aa:bb:cc:dd:ee:02", hostname: "nas", trusted: false,
+  owner: "Ada", location: "Rack", tags: ["web"], notes: "keep",
+  criticality: "high", open_ports: [], findings: [],
+};
+const right = {
+  ip: "10.1.0.3", mac: "aa:bb:cc:dd:ee:03", hostname: "printer", trusted: false,
+  owner: "Bea", location: "Hall", tags: ["print"], notes: "",
+  criticality: "low", open_ports: [], findings: [],
+};
+function inventoryItem(device, owner, stamp) {
+  return {
+    key: device.mac, key_type: "mac", updated_at: stamp,
+    owner, location: device.location, tags: device.tags.slice(),
+    notes: device.notes, criticality: device.criticality,
+  };
+}
+nextStatus = 200;
+nextBody = { items: [
+  inventoryItem(left, "Ada", "2026-11-12T00:00:00Z"),
+  inventoryItem(right, "Bea", "2026-11-12T00:00:00Z"),
+] };
+context.showScan({
+  id: 11, subnet: "10.1.0.0/24", started_at: "2026-11-12T00:00:00Z", demo: true,
+  devices: [left, right],
+}, null);
+const editors = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") editors.push(node); });
+if (editors.length !== 2) {
+  console.error("editors", editors.length);
+  process.exit(24);
+}
+editors[0].open = true;
+for (const fn of editors[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let ada = null;
+walk(editors[0], (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ada = node;
+});
+if (!ada || ada.value !== "Ada") {
+  console.error("ada", ada && ada.value);
+  process.exit(25);
+}
+ada.value = "keep-a";
+for (const fn of ada.listeners.input || []) fn();
+editors[1].open = true;
+for (const fn of editors[1].listeners.toggle || []) fn();
+editors[1].open = false;
+for (const fn of editors[1].listeners.toggle || []) fn();
+elements["tag-filter"].value = "missing";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "keep-a") || !String(elements.message.textContent || "").includes("Save or cancel")) {
+  console.error("other card cleared the edit", ada.value, elements.message.textContent);
+  process.exit(26);
+}
+for (const fn of editors[0].listeners.keydown || []) {
+  // Escape is listened for on the form, which is inside the details.
+}
+let adaForm = null;
+walk(editors[0], (node) => { if (node.className === "asset-form") adaForm = node; });
+for (const fn of adaForm.listeners.keydown || []) fn({ key: "Escape", target: ada, preventDefault() {} });
+elements["tag-filter"].value = "no-such-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  console.error("escape left the editor dirty");
+  process.exit(27);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+const again = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") again.push(node); });
+again[0].open = true;
+for (const fn of again[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let ownerBox = null;
+let saveBox = null;
+let formBox = null;
+walk(again[0], (node) => {
+  if (node.className === "asset-form") formBox = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ownerBox = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") saveBox = node;
+});
+ownerBox.value = "typed";
+for (const fn of ownerBox.listeners.input || []) fn();
+let cancelBox = null;
+walk(formBox, (node) => { if (node.textContent === "Cancel") cancelBox = node; });
+for (const fn of cancelBox.listeners.click || []) fn();
+elements["tag-filter"].value = "no-such-tag";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+if (!textIncludes(elements.devices, "No devices match")) {
+  console.error("cancel left the editor dirty");
+  process.exit(28);
+}
+elements["tag-filter"].value = "";
+for (const fn of elements["tag-filter"].listeners.change || []) fn();
+const third = [];
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") third.push(node); });
+third[0].open = true;
+for (const fn of third[0].listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+walk(third[0], (node) => {
+  if (node.className === "asset-form") formBox = node;
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") ownerBox = node;
+  if (node.tagName === "BUTTON" && node.textContent === "Save") saveBox = node;
+});
+const postsAtEdit = network.filter((item) => item.method === "POST").length;
+ownerBox.value = "x".repeat(81);
+for (const fn of saveBox.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (!textIncludes(formBox, "This is too long.") || network.filter((item) => item.method === "POST").length !== postsAtEdit) {
+  console.error("client length");
+  process.exit(29);
+}
+ownerBox.value = "Ada";
+for (const fn of ownerBox.listeners.input || []) fn();
+let tagField = null;
+let addBox = null;
+walk(formBox, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Add a tag") tagField = node;
+  if (node.textContent === "Add tag") addBox = node;
+});
+for (let index = 1; index <= 9; index += 1) {
+  tagField.value = "t" + index;
+  for (const fn of addBox.listeners.click || []) fn();
+}
+tagField.value = "overflow";
+for (const fn of addBox.listeners.click || []) fn();
+let chips = null;
+walk(formBox, (node) => { if (node.className === "tag-chips") chips = node; });
+if (!textIncludes(formBox, "Too many tags.") || textIncludes(chips, "overflow")) {
+  console.error("tag cap");
+  process.exit(30);
+}
+nextStatus = 422;
+nextBody = { error: { code: "validation", fields: { owner: "invalid" } } };
+const postsAtDouble = network.filter((item) => item.method === "POST").length;
+for (const fn of saveBox.listeners.click || []) fn();
+for (const fn of saveBox.listeners.click || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (network.filter((item) => item.method === "POST").length !== postsAtDouble + 1) {
+  console.error("double click");
+  process.exit(32);
+}
+const postsAtEnter = network.filter((item) => item.method === "POST").length;
+for (const fn of formBox.listeners.keydown || []) fn({ key: "Enter", target: ownerBox, preventDefault() {} });
+await new Promise((resolve) => setTimeout(resolve, 0));
+const entered = network.filter((item) => item.method === "POST");
+if (entered.length !== postsAtEnter + 1 || JSON.parse(entered[entered.length - 1].body).owner !== "Ada") {
+  console.error("enter owner", entered.length);
+  process.exit(31);
+}
+cancelBox = null;
+walk(formBox, (node) => { if (node.textContent === "Cancel") cancelBox = node; });
+for (const fn of cancelBox.listeners.click || []) fn();
+const getsBefore = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices")).length;
+nextStatus = 200;
+nextBody = { items: [inventoryItem(left, "FromEight", "2026-11-13T00:00:00Z")] };
+context.showScan({
+  id: 12, subnet: "10.1.0.0/24", started_at: "2026-11-13T00:00:00Z", demo: true,
+  devices: [left],
+}, null);
+let switched = null;
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS") switched = node; });
+switched.open = true;
+for (const fn of switched.listeners.toggle || []) fn();
+await new Promise((resolve) => setTimeout(resolve, 0));
+let switchedOwner = null;
+walk(switched, (node) => {
+  if (node.getAttribute && node.getAttribute("aria-label") === "Owner") switchedOwner = node;
+});
+const getsAfter = network.filter((item) => item.method === "GET" && item.path.includes("/api/v1/devices")).length;
+if (!switchedOwner || switchedOwner.value !== "FromEight" || getsAfter <= getsBefore) {
+  console.error("stale inventory cache", switchedOwner && switchedOwner.value, getsAfter, getsBefore);
+  process.exit(33);
+}
+function textIncludes(node, needle) {
+  let found = false;
+  walk(node, (item) => {
+    if (String(item.value || "").includes(needle) || String(item.textContent || "").includes(needle)) found = true;
+  });
+  return found;
+}
+}
+main();
+"""
+        proc = subprocess.run(
+            [node, "-e", script, str(webapp.WEB_DIR / "app.js")],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+
 class HostAllowlistTests(unittest.TestCase):
     """F-01: DNS rebinding. Localhost listeners and in-memory data only.
 
@@ -2325,7 +2822,9 @@ vm.createContext(context);
 vm.runInContext(app, context);
 const payload = "<script>alert(1)</script>";
 const allow = new Set(["device", "unknown", "kind", "meta", "ports", "port", "findings",
-  "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary"]);
+  "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary",
+  "asset-editor", "asset-editor-body", "asset-form", "tag-chips", "tag-chip", "asset-actions", "asset-error",
+  "shown-owner", "shown-location", "shown-criticality", "shown-tags", "shown-notes"]);
 function walk(node, visit) {
   if (!node) return;
   if (node.nodeType === 3) { visit(node); return; }

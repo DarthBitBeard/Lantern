@@ -23,6 +23,34 @@ ASSET_ROW_CAP = 10_000
 CRITICALITIES = ("low", "medium", "high", "critical")
 ASSET_FIELDS = ("owner", "location", "tags", "criticality", "notes")
 
+
+class AssetConflict(Exception):
+    """The stored ``updated_at`` is not the one the caller last read."""
+
+
+# A test sets this to pause after the stamp compare and before the write.
+# It runs inside the same ``BEGIN IMMEDIATE`` as that compare.
+_after_stamp_check = None
+
+
+def _stamp_checked() -> None:
+    callback = _after_stamp_check
+    if callback is not None:
+        callback()
+
+
+def _same_instant(stored, expected) -> bool:
+    """``Z`` and ``+00:00`` are the same instant. ``None`` only matches ``None``."""
+    def norm(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text.endswith("Z"):
+            return text[:-1] + "+00:00"
+        return text
+
+    return norm(stored) == norm(expected)
+
 _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 _TAG_RE = re.compile(r"^[a-z0-9._-]{1,32}$")
 # Cc control, Cf format (bidi overrides, word joiner, soft hyphen, BOM, …),
@@ -254,17 +282,34 @@ def set_asset(
     tags: list[str] | None = None,
     criticality: str | None = None,
     notes: str | None = None,
+    clears: frozenset[str] | set[str] | None = None,
+    expected_updated_at: str | None = None,
+    check_updated_at: bool = False,
 ) -> dict:
     """Update the fields that were passed. None means leave that field alone.
 
-    A new key is refused once ``ASSET_ROW_CAP`` rows exist. Updating a row
-    that is already stored is still allowed.
+    ``clears`` names fields to store as empty. A new key is refused once
+    ``ASSET_ROW_CAP`` rows exist. Updating a row that is already stored is
+    still allowed. A row with every inventory field empty is removed, which
+    is the same end state as ``clear_asset``.
+
+    When ``check_updated_at`` is set, the compare and the write share this
+    ``BEGIN IMMEDIATE``. A mismatch, including ``None`` over a stored stamp,
+    raises ``AssetConflict`` and writes nothing.
     """
+    blanked = set(clears or ())
     # Count and write share one reserved lock so two `asset set` processes
     # cannot both pass the cap.
     conn.execute("BEGIN IMMEDIATE")
     try:
         current = get_asset(conn, asset_key)
+        if check_updated_at:
+            stored_at = current["updated_at"] if current else None
+            if not _same_instant(stored_at, expected_updated_at):
+                raise AssetConflict()
+            # Still holding the reserved lock. A second writer blocks here
+            # until this transaction commits, then sees the new stamp.
+            _stamp_checked()
         if current is None:
             count = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             if count >= ASSET_ROW_CAP:
@@ -273,16 +318,35 @@ def set_asset(
                     "Clear one before adding another."
                 )
             current = _empty_asset(asset_key, kind)
-        if owner is not None:
+        if "owner" in blanked:
+            current["owner"] = None
+        elif owner is not None:
             current["owner"] = owner
-        if location is not None:
+        if "location" in blanked:
+            current["location"] = None
+        elif location is not None:
             current["location"] = location
         if tags is not None:
             current["tags"] = tags
-        if criticality is not None:
+        if "criticality" in blanked:
+            current["criticality"] = None
+        elif criticality is not None:
             current["criticality"] = criticality
-        if notes is not None:
+        if "notes" in blanked:
+            current["notes"] = None
+        elif notes is not None:
             current["notes"] = notes
+        empty = (
+            current["owner"] is None
+            and current["location"] is None
+            and not current["tags"]
+            and current["criticality"] is None
+            and current["notes"] is None
+        )
+        if empty:
+            conn.execute("DELETE FROM assets WHERE asset_key = ?", (asset_key,))
+            conn.commit()
+            return _empty_asset(asset_key, kind)
         conn.execute(
             "INSERT INTO assets (asset_key, key_kind, owner, location, tags, criticality, notes, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
