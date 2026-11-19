@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import stat
 import tempfile
@@ -1475,8 +1476,12 @@ def prepare_export_path(path: str, force: bool) -> Path:
     parent = candidate.parent
     if not parent.is_dir():
         raise ExportPathError("The export directory must already exist.")
-    if os.path.realpath(parent) != os.path.abspath(parent):
-        raise ExportPathError("The export directory must not be reached through a symlink.")
+    try:
+        parent_info = os.lstat(parent)
+    except OSError as exc:
+        raise ExportPathError("The export path is not allowed.") from exc
+    if _is_link(parent_info):
+        raise ExportPathError(_directory_symlink_message(parent))
     try:
         info = os.lstat(candidate)
     except FileNotFoundError:
@@ -1484,7 +1489,7 @@ def prepare_export_path(path: str, force: bool) -> Path:
     except OSError as exc:
         raise ExportPathError("The export path is not allowed.") from exc
     if info is not None:
-        if stat.S_ISLNK(info.st_mode):
+        if _is_link(info):
             raise ExportPathError("The output file must not be a symlink.")
         if not stat.S_ISREG(info.st_mode):
             raise ExportPathError("The export path must be a regular file.")
@@ -1493,6 +1498,59 @@ def prepare_export_path(path: str, force: bool) -> Path:
         if info.st_nlink > 1:
             raise ExportPathError("The export path must not be a hard link.")
     return candidate
+
+
+def _directory_symlink_message(parent: Path) -> str:
+    """Refuse the export directory and name the real directory, when it can be resolved.
+
+    macOS ``/tmp`` is a symlink to ``/private/tmp``. The hint is that real
+    path with control, bidi, and zero-width characters removed.
+    """
+    message = "The export directory itself must not be a symlink."
+    try:
+        resolved = os.path.realpath(parent)
+    except OSError:
+        return message
+    hint = strip_for_text(resolved)
+    if not hint:
+        return message
+    return f"{message} {hint}"
+
+
+def _refuse_replaced_directory(parent: Path) -> None:
+    """Look again before a path-based create or replace.
+
+    Windows cannot hold a directory fd, so the check in
+    ``prepare_export_path`` is otherwise check-then-use. A symlink or
+    reparse point that appears in that window is refused.
+    """
+    try:
+        info = os.lstat(parent)
+    except OSError as exc:
+        raise ExportPathError("The export path is not allowed.") from exc
+    if _is_link(info):
+        raise ExportPathError(_directory_symlink_message(parent))
+
+
+def _output_open_is_a_symlink(destination: Path, exc: OSError) -> bool:
+    """O_NOFOLLOW reports a symlink as ELOOP, or as EEXIST when O_EXCL is set."""
+    if exc.errno == errno.ELOOP:
+        return True
+    if exc.errno != errno.EEXIST:
+        return False
+    try:
+        info = os.lstat(destination)
+    except OSError:
+        return False
+    return _is_link(info)
+
+
+def _is_link(info) -> bool:
+    """True for a symlink or, on Windows, a reparse point such as a junction."""
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and getattr(info, "st_file_attributes", 0) & reparse)
 
 
 def _write_fd(fd: int, payload: bytes) -> None:
@@ -1507,11 +1565,20 @@ def _write_fd(fd: int, payload: bytes) -> None:
         os.fchmod(fd, 0o600)
 
 
-def _unlink_quiet(path: Path | None) -> None:
+def _unlink_quiet(path: Path | None, *, dir_fd: int | None = None) -> None:
+    """Remove ``path``. With ``dir_fd``, unlink that name in the opened directory.
+
+    A path-based unlink follows a directory that was replaced with a
+    symlink after the check. The directory descriptor still names the
+    directory that was opened, so the cleanup stays there.
+    """
     if path is None:
         return
     try:
-        path.unlink(missing_ok=True)
+        if dir_fd is not None:
+            os.unlink(path.name, dir_fd=dir_fd)
+        else:
+            path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1625,13 +1692,20 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
     partial = None
     success = False
     interrupted: int | None = None
+    # True only while opening the output file, so ELOOP there is the file
+    # and not the directory.
+    file_open = False
     try:
         with _during_export_write():
             if os.open in getattr(os, "supports_dir_fd", ()):
                 flags = os.O_RDONLY
                 if hasattr(os, "O_DIRECTORY"):
                     flags |= os.O_DIRECTORY
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
                 directory = os.open(parent, flags)
+            if directory is None:
+                _refuse_replaced_directory(parent)
             if not force:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                 if hasattr(os, "O_NOFOLLOW"):
@@ -1644,10 +1718,12 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                 fd = None
                 try:
                     try:
+                        file_open = True
                         if directory is not None:
                             fd = os.open(destination.name, flags, 0o600, dir_fd=directory)
                         else:
                             fd = os.open(destination, flags, 0o600)
+                        file_open = False
                         # Record the path before the mask is restored, so a
                         # signal that was pending is delivered only after
                         # cleanup knows this file.
@@ -1662,7 +1738,7 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                             if fd is not None:
                                 os.close(fd)
                                 fd = None
-                            _unlink_quiet(destination)
+                            _unlink_quiet(destination, dir_fd=directory)
                             partial = None
                         raise
                 finally:
@@ -1674,18 +1750,38 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
             else:
                 blocked = _block_termination()
                 fd = None
+                name = None
                 try:
                     try:
-                        fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
-                        temporary_path = Path(temporary)
+                        if directory is not None:
+                            name = ".lantern-export-" + secrets.token_hex(8)
+                            # The name is known before open. An interrupt
+                            # inside open, after the file exists and before
+                            # the fd is returned, still has to unlink it.
+                            temporary_path = parent / name
+                            create = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            if hasattr(os, "O_NOFOLLOW"):
+                                create |= os.O_NOFOLLOW
+                            if hasattr(os, "O_BINARY"):
+                                create |= os.O_BINARY
+                            fd = os.open(name, create, 0o600, dir_fd=directory)
+                        else:
+                            fd, temporary = tempfile.mkstemp(prefix=".lantern-export-", dir=parent)
+                            temporary_path = Path(temporary)
                     except BaseException as exc:
                         # Only the file this call created. Another
                         # ``.lantern-export-*`` in the directory is not ours.
-                        if fd is not None and not isinstance(exc, Exception):
-                            os.close(fd)
-                            fd = None
-                            _unlink_quiet(temporary_path)
-                            temporary_path = None
+                        # OSError means the exclusive create did not keep a
+                        # file, so that path must not be removed.
+                        if not isinstance(exc, Exception):
+                            if fd is not None:
+                                os.close(fd)
+                                fd = None
+                            if directory is not None and name is not None:
+                                _unlink_quiet(parent / name, dir_fd=directory)
+                            else:
+                                _unlink_quiet(temporary_path)
+                        temporary_path = None
                         raise
                 finally:
                     _unblock_termination(blocked)
@@ -1693,10 +1789,21 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
                     _write_fd(fd, payload)
                 finally:
                     os.close(fd)
-                os.replace(temporary_path, destination)
+                if directory is not None:
+                    os.replace(
+                        temporary_path.name, destination.name,
+                        src_dir_fd=directory, dst_dir_fd=directory,
+                    )
+                else:
+                    _refuse_replaced_directory(parent)
+                    os.replace(temporary_path, destination)
                 temporary_path = None
             success = True
     except OSError as exc:
+        if file_open and _output_open_is_a_symlink(destination, exc):
+            raise ExportPathError("The output file must not be a symlink.") from exc
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ExportPathError(_directory_symlink_message(parent)) from exc
         if exc.errno in _PATH_ERRNOS:
             raise ExportPathError("The export path is not allowed.") from exc
         raise ExportPathError("The export could not be written.") from exc
@@ -1704,8 +1811,8 @@ def write_export_file(path: str, payload: bytes, *, force: bool) -> str:
         interrupted = exc.signum
     finally:
         if not success:
-            _unlink_quiet(temporary_path)
-            _unlink_quiet(partial)
+            _unlink_quiet(temporary_path, dir_fd=directory)
+            _unlink_quiet(partial, dir_fd=directory)
         if directory is not None:
             os.close(directory)
     if interrupted is not None:
