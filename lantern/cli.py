@@ -233,6 +233,12 @@ def build_parser() -> argparse.ArgumentParser:
              "One run is capped at 1024 unique addresses.",
     )
     scan_p.add_argument("--demo", action="store_true", help="Use fake demo data, no network scan.")
+    scan_p.add_argument(
+        "--no-fingerprint",
+        action="store_true",
+        help="Read each banner once, the way Lantern did before fingerprints, and do not parse it. "
+             "A fingerprint is what the service says about itself. It can be wrong or spoofed.",
+    )
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
     _add_switch_args(scan_p)
 
@@ -349,6 +355,12 @@ def build_parser() -> argparse.ArgumentParser:
              "Unspecified addresses and zone ids are rejected.",
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
+    web_p.add_argument(
+        "--no-fingerprint",
+        action="store_true",
+        help="Dashboard scans read each banner once and do not parse it. "
+             "A fingerprint is what the service says about itself. It can be wrong or spoofed.",
+    )
     _add_switch_args(web_p)
     web_p.add_argument(
         "--open",
@@ -1396,6 +1408,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             kwargs["switches"] = switches
             print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
                   file=sys.stderr, flush=True)
+        kwargs["fingerprint"] = not args.no_fingerprint
         try:
             serve(db_path, **kwargs)
         except OSError as exc:
@@ -1467,7 +1480,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                     if fresh:
                         with ThreadPoolExecutor(max_workers=1) as pool:
                             pending = pool.submit(engine.discover_identities, network, local_ip)
-                            for device in engine.scan_hosts(fresh, DEFAULT_PORTS):
+                            for device in engine.scan_hosts(
+                                fresh, DEFAULT_PORTS, fingerprint=not args.no_fingerprint,
+                            ):
                                 found[device["ip"]] = device
                             identities = pending.result()
                         seen_hosts.update(fresh)
@@ -1504,7 +1519,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             subnet = str(network)
             if not args.demo and args.format == "text":
                 print(f"Scanning {subnet} ({network.num_addresses} addresses)...", file=sys.stderr)
-            devices, info = scan_subnet(subnet, DEFAULT_PORTS, demo_mode=args.demo)
+            devices, info = scan_subnet(
+                subnet, DEFAULT_PORTS, demo_mode=args.demo, fingerprint=not args.no_fingerprint,
+            )
         except ValueError as exc:
             return _err(str(exc))
         topo = None

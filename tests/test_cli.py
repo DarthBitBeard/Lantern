@@ -178,6 +178,32 @@ class CliTests(unittest.TestCase):
         code, out, _ = self.run_cli("scan", "--demo", "--format", "json")
         self.assertEqual(json.loads(out)["diff"]["added"], [])
 
+    def test_no_fingerprint_is_a_scan_and_web_flag_and_demo_rows_are_stored(self):
+        code, _, err = self.run_cli("scan", "--demo", "--no-fingerprint")
+        self.assertEqual(code, 0, err)
+        from lantern.store import connect
+
+        conn = connect(self.db)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM service_fingerprints").fetchone()[0]
+            product = conn.execute(
+                "SELECT product FROM service_fingerprints WHERE product = 'OpenSSH'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertGreater(count, 0)
+        self.assertIsNotNone(product)
+        scan = cli.build_parser().parse_args(["scan", "--no-fingerprint", "--demo"])
+        web = cli.build_parser().parse_args(["web", "--no-fingerprint"])
+        self.assertTrue(scan.no_fingerprint)
+        self.assertTrue(web.no_fingerprint)
+        for command in ("scan", "web"):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(SystemExit) as caught:
+                    cli.build_parser().parse_args([command, "--help"])
+            self.assertEqual(caught.exception.code, 0)
+            self.assertIn("spoofed", out.getvalue())
+
     def test_scan_refuses_bad_subnets_before_touching_network(self):
         with mock.patch.object(engine, "ping_host", side_effect=AssertionError("network touched")):
             for subnet in ("8.8.8.0/24", "10.0.0.0/8", "nope"):
@@ -587,7 +613,7 @@ class CliTests(unittest.TestCase):
             ],
         }
 
-        def fake(hosts, ports=None):
+        def fake(hosts, ports=None, **_kwargs):
             self.assertTrue(hosts)
             key = "192.168.50.0/24" if hosts[0].startswith("192.168.50.") else "10.50.0.0/24"
             return queues[key].pop(0)
@@ -665,7 +691,7 @@ class CliTests(unittest.TestCase):
     def test_one_scope_failing_still_keeps_the_others(self):
         path = self._two_scopes()
 
-        def fake(hosts, ports=None):
+        def fake(hosts, ports=None, **_kwargs):
             if hosts and hosts[0].startswith("10."):
                 raise RuntimeError("lab unreachable")
             return [self._device("192.168.50.10")]
@@ -894,7 +920,7 @@ class CliTests(unittest.TestCase):
     def test_diff_without_scope_does_not_cross_scopes(self):
         path = self._two_scopes()
 
-        def fake(hosts, ports=None):
+        def fake(hosts, ports=None, **_kwargs):
             if hosts[0].startswith("192.168.50."):
                 return [self._device("192.168.50.10")]
             return [self._device("10.50.0.10")]
@@ -960,7 +986,7 @@ class CliTests(unittest.TestCase):
         path = self._two_scopes()
         calls = []
 
-        def fake(hosts, ports=None):
+        def fake(hosts, ports=None, **_kwargs):
             calls.append(list(hosts))
             return [self._device("192.168.50.10")]
 
@@ -985,7 +1011,7 @@ class CliTests(unittest.TestCase):
         )
         calls = []
 
-        def fake(hosts, ports=None):
+        def fake(hosts, ports=None, **_kwargs):
             calls.append(list(hosts))
             if "10.2.1.10" in hosts:
                 return [self._device("10.2.1.10")]
@@ -1011,7 +1037,7 @@ class CliTests(unittest.TestCase):
             [self._device("192.168.50.10"), self._device("192.168.50.11")],
         ]
 
-        def fake(subnet, ports=None, demo_mode=False):
+        def fake(subnet, ports=None, demo_mode=False, **_kwargs):
             if subnet.startswith("192.168.50."):
                 return home_rounds.pop(0), {}
             return [self._device("10.50.0.10")], {}
