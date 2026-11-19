@@ -1003,7 +1003,10 @@ class LanternHandler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 self._send_v1_error(403, "forbidden")
                 return
-            self._send_v1_error(405, "method_not_allowed", headers={"Allow": "GET, HEAD"})
+            from .v1 import asset_post_key
+
+            allow = "POST" if asset_post_key(path) else "GET, HEAD"
+            self._send_v1_error(405, "method_not_allowed", headers={"Allow": allow})
             return
         if (self.lan_bound or self.strict_auth) and path.startswith("/api/") and not self._token_ok():
             self._forbid(unread_body=True)
@@ -1188,6 +1191,20 @@ class LanternHandler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 self._send_v1_error(403, "forbidden")
                 return
+            from .v1 import asset_post_key
+
+            if asset_post_key(parsed.path) is not None:
+                if method != "POST":
+                    self._send_v1_error(405, "method_not_allowed", headers={"Allow": "POST"})
+                    return
+                # Same order as legacy POST: token, then Origin. A missing
+                # Origin is allowed only because the token already matched.
+                # This route does not send CORS headers.
+                if not self._origin_ok():
+                    self._send_v1_error(403, "forbidden")
+                    return
+                self._handle_v1_asset_post(parsed.path)
+                return
             if method != "GET":
                 self._send_v1_error(405, "method_not_allowed", headers={"Allow": "GET, HEAD"})
                 return
@@ -1295,6 +1312,33 @@ class LanternHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _handle_v1_asset_post(self, path: str) -> None:
+        from .v1 import V1Error, apply_asset_update, asset_post_key
+
+        try:
+            body = self._read_json()
+        except RequestTooLarge:
+            self._send_v1_error(413, "too_large")
+            return
+        except UnsupportedMediaType:
+            self._send_v1_error(415, "unsupported_media_type")
+            return
+        except ValueError:
+            self._send_v1_error(400, "bad_request")
+            return
+        raw_key = asset_post_key(path)
+        conn = self._db()
+        try:
+            payload = apply_asset_update(conn, raw_key or "", body)
+        except V1Error as exc:
+            self._send_v1_error(exc.status, exc.code, exc.fields)
+            return
+        finally:
+            conn.close()
+        from .v1 import content_type
+
+        self._send_bytes(200, json.dumps(payload).encode("utf-8"), content_type("json"))
+
     def _handle_api_get(self, path: str, query: dict) -> None:
         conn = self._db()
         try:
@@ -1364,7 +1408,15 @@ class LanternHandler(BaseHTTPRequestHandler):
         if not is_origin_form(self.path):
             self._reject_bad_target(unread_body=True)
             return
-        if self._reject_transfer_encoding():
+        if "Transfer-Encoding" in self.headers:
+            self.close_connection = True
+            if self._is_v1(parsed.path):
+                if not self._token_ok():
+                    self._send_v1_error(403, "forbidden")
+                    return
+                self._send_v1_error(400, "bad_request")
+                return
+            self._send_json(400, {"error": BAD_REQUEST_MESSAGE})
             return
         if self._is_v1(parsed.path):
             self._dispatch_v1("POST", parsed, {})

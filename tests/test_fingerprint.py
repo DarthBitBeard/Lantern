@@ -193,6 +193,29 @@ class ParserGapTests(unittest.TestCase):
         self.assertEqual((exim.product, exim.version, exim.parse_status), ("Exim", "4.97", "ok"))
         vsftp = parse("ftp", b"220-(vsFTPd 3.0.5)\r\n")
         self.assertEqual((vsftp.product, vsftp.version, vsftp.parse_status), ("vsFTPd", "3.0.5", "ok"))
+        # ``220`` itself, with a space or at the end of the line, is still a greeting.
+        spaced = parse("ftp", b"220 vsFTPd 3.0.5\r\n")
+        self.assertEqual((spaced.product, spaced.version), ("vsFTPd", "3.0.5"))
+        bare = parse("smtp", b"220\r\n")
+        self.assertEqual(bare.parse_status, "unknown")
+        self.assertIsNone(bare.product)
+
+    def test_only_smtp_keeps_the_text_before_a_slash(self):
+        mail = parse("smtp", b"220 mail ESMTP Sendmail 8.15.2/8.15.2\r\n")
+        self.assertEqual((mail.product, mail.version, mail.parse_status), ("Sendmail", "8.15.2", "ok"))
+        ftp = parse("ftp", b"220 vsFTPd 3.0.5/2\r\n")
+        self.assertEqual(ftp.product, "vsFTPd")
+        self.assertIsNone(ftp.version)
+        http = parse("http", b"HTTP/1.0 200 OK\r\nServer: nginx/1.2/3\r\n\r\n")
+        self.assertEqual(http.product, "nginx")
+        self.assertIsNone(http.version)
+
+    def test_the_http_status_line_counts_toward_the_line_cap(self):
+        # The cap is 64 lines, and the status line is one of them.
+        found = b"HTTP/1.1 200 OK\r\n" + b"X: y\r\n" * 62 + b"Server: nginx/1.25.1\r\n\r\n"
+        self.assertEqual(parse("http", found).product, "nginx")
+        hidden = b"HTTP/1.1 200 OK\r\n" + b"X: y\r\n" * 63 + b"Server: nginx/1.25.1\r\n\r\n"
+        self.assertIsNone(parse("http", hidden).product)
 
     def test_a_41_character_product_is_dropped_and_40_is_kept(self):
         over = b"HTTP/1.0 200 OK\r\nServer: " + b"B" * 41 + b"/1\r\n\r\n"
