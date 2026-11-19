@@ -301,6 +301,299 @@ function switchPortLine(device) {
   return node("p", { text });
 }
 
+const dirtyEditors = new Set();
+let v1Items = null;
+let v1ScanId = null;
+
+const FIELD_COPY = {
+  required: "Change a field before saving.",
+  too_long: "This is too long.",
+  blank: "This is only whitespace.",
+  invalid: "This value is not allowed.",
+  null_forbidden: "This cannot be empty in that way.",
+  unsupported: "This does not apply to this device.",
+  too_many: "Too many tags.",
+};
+
+function forgetInventory() {
+  v1Items = null;
+  v1ScanId = null;
+}
+
+function inventoryCopy(status, data) {
+  // Fixed sentences only. The server's error text is never shown.
+  if (status === 409) {
+    return "Someone else saved this device. The form shows the latest saved values.";
+  }
+  if (status === 403) return "The dashboard could not save. Check the token.";
+  if (status === 404) return "This device is not in a saved scan.";
+  if (status === 422) {
+    const fields = data && data.error && data.error.fields;
+    const lines = [];
+    if (fields && typeof fields === "object") {
+      for (const code of Object.values(fields)) {
+        if (FIELD_COPY[code]) lines.push(FIELD_COPY[code]);
+      }
+    }
+    return lines.length ? lines.join(" ") : "The dashboard could not save.";
+  }
+  return "The dashboard could not save.";
+}
+
+async function loadInventory() {
+  if (!currentScan || currentScan.id == null) return [];
+  if (v1Items && v1ScanId === currentScan.id) return v1Items;
+  const scanId = currentScan.id;
+  let response;
+  try {
+    response = await fetch(
+      `/api/v1/devices?scan_id=${encodeURIComponent(scanId)}&limit=1024`,
+      { headers: { "X-Lantern-Token": lanternToken() } },
+    );
+  } catch (err) {
+    return [];
+  }
+  if (!response.ok) return [];
+  const data = await response.json().catch(() => ({}));
+  const items = Array.isArray(data.items) ? data.items : [];
+  v1Items = items;
+  v1ScanId = scanId;
+  return items;
+}
+
+function inventoryFor(device, items) {
+  const mac = String(device.mac || "").trim().toLowerCase().replace(/-/g, ":");
+  if (mac) {
+    return items.find((item) => item && item.key_type === "mac" && String(item.key || "").toLowerCase() === mac) || null;
+  }
+  return items.find((item) => item && item.key_type === "ip" && item.key === device.ip) || null;
+}
+
+function assetEditor(device, refreshShown) {
+  const details = node("details", { className: "asset-editor" });
+  details.appendChild(node("summary", { text: "Edit inventory" }));
+  const body = node("div", { className: "asset-editor-body" });
+  body.appendChild(node("p", { className: "hint", text: "Open to edit owner, location, tags, criticality, and notes." }));
+  details.appendChild(body);
+  details.addEventListener("toggle", () => {
+    if (details.open) fillAssetEditor(device, body, details, refreshShown);
+    else dirtyEditors.delete(details);
+  });
+  return details;
+}
+
+function fillAssetEditor(device, body, details, refreshShown) {
+  mount(body, [node("p", { className: "hint", text: "Loading inventory…" })]);
+  loadInventory().then((items) => {
+    const record = inventoryFor(device, items);
+    if (!record) {
+      mount(body, [node("p", { className: "asset-error", text: "This device is not available to edit." })]);
+      return;
+    }
+    mount(body, [assetForm(device, record, details, refreshShown)]);
+  });
+}
+
+function assetForm(device, record, details, refreshShown) {
+  const error = node("p", { className: "asset-error", text: "" });
+  const owner = node("input", {
+    type: "text", value: record.owner || "",
+    "aria-label": "Owner",
+  });
+  const location = node("input", {
+    type: "text", value: record.location || "",
+    "aria-label": "Location",
+  });
+  const tags = Array.isArray(record.tags) ? record.tags.map((tag) => String(tag)) : [];
+  const chips = node("div", { className: "tag-chips" });
+  const tagInput = node("input", {
+    type: "text", "aria-label": "Add a tag",
+    placeholder: "tag",
+  });
+  const criticality = node("select", { "aria-label": "Criticality" });
+  criticality.appendChild(node("option", { value: "", text: "None" }));
+  for (const level of ["low", "medium", "high", "critical"]) {
+    criticality.appendChild(node("option", { value: level, text: level }));
+  }
+  criticality.value = record.criticality || "";
+  const notes = node("input", {
+    type: "text", "aria-label": "Notes",
+  });
+  notes.value = record.notes || "";
+  const counter = node("p", { className: "hint", text: `${notes.value.length}/500` });
+  const form = node("div", { className: "asset-form" });
+
+  function markDirty() {
+    dirtyEditors.add(details);
+  }
+  function drawChips() {
+    mount(chips, tags.map((tag) => {
+      const button = node("button", {
+        type: "button", className: "secondary", text: "Remove",
+        "aria-label": "Remove tag",
+      });
+      button.addEventListener("click", () => {
+        const index = tags.indexOf(tag);
+        if (index >= 0) tags.splice(index, 1);
+        markDirty();
+        drawChips();
+      });
+      return node("span", { className: "tag-chip" }, [
+        node("span", { text: tag }),
+        button,
+      ]);
+    }));
+  }
+  function addTag() {
+    const raw = tagInput.value.trim().toLowerCase();
+    if (!raw) return;
+    if (!/^[a-z0-9._-]{1,32}$/.test(raw)) {
+      error.textContent = FIELD_COPY.invalid;
+      return;
+    }
+    if (tags.includes(raw)) {
+      tagInput.value = "";
+      return;
+    }
+    if (tags.length >= 10) {
+      error.textContent = FIELD_COPY.too_many;
+      return;
+    }
+    tags.push(raw);
+    tagInput.value = "";
+    error.textContent = "";
+    markDirty();
+    drawChips();
+  }
+
+  owner.addEventListener("input", markDirty);
+  location.addEventListener("input", markDirty);
+  notes.addEventListener("input", () => {
+    counter.textContent = `${notes.value.length}/500`;
+    markDirty();
+  });
+  criticality.addEventListener("change", markDirty);
+  tagInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addTag();
+    }
+  });
+
+  function cancel() {
+    dirtyEditors.delete(details);
+    error.textContent = "";
+    renderDevices();
+  }
+
+  function applyRecord(latest) {
+    record.updated_at = latest.updated_at == null ? null : latest.updated_at;
+    record.owner = latest.owner || null;
+    record.location = latest.location || null;
+    record.notes = latest.notes || null;
+    record.criticality = latest.criticality || null;
+    record.tags = Array.isArray(latest.tags) ? latest.tags.slice() : [];
+    owner.value = record.owner || "";
+    location.value = record.location || "";
+    notes.value = record.notes || "";
+    counter.textContent = `${notes.value.length}/500`;
+    criticality.value = record.criticality || "";
+    tags.splice(0, tags.length, ...record.tags.map((tag) => String(tag)));
+    drawChips();
+    device.owner = record.owner;
+    device.location = record.location;
+    device.notes = record.notes;
+    device.criticality = record.criticality;
+    device.tags = record.tags.slice();
+    if (typeof refreshShown === "function") refreshShown();
+  }
+
+  async function save() {
+    if (saveButton.disabled) return;
+    error.textContent = "";
+    if (owner.value.length > 80 || location.value.length > 80 || notes.value.length > 500) {
+      error.textContent = FIELD_COPY.too_long;
+      return;
+    }
+    const payload = {
+      updated_at: record.updated_at == null ? null : record.updated_at,
+      owner: owner.value,
+      location: location.value,
+      notes: notes.value,
+      tags: tags.slice(),
+      criticality: criticality.value ? criticality.value : null,
+    };
+    saveButton.disabled = true;
+    let response;
+    try {
+      response = await fetch(`/api/v1/assets/${encodeURIComponent(record.key)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Lantern-Token": lanternToken(),
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      error.textContent = "The dashboard could not save.";
+      saveButton.disabled = false;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    saveButton.disabled = false;
+    if (response.status === 200) {
+      device.owner = data.owner || null;
+      device.location = data.location || null;
+      device.notes = data.notes || null;
+      device.tags = Array.isArray(data.tags) ? data.tags : [];
+      device.criticality = data.criticality || null;
+      forgetInventory();
+      dirtyEditors.delete(details);
+      setMessage("Saved.");
+      renderDevices();
+      return;
+    }
+    if (response.status === 409) {
+      forgetInventory();
+      dirtyEditors.delete(details);
+      const items = await loadInventory();
+      const latest = inventoryFor(device, items);
+      if (latest) applyRecord(latest);
+      error.textContent = inventoryCopy(409, data);
+      return;
+    }
+    error.textContent = inventoryCopy(response.status, data);
+  }
+
+  drawChips();
+  const saveButton = node("button", { type: "button", text: "Save" });
+  const cancelButton = node("button", { type: "button", className: "secondary", text: "Cancel" });
+  const addButton = node("button", { type: "button", className: "secondary", text: "Add tag" });
+  saveButton.addEventListener("click", save);
+  cancelButton.addEventListener("click", cancel);
+  addButton.addEventListener("click", addTag);
+  form.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancel();
+      return;
+    }
+    if (event.key !== "Enter" || event.target === notes || event.target === tagInput) return;
+    if (event.target === cancelButton || event.target === addButton || event.target === criticality) return;
+    if (event.target && event.target.getAttribute && event.target.getAttribute("aria-label") === "Remove tag") return;
+    event.preventDefault();
+    save();
+  });
+  form.appendChild(node("label", {}, ["Owner", owner]));
+  form.appendChild(node("label", {}, ["Location", location]));
+  form.appendChild(node("label", {}, ["Tags", chips, tagInput, addButton]));
+  form.appendChild(node("label", {}, ["Criticality", criticality]));
+  form.appendChild(node("label", {}, ["Notes", notes, counter]));
+  form.appendChild(node("div", { className: "asset-actions" }, [saveButton, cancelButton]));
+  form.appendChild(error);
+  return form;
+}
+
 function renderDevice(device) {
   const mac = device.mac || "";
   const name = displayName(device);
@@ -333,18 +626,23 @@ function renderDevice(device) {
   const meta = [device.ip, mac, device.hostname].filter(Boolean).join(" · ");
   children.push(node("p", { className: "meta", text: meta }));
   if (device.label && device.hostname) children.push(node("p", { text: `Hostname: ${device.hostname}` }));
-  if (device.owner) children.push(node("p", { text: `Owner: ${device.owner}` }));
-  if (device.location) children.push(node("p", { text: `Location: ${device.location}` }));
+  const shown = {};
+  function remember(name, el) {
+    shown[name] = el;
+    children.push(el);
+  }
+  if (device.owner) remember("owner", node("p", { className: "shown-owner", text: `Owner: ${device.owner}` }));
+  if (device.location) remember("location", node("p", { className: "shown-location", text: `Location: ${device.location}` }));
   if (device.criticality) {
-    children.push(node("p", {}, [
+    remember("criticality", node("p", { className: "shown-criticality" }, [
       "Criticality: ",
       badge(device.criticality, CRITICALITY_CLASS),
     ]));
   }
   if (Array.isArray(device.tags) && device.tags.length) {
-    children.push(node("p", { text: `Tags: ${device.tags.join(", ")}` }));
+    remember("tags", node("p", { className: "shown-tags", text: `Tags: ${device.tags.join(", ")}` }));
   }
-  if (device.notes) children.push(node("p", { text: `Notes: ${device.notes}` }));
+  if (device.notes) remember("notes", node("p", { className: "shown-notes", text: `Notes: ${device.notes}` }));
   children.push(switchPortLine(device));
   if (worst) {
     children.push(node("p", {}, ["Worst risk: ", badge(worst, BADGE_CLASS)]));
@@ -385,7 +683,29 @@ function renderDevice(device) {
       text: "This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.",
     }));
   }
-  return node("article", { className: device.trusted ? "device" : "device unknown" }, children);
+  const card = node("article", { className: device.trusted ? "device" : "device unknown" }, children);
+  function refreshShown() {
+    const specs = [
+      ["owner", device.owner ? `Owner: ${device.owner}` : ""],
+      ["location", device.location ? `Location: ${device.location}` : ""],
+      ["criticality", device.criticality ? `Criticality: ${device.criticality}` : ""],
+      ["tags", Array.isArray(device.tags) && device.tags.length ? `Tags: ${device.tags.join(", ")}` : ""],
+      ["notes", device.notes ? `Notes: ${device.notes}` : ""],
+    ];
+    for (const [name, text] of specs) {
+      let el = shown[name];
+      if (!el) {
+        el = node("p", { className: "shown-" + name });
+        shown[name] = el;
+        const editor = card.querySelector ? card.querySelector("details") : null;
+        if (card.insertBefore) card.insertBefore(el, editor);
+        else card.appendChild(el);
+      }
+      el.textContent = text;
+    }
+  }
+  card.appendChild(assetEditor(device, refreshShown));
+  return card;
 }
 
 function fillTagChoices() {
@@ -408,6 +728,10 @@ function fillTagChoices() {
 
 function renderDevices() {
   const el = $("devices");
+  if (dirtyEditors.size) {
+    setMessage("Save or cancel the inventory editor before the list changes.", true);
+    return;
+  }
   if (!currentScan) {
     mount(el, [node("div", { className: "empty" }, [
       node("p", { text: "No scans yet." }),
@@ -444,6 +768,9 @@ function bindDeviceActions(el) {
 }
 
 function showScan(scan, diff) {
+  // A missing scan drops the cache. A different scan id is refused by
+  // loadInventory, which only reuses items stored for that same id.
+  if (!scan) forgetInventory();
   currentScan = scan;
   currentDiff = diff;
   renderSummary(currentScan, currentDiff);
