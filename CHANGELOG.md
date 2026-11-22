@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 - 2026-11-22
+
+A hardening and detection release: a scan survives one failing host, the store refuses what it cannot read back, UPnP and file checks are stricter, device and banner detection make fewer wrong guesses, and nine more risky ports are checked. Banner fingerprints and the dashboard inventory editor, added since 1.4.0, ship here too. Schema 7 adds the fingerprint table; a 1.4.0 database is copied to a `.v6.bak` file and upgraded in place.
 
 - A failed host or a failed SSDP/mDNS lookup no longer discards a whole scan: the failing host is skipped with a logged warning, and the port-scan results are kept. A malformed gateway candidate no longer hides the ones after it.
 - `save_scan` refuses a malformed port or finding and rolls the scan back, so it cannot store a scan that `load_scan` rejects. A prune between reading a scan and its predecessor no longer raises; the diff is just empty. A `file::memory:` database stays in memory instead of creating a file.

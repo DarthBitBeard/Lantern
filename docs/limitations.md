@@ -2,7 +2,7 @@
 
 What this version does, and what it does not do.
 
-- **Inventory is edited in the CLI and shown on the dashboard.** `lantern asset` writes owner, location, tags, criticality, and notes ([0.4.0](../CHANGELOG.md#040---2026-10-30)). The static page does not embed them. A caller with the access token receives them on the scan API, and the device cards render them ([0.5.0](../CHANGELOG.md#050---2026-11-02)). A device card on the dashboard can edit them too (Unreleased).
+- **Inventory is edited in the CLI and shown on the dashboard.** `lantern asset` writes owner, location, tags, criticality, and notes ([0.4.0](../CHANGELOG.md#040---2026-10-30)). The static page does not embed them. A caller with the access token receives them on the scan API, and the device cards render them ([0.5.0](../CHANGELOG.md#050---2026-11-02)). A device card on the dashboard can edit them too ([1.5.0](../CHANGELOG.md#150---2026-11-22)).
 - **One token.** `GET /api/v1/status` reports `role` `admin`. There is no read-only token and no second role.
 - **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](../SECURITY.md#known-limitations).
 - **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](../CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
