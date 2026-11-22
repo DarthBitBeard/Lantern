@@ -370,6 +370,13 @@ def build_parser() -> argparse.ArgumentParser:
              "#fragment, as in the printed link, and is not sent to the server.",
     )
     web_p.add_argument(
+        "--tray",
+        action="store_true",
+        help="Windows only. Run in the system tray instead of holding a terminal open: "
+             "the dashboard keeps running, and the tray icon opens it or quits Lantern. "
+             "Loopback only, like --open.",
+    )
+    web_p.add_argument(
         "--allow-lan",
         action="store_true",
         help=(
@@ -1276,7 +1283,8 @@ def main(argv=None) -> int:
             allow_hosts=args.allow_host,
             port=args.port,
             environ=os.environ,
-            tty=_stderr_is_tty() or bool(args.open),  # --open gives the token to the local browser
+            # --open and --tray give the token to the local browser, so no terminal is needed.
+            tty=_stderr_is_tty() or bool(args.open) or bool(args.tray),
             debug=bool(args.debug),
             strict_auth=strict_auth,
             strict_off_because=strict_off_source(
@@ -1370,7 +1378,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 environ=os.environ,
                 # --open hands the token to the local browser, so a token can
                 # be minted without a terminal to print it on.
-                tty=_stderr_is_tty() or bool(getattr(args, "open", False)),
+                tty=_stderr_is_tty() or bool(getattr(args, "open", False)) or bool(getattr(args, "tray", False)),
                 debug=bool(getattr(args, "debug", False)),
                 strict_auth=strict_auth,
                 strict_off_because=strict_off_source(
@@ -1383,6 +1391,13 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(web_bind.error)
         if getattr(args, "open", False) and web_bind.lan_bound:
             return _err("--open works only with a loopback bind (the default 127.0.0.1).")
+        if getattr(args, "tray", False):
+            from . import tray as tray_module
+
+            if not tray_module.is_supported():
+                return _err("--tray is available on Windows only.")
+            if web_bind.lan_bound:
+                return _err("--tray works only with a loopback bind (the default 127.0.0.1).")
         try:
             switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
         except ValueError as exc:
@@ -1416,11 +1431,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             "lan_bound": web_bind.lan_bound,
             "strict_auth": web_bind.strict_auth,
         }
-        if getattr(args, "open", False):
+        if getattr(args, "open", False) or getattr(args, "tray", False):
             if web_bind.strict_auth and web_bind.token:
-                kwargs["open_url"] = one_time_open_link(args.host, args.port, web_bind.token)
+                link = one_time_open_link(args.host, args.port, web_bind.token)
             else:
-                kwargs["open_url"] = one_time_open_link(args.host, args.port, "").split("#", 1)[0]
+                link = one_time_open_link(args.host, args.port, "").split("#", 1)[0]
+            if getattr(args, "open", False):
+                kwargs["open_url"] = link
+            if getattr(args, "tray", False):
+                kwargs["tray"] = True
+                kwargs["tray_url"] = link
         if web_bind.lan_bound or web_bind.strict_auth:
             kwargs["api_token"] = web_bind.token
         if switches:

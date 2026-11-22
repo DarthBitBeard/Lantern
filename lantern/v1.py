@@ -1267,6 +1267,7 @@ def diff_document(conn, query: dict) -> dict:
                 "opened": list(change["opened"]),
                 "closed": list(change["closed"]),
                 "old_ip": old_ip,
+                "service_changes": [dict(item) for item in change.get("service_changes") or []],
             })
     _too_many(len(added) + len(removed) + len(changed))
     return {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.5 - 2026-11-22
+
+A Windows release: the dashboard runs from the system tray instead of an open terminal, and the installer ships with every release.
+
+- `lantern web --tray` (Windows) runs the dashboard from the notification area. The server runs on a background thread and the tray icon on the main one, written with `ctypes`, so Lantern still has no runtime dependencies. Double-click or "Open dashboard" opens the browser with the same one-time link as `--open`; "Quit Lantern" stops the server and removes the icon. It re-adds the icon if Explorer restarts. Loopback only, like `--open`, and refused on other systems.
+- The installer now includes `lantern-tray.exe`, the same program built without a console window (one PyInstaller spec, `packaging/windows/lantern.spec`, builds both into one folder). The Start Menu "Lantern Dashboard", the optional desktop shortcut, and the "open now" step launch it. A failed start (for example port 8068 in use) is shown in a message box. A new unchecked task starts the tray when you sign in, and an upgrade closes a running tray first. `lantern.exe` and the Command Prompt shortcut are unchanged.
+- The Windows package workflow now attaches the installer, the portable `lantern-<version>-windows-x64.exe`, `SHA256SUMS`, and the SBOM to the GitHub release when a `v*` tag is pushed, creating the release if it does not exist. Release 1.5.0 was published without them because that workflow only kept workflow artifacts. The workflow also starts `lantern-tray.exe` on the clean runner and checks that it serves the page without opening a window.
+- A diff now reports a service whose product or version changed on a port open in both scans (`service_changes`, for example `port 22 changed from OpenSSH 8.9 to OpenSSH 9.6`). It appears in the CLI, the saved report, `/api/v1/diff` and the dashboard. A port with no parsed banner on either side is not compared, so a scan saved before fingerprints existed does not read as a change.
+
 ## 1.5.0 - 2026-11-22
 
 A hardening and detection release: a scan survives one failing host, the store refuses what it cannot read back, UPnP and file checks are stricter, device and banner detection make fewer wrong guesses, and nine more risky ports are checked. Banner fingerprints and the dashboard inventory editor, added since 1.4.0, ship here too. Schema 7 adds the fingerprint table; a 1.4.0 database is copied to a `.v6.bak` file and upgraded in place.

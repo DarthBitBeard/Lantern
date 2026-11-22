@@ -64,6 +64,8 @@ def describe_change(change: dict) -> str:
         parts.append("opened " + ", ".join(str(p) for p in change["opened"]))
     if change["closed"]:
         parts.append("closed " + ", ".join(str(p) for p in change["closed"]))
+    for service in change.get("service_changes") or []:
+        parts.append(f"port {service['port']} changed from {service['old']} to {service['new']}")
     return f"{ip}: " + "; ".join(parts) if parts else f"{ip}: no change"
 
 
