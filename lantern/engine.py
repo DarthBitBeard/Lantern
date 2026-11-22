@@ -10,6 +10,7 @@ names in this module (`ping_host`, `tcp_alive`, `arp_table`, `scan_host`,
 from __future__ import annotations
 
 import ipaddress
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from . import demo
@@ -26,6 +27,8 @@ from .discovery import (
 from .identify import discover_identities
 from .ports import DEFAULT_PORTS, findings_for_ports
 from .scanner import scan_host
+
+log = logging.getLogger(__name__)
 
 PING_WORKERS = 50
 TCP_DISCOVERY_WORKERS = 64
@@ -74,10 +77,17 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = Tru
             macs = {**macs, **arp_table()}
 
     ordered = sorted(live, key=lambda ip: int(ipaddress.IPv4Address(ip)))
+
+    def safe_scan_one(ip: str) -> dict | None:
+        # One misbehaving host must not discard every other host's results.
+        try:
+            return scan_one(ip, macs, ports, fingerprint=fingerprint)
+        except Exception as exc:
+            log.warning("skipping %s: scan failed (%s)", ip, type(exc).__name__)
+            return None
+
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
-        return list(pool.map(
-            lambda ip: scan_one(ip, macs, ports, fingerprint=fingerprint), ordered,
-        ))
+        return [d for d in pool.map(safe_scan_one, ordered) if d is not None]
 
 
 def describe_network(network, devices: list[dict], identities: dict | None = None,
@@ -97,12 +107,17 @@ def describe_network(network, devices: list[dict], identities: dict | None = Non
     seen = {d.get("ip"): d for d in devices}
     gateway = None
     try:
-        for candidate in default_gateways():
+        candidates = list(default_gateways())
+    except Exception:
+        candidates = []
+    for candidate in candidates:
+        # A malformed entry must not hide the valid ones after it.
+        try:
             if candidate in seen and ipaddress.IPv4Address(candidate) in network:
                 gateway = candidate
                 break
-    except Exception:
-        gateway = None
+        except ValueError:
+            continue
     if gateway is None:
         gateway = likely_gateway(devices)
     return {
@@ -133,7 +148,12 @@ def scan_subnet(
     with ThreadPoolExecutor(max_workers=1) as pool:
         identities = pool.submit(discover_identities, network, local_ip)
         devices = scan_hosts(hosts, ports, fingerprint=fingerprint)
-        found = identities.result()
+        try:
+            found = identities.result()
+        except Exception as exc:
+            # SSDP/mDNS is optional enrichment; never lose the port scan over it.
+            log.warning("device identity discovery failed (%s)", type(exc).__name__)
+            found = {}
     return devices, describe_network(network, devices, found, local_ip)
 
 

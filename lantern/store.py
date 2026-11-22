@@ -697,7 +697,10 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     refused and left unchanged.
     """
     _prepare_database_file(db_path)
-    conn = sqlite3.connect(str(db_path))
+    # A "file::memory:" name is a SQLite URI. Without uri=True SQLite would
+    # create a literal file of that name, outside the 0600 handling above.
+    in_memory_uri = str(db_path).startswith("file::memory:")
+    conn = sqlite3.connect(str(db_path), uri=in_memory_uri)
     conn.text_factory = _decode_db_text
     try:
         apply_migrations(conn, db_path=db_path)
@@ -802,6 +805,13 @@ def save_scan(
             stored_ports, fingerprints = _split_fingerprints(device.get("open_ports", []))
             if len(fingerprints) > MAX_FINGERPRINTS_PER_DEVICE:
                 raise ValueError("A device can store at most 64 fingerprints.")
+            # Refuse here what load_scan would refuse later, so a bad device
+            # rolls the whole scan back instead of leaving an unreadable one.
+            try:
+                _require_ports(stored_ports)
+                _require_findings(device.get("findings", []))
+            except CorruptScanError:
+                raise ValueError("A device has a malformed port or finding.") from None
             inserted = conn.execute(
                 "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings, identity)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -899,16 +909,6 @@ def _require_object(raw: str | None) -> dict | None:
     if not isinstance(value, dict):
         raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     return value
-
-
-def _load_identity(raw: str | None) -> dict | None:
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
 
 
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
@@ -1247,7 +1247,10 @@ def load_scan_with_diff(
     diff = None
     prev_id = previous_scan_id(conn, scan_id, scan.get("scope_name"))
     if prev_id is not None:
-        diff = diff_scans(apply_trust(load_scan(conn, prev_id), trusted), scan)
+        # A prune can remove the previous scan between the two reads.
+        previous = apply_trust(load_scan(conn, prev_id), trusted)
+        if previous is not None:
+            diff = diff_scans(previous, scan)
     return scan, diff
 
 

@@ -225,6 +225,11 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
             except OSError:
                 pass
         job.fail()
+    except BaseException:
+        # SystemExit and the like skip the handler above; without this the
+        # job would read "running" forever and the dashboard would poll it.
+        job.fail()
+        raise
     finally:
         _scan_lock.release()
 

@@ -153,16 +153,6 @@ def asset_post_key(path: str) -> str | None:
     return path[len(prefix):]
 
 
-def _instant(value) -> str | None:
-    """One spelling for UTC instants. ``Z`` and ``+00:00`` are the same."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if text.endswith("Z"):
-        return text[:-1] + "+00:00"
-    return text
-
-
 class _FieldCode:
     """A validation code. A plain string is a value to store, never a code."""
 

@@ -21,7 +21,15 @@ import subprocess
 import threading
 from pathlib import Path
 
-MAC_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
+# macOS `arp -a` prints octets without leading zeros (0:1a:2b:3c:4d:5e), so
+# one or two digits are accepted. The lookarounds keep a longer run of hex
+# digits or separators (an IPv6 address) from matching in the middle.
+MAC_RE = re.compile(r"(?<![0-9a-fA-F:-])(?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}(?![0-9a-fA-F:-])")
+
+
+def _normalize_mac(text: str) -> str:
+    """Lower-case, colon-separated, every octet two digits."""
+    return ":".join(part.zfill(2) for part in text.lower().replace("-", ":").split(":"))
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 
 # Hard cap on addresses per scan. A /22 is 1024 addresses; a /24 is 256.
@@ -337,15 +345,19 @@ def parse_neighbors(text: str) -> dict[str, str]:
             ipaddress.IPv4Address(ip)
         except ValueError:
             continue
-        mac = mac_match.group(0).lower().replace("-", ":")
+        mac = _normalize_mac(mac_match.group(0))
         if mac != _EMPTY_MAC:
             table[ip] = mac
     return table
 
 
 def _run_text(cmd: list[str], timeout: float = 5) -> str:
+    # Capture bytes and decode ourselves. With text=True the locale codec
+    # applies, and a Windows OEM code page can make it raise on a localized
+    # word, which used to turn the whole ARP or route table into "".
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+        raw = subprocess.run(cmd, capture_output=True, timeout=timeout).stdout
+        return (raw or b"").decode("utf-8", errors="replace")
     except Exception:
         return ""
 

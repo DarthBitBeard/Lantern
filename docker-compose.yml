@@ -56,6 +56,9 @@ services:
     #   - NET_RAW
     security_opt:
       - no-new-privileges:true
+    # Resource caps: a runaway scan cannot exhaust the host's memory or PIDs.
+    mem_limit: 512m
+    pids_limit: 512
     volumes:
       # Create this directory before `docker compose up` and give it to
       # the container user (chown needs root):

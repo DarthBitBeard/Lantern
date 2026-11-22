@@ -55,6 +55,12 @@ jobs:
               lines = gzip.decompress(open(path, "rb").read()).decode().splitlines()
               return {line for line in lines if not line.startswith("#")}
           old, new = rows(sys.argv[1]), rows(sys.argv[2])
+          # A truncated or malformed download must fail the job, not open a
+          # pull request that deletes most of the table.
+          if len(new) < 10000 or len(new) < len(old) * 0.8:
+              sys.exit(f"Refusing the new table: {len(new)} rows (old: {len(old)}).")
+          if any(line.count("\t") < 1 for line in new):
+              sys.exit("Refusing the new table: a row has no tab separator.")
           print(f"changed={'true' if old != new else 'false'}")
           print(f"added={len(new - old)}")
           print(f"removed={len(old - new)}")
