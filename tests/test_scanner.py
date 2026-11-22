@@ -158,7 +158,9 @@ class _SpeakFirst:
                 try:
                     conn.sendall(chunk)
                 except OSError:
-                    return
+                    # The client already has what it needs and hung up (macOS
+                    # reports that at once). Still record what it sent: nothing.
+                    break
                 if self.pause:
                     time.sleep(self.pause)
             got = b""
