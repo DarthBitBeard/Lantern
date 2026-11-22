@@ -612,6 +612,12 @@ def _token_open_flags() -> int:
     return flags
 
 
+def _owned_by_current_user(info: os.stat_result) -> bool:
+    """True when the file belongs to the user running Lantern. Always True on Windows."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is None or info.st_uid == geteuid()
+
+
 def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYTES,
                       suffix: str = "Refusing to start.") -> str:
     """Read a small secret file and return its stripped text. Errors never include the contents.
@@ -619,7 +625,7 @@ def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYT
     Symlinks are refused. A FIFO or other non-regular file is refused
     without a blocking read. Files larger than `max_bytes` are refused. On
     POSIX, a mode other than 0400 or 0600 (any group or other bit) is
-    refused. The error messages name `label` (an environment variable or
+    refused, as is a file owned by a different user. The error messages name `label` (an environment variable or
     flag) and end with `suffix`.
     """
     file_path = Path(path)
@@ -649,6 +655,10 @@ def read_private_file(path: str, label: str, max_bytes: int = MAX_TOKEN_FILE_BYT
             raise ValueError(
                 f"{label} is readable by group or others (mode {mode:04o}). "
                 f"Use mode 0400, owned by the user that runs Lantern. {suffix}"
+            )
+        if not _owned_by_current_user(info):
+            raise ValueError(
+                f"{label} is not owned by the user that runs Lantern. {suffix}"
             )
         if info.st_size > max_bytes:
             raise ValueError(f"{label} is larger than {size_text}. {suffix}")

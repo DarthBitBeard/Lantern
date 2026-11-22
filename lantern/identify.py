@@ -197,6 +197,8 @@ def description_url_allowed(location: str, sender_ip: str, network) -> bool:
         return False
     if str(host) != sender_ip:
         return False
+    if not host.is_private:
+        return False
     if network is not None and host not in network:
         return False
     try:
@@ -212,6 +214,11 @@ _DTD_RE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 def parse_description(xml_bytes: bytes) -> dict:
     """friendlyName, manufacturer, modelName, and deviceType from a UPnP description."""
     if not xml_bytes or len(xml_bytes) > DESCRIPTION_MAX_BYTES or _DTD_RE.search(xml_bytes):
+        return {}
+    # The DTD check above reads ASCII bytes. A UTF-16/32 document spells
+    # "<!DOCTYPE" with NUL bytes between letters and would slip past it, so
+    # anything that is not an ASCII-compatible encoding is refused.
+    if b"\x00" in xml_bytes or xml_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
         return {}
     try:
         root = ET.fromstring(xml_bytes)

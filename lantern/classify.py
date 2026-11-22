@@ -41,11 +41,16 @@ _WINDOWS_PORTS = {135, 139, 445, 3389}
 _WEB_PORTS = {80, 443, 8080, 8443, 8888, 9000, 9090}
 
 _SERVER_NAME_RE = re.compile(r"(^|[-_.])(srv|server|dc\d*|hv\d*|hyperv|esx\w*|dns\d*|sql\w*|db\d*|proxmox|pve\d*|vm\d*)([-_.\d]|$)", re.I)
-_NAS_NAME_RE = re.compile(r"(nas|synology|diskstation|qnap|truenas|unraid)", re.I)
-_CAMERA_NAME_RE = re.compile(r"(cam|camera|ipc|nvr|dvr|doorbell|reolink|hikvision|dahua|wyze)", re.I)
+# Short, ambiguous words need a boundary so "Nastya" is not a NAS and "Cameron" is not
+# a camera. Brand names are long enough to match anywhere in the name.
+_NAS_NAME_RE = re.compile(r"((?<![a-z])nas(?![a-z])|synology|diskstation|qnap|truenas|unraid)", re.I)
+_CAMERA_NAME_RE = re.compile(
+    r"(cam(?![a-z])|camera|(?<![a-z])(?:ipc|nvr|dvr)(?![a-z])|doorbell|reolink|hikvision|dahua|wyze)", re.I,
+)
 _PHONE_NAME_RE = re.compile(r"(iphone|ipad|android|galaxy|pixel|phone)", re.I)
 _PRINTER_NAME_RE = re.compile(r"(printer|laserjet|officejet|deskjet|epson|brother|lexmark|sharp|canon|kyocera|xerox|ricoh)", re.I)
-_ROUTER_NAME_RE = re.compile(r"(router|gateway|firewall|pfsense|opnsense|unifi|edgerouter|mikrotik|ubnt)", re.I)
+# "gateway" is left out: it is also a PC brand. The real gateway is found by address.
+_ROUTER_NAME_RE = re.compile(r"(router|firewall|pfsense|opnsense|unifi|edgerouter|mikrotik|ubnt)", re.I)
 
 
 # Makers whose network cards go into one kind of device, matched on the IEEE
@@ -91,8 +96,14 @@ def is_randomized_mac(mac: str | None) -> bool:
     """True when the locally administered bit is set (a private Wi-Fi address)."""
     if not mac:
         return False
+    # Colon or hyphen separated ("a:b:c..."), dotted ("aabb.ccdd.eeff"), or bare hex.
+    text = str(mac).strip()
+    if ":" in text or "-" in text:
+        first_text = text.replace("-", ":").split(":")[0]
+    else:
+        first_text = re.sub(r"[^0-9a-fA-F]", "", text)[:2]
     try:
-        first = int(mac.replace("-", ":").split(":")[0], 16)
+        first = int(first_text, 16)
     except ValueError:
         return False
     return bool(first & 0x02)
@@ -124,13 +135,16 @@ def classify(device: dict, gateway_ip: str | None = None, gateway_guessed: bool 
         return "network", "It announces itself as a Wi-Fi access point (UPnP)."
     if services & _PRINTER_SERVICES or 9100 in ports or "printer" in upnp:
         return "printer", "It offers printing (IPP, LPD, or raw port 9100)."
+    strong = _vendor_hint(device, _STRONG_VENDORS)
+    # Checked before the camera rule: NAS boxes also expose RTSP (port 554).
+    if _NAS_NAME_RE.search(text):
+        return "nas", "Its name or model looks like network storage."
+    if strong and strong[0] == "nas":
+        return strong
     if 554 in ports or "camera" in upnp or _CAMERA_NAME_RE.search(text):
         return "camera", "It streams video (RTSP) or is named like a camera."
     if services & _SMART_HOME_SERVICES or 8123 in ports or 1883 in ports:
         return "smart_home", "It speaks HomeKit, Matter, MQTT, or runs Home Assistant."
-    if _NAS_NAME_RE.search(text):
-        return "nas", "Its name or model looks like network storage."
-    strong = _vendor_hint(device, _STRONG_VENDORS)
     if strong:
         return strong
     if services & _MEDIA_SERVICES or "mediarenderer" in upnp:

@@ -87,10 +87,19 @@ function formatTime(iso) {
   return Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
 }
 
+// Own keys only: device-supplied values like "constructor" must not hit the prototype.
+function hasOwn(table, key) {
+  return Object.prototype.hasOwnProperty.call(table, key);
+}
+
+function kindLabel(kind) {
+  return hasOwn(KIND_LABELS, kind) ? KIND_LABELS[kind] : undefined;
+}
+
 function worstSeverity(device) {
   let worst = null;
   for (const f of device.findings || []) {
-    if (!(f.severity in SEVERITY_ORDER)) continue;
+    if (!hasOwn(SEVERITY_ORDER, f.severity)) continue;
     if (!worst || SEVERITY_ORDER[f.severity] < SEVERITY_ORDER[worst]) worst = f.severity;
   }
   return worst;
@@ -251,7 +260,7 @@ function deviceMatches(device) {
   if (!q) return true;
   const identity = device.identity || {};
   const hay = [device.ip, device.mac, device.hostname, device.label, identity.name,
-    identity.model, identity.manufacturer, KIND_LABELS[device.kind], device.vendor,
+    identity.model, identity.manufacturer, kindLabel(device.kind), device.vendor,
     device.owner, device.location, device.notes, device.criticality]
     .concat(tags)
     .concat(identity.names || [])
@@ -597,7 +606,7 @@ function assetForm(device, record, details, refreshShown) {
 function renderDevice(device) {
   const mac = device.mac || "";
   const name = displayName(device);
-  const kind = KIND_LABELS[device.kind];
+  const kind = kindLabel(device.kind);
   const announced = identityLine(device);
   const worst = worstSeverity(device);
   const ports = (device.open_ports || []).map((p) => {
@@ -858,10 +867,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const SCAN_WAIT_LIMIT_MS = 30 * 60 * 1000;
+
 async function waitForScan() {
+  const deadline = Date.now() + SCAN_WAIT_LIMIT_MS;
   for (;;) {
     const job = await api("/api/scan");
     if (job.state !== "running") return job;
+    if (Date.now() > deadline) throw new Error("The scan is taking too long. Reload to check on it.");
     await sleep(SCAN_POLL_MS);
   }
 }
@@ -1000,7 +1013,7 @@ function mapNode(device, x, y, kind, network) {
   const g = svgEl("g", {
     class: classes.join(" "), transform: `translate(${x.toFixed(1)} ${y.toFixed(1)})`,
     tabindex: 0, role: "button",
-    "aria-label": `${KIND_LABELS[device.kind] || "Device"} ${label} ${device.ip}, worst risk ${worst}`,
+    "aria-label": `${kindLabel(device.kind) || "Device"} ${label} ${device.ip}, worst risk ${worst}`,
   });
   g.dataset.key = deviceKey(device);
   const r = isRouter ? 30 : 20;
@@ -1072,7 +1085,7 @@ function mapLayout(devices, gatewayIp) {
   const known = new Set(MAP_KIND_ORDER);
   const kindOf = (d) => (known.has(d.kind) ? d.kind : (d.kind ? "other" : "unknown"));
   const groups = MAP_KIND_ORDER
-    .map((kind) => ({ kind, label: KIND_LABELS[kind] || kind, items: others.filter((d) => kindOf(d) === kind) }))
+    .map((kind) => ({ kind, label: kindLabel(kind) || kind, items: others.filter((d) => kindOf(d) === kind) }))
     .filter((g) => g.items.length);
   return { router, ...wedgeLayout(groups, others.length) };
 }

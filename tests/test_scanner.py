@@ -158,7 +158,9 @@ class _SpeakFirst:
                 try:
                     conn.sendall(chunk)
                 except OSError:
-                    return
+                    # The client already has what it needs and hung up (macOS
+                    # reports that at once). Still record what it sent: nothing.
+                    break
                 if self.pause:
                     time.sleep(self.pause)
             got = b""
@@ -185,7 +187,9 @@ class _SpeakFirst:
 class BannerReadTests(unittest.TestCase):
     def test_a_trickled_ssh_greeting_is_parsed_and_sends_nothing(self):
         greeting = b"SSH-2.0-OpenSSH_9.6\n"
-        listener = _SpeakFirst([bytes([byte]) for byte in greeting], pause=0.02)
+        # Five-byte pieces: still several separate reads, but four short sleeps
+        # instead of twenty, which macOS runners stretch past the probe timeout.
+        listener = _SpeakFirst([greeting[i:i + 5] for i in range(0, len(greeting), 5)], pause=0.02)
         try:
             started = time.monotonic()
             result = probe_port("127.0.0.1", listener.port, timeout=1)

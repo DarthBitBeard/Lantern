@@ -34,6 +34,18 @@ def _short_path(path: Path) -> str | None:
     return short
 
 
+def _can_symlink() -> bool:
+    """False where the account may not create symlinks (Windows without Developer Mode)."""
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            os.symlink(folder, os.path.join(folder, "probe"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+needs_symlinks = unittest.skipUnless(_can_symlink(), "this account cannot create symlinks")
+
 class _OpenPatch:
     """Replace os.open without making the dir_fd support check fail.
 
@@ -74,6 +86,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, True)
 
+    @needs_symlinks
     def test_an_ancestor_link_is_accepted(self):
         real = self.root / "real"
         real.mkdir()
@@ -85,6 +98,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertEqual(Path(written).read_bytes(), b"ok")
         self.assertEqual((real / "child" / "out.json").read_bytes(), b"ok")
 
+    @needs_symlinks
     def test_a_tmp_style_ancestor_link_is_accepted_and_the_link_itself_is_refused(self):
         # macOS /tmp is a symlink to /private/tmp. A file in a real directory
         # under that link is allowed. A file whose parent is the link itself
@@ -119,6 +133,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertNotIn("export directory itself", readme)
         self.assertNotIn("directory reached through a symlink", readme)
 
+    @needs_symlinks
     def test_the_final_directory_symlink_is_refused(self):
         target = self.root / "target"
         target.mkdir()
@@ -129,6 +144,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertIn("directory itself", str(caught.exception))
         self.assertFalse((target / "out.json").exists())
 
+    @needs_symlinks
     def test_a_symlinked_or_dangling_output_is_refused_with_and_without_force(self):
         folder = self.root / "folder"
         folder.mkdir()
@@ -179,6 +195,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertIn("directory itself", str(caught.exception))
         self.assertFalse((decoy / "out.json").exists())
 
+    @needs_symlinks
     def test_a_final_directory_symlink_is_refused_before_it_is_opened(self):
         target = self.root / "target"
         target.mkdir()
@@ -405,6 +422,7 @@ class ExportSymlinkTests(unittest.TestCase):
         self.assertNotIn("directory itself", message)
         self.assertEqual(secret.read_bytes(), b"secret")
 
+    @needs_symlinks
     def test_path_write_rechecks_the_directory_before_create_and_replace(self):
         # Windows has no directory fd. Force that path and swap the directory
         # on the re-check lstat: once before create, once before replace.

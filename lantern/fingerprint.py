@@ -34,10 +34,12 @@ class Fingerprint:
 
 
 def _sanitise(text: str) -> str:
-    """ASCII 0x20–0x7E only. Anything else, including U+FFFD, becomes ``?``."""
+    """ASCII 0x20–0x7E only. A tab becomes a space; anything else, including U+FFFD, becomes ``?``."""
     out: list[str] = []
     spaced = False
     for char in text:
+        if char == "\t":
+            char = " "  # a tab separates tokens, as in "220<TAB>ProFTPD"
         char = char if " " <= char <= "~" else "?"
         if char == " ":
             if spaced:
@@ -161,6 +163,11 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
         tokens = _tokens(value)
         if not tokens:
             return _result("http", None, None, value)
+        # A header cut off by the read cap can end in the middle of a version
+        # ("Apache/2.4.4" for "Apache/2.4.41"). Report the product, not a
+        # version that may be wrong.
+        if len(raw) > cap and lines and lines[-1][:7].lower() == "server:" and not text[:cap].endswith("\n"):
+            return _result("http", tokens[0].partition("/")[0] or None, None, value)
         name, slash, version = tokens[0].partition("/")
         return _result("http", name or None, version if slash else None, value)
     line = _sanitise(_first_line(text))
@@ -183,6 +190,9 @@ def parse(service_hint: str, raw: bytes) -> Fingerprint | None:
             if index + 1 < len(raw_tokens):
                 # Parentheses wrap a version. ``?`` is left so garbage is rejected.
                 version = _strip_ends(raw_tokens[index + 1], marks="()")
+                # "ProFTPD Server 1.3.5": the word "Server" sits before the number.
+                if version.lower() == "server" and index + 2 < len(raw_tokens):
+                    version = _strip_ends(raw_tokens[index + 2], marks="()")
                 if service_hint == "smtp":
                     version = version.split("/", 1)[0]
             return _result(service_hint, name, version, line)
