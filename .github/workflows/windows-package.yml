@@ -239,6 +239,10 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           cd "$RUNNER_TEMP/dl/lantern-${version}-windows-x64"
+          # The checksum file is written on Windows, so its lines end in CRLF.
+          # Strip the CR, or the rename below and sha256sum see a name with a
+          # trailing carriage return.
+          sed -i 's/\r$//' SHA256SUMS
           sha256sum -c SHA256SUMS
           test -f "lantern-${version}-windows-x64-setup.exe"
           # The portable build is lantern.exe inside the artifact. On the
