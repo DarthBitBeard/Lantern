@@ -1822,6 +1822,35 @@ def _open_browser(url: str) -> bool:
     return bool(opened)
 
 
+def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
+    """Run the server on a background thread and a tray icon on this one.
+
+    Returns when the user chooses Quit or the server stops by itself.
+    """
+    from .tray import TrayIcon
+
+    browser_url = url or f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
+    icon = TrayIcon(
+        f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost") else f"Lantern dashboard ({host}:{port})",
+        on_open=lambda: _open_browser(browser_url),
+        on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
+    )
+
+    def run_server() -> None:
+        try:
+            server.serve_forever()
+        finally:
+            icon.stop()  # the server ended on its own: take the icon down too
+
+    thread = threading.Thread(target=run_server, name="lantern-http", daemon=True)
+    thread.start()
+    try:
+        icon.run()
+    finally:
+        server.shutdown()
+        thread.join(timeout=10)
+
+
 def serve(
     db_path,
     host: str = "127.0.0.1",
@@ -1834,6 +1863,8 @@ def serve(
     open_url: str | None = None,
     switches: tuple | None = None,
     fingerprint: bool = True,
+    tray: bool = False,
+    tray_url: str | None = None,
 ) -> None:
     server = make_server(
         db_path,
@@ -1883,7 +1914,10 @@ def serve(
         except (ValueError, OSError):
             previous_term = None
     try:
-        server.serve_forever()
+        if tray:
+            _serve_in_tray(server, str(bound_host), int(bound_port), tray_url)
+        else:
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:

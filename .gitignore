@@ -31,6 +31,8 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# The Windows installer build is a hand-written spec, kept in the repository.
+!packaging/windows/lantern.spec
 
 # Installer logs
 pip-log.txt

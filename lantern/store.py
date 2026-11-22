@@ -1279,12 +1279,38 @@ def _pair_by_key(old_devices: list[dict], new_devices: list[dict]):
     return pairs, new_left[count:], old_left[count:]
 
 
+def _service_labels(device: dict) -> dict[int, str]:
+    """{port: "product version"} for the ports whose banner parsed to a product and version."""
+    labels = {}
+    for entry in device.get("open_ports") or []:
+        fingerprint = entry.get("fingerprint") if isinstance(entry, dict) else None
+        if fingerprint and fingerprint.get("product") and fingerprint.get("version"):
+            labels[entry["port"]] = f"{fingerprint['product']} {fingerprint['version']}"
+    return labels
+
+
+def _service_changes(old_device: dict, new_device: dict) -> list[dict]:
+    """Ports open in both scans whose parsed product/version differs.
+
+    A port with no parsed banner on either side is skipped, so a scan saved
+    before fingerprints existed does not read as a wall of changes.
+    """
+    before, after = _service_labels(old_device), _service_labels(new_device)
+    return [
+        {"port": port, "old": before[port], "new": after[port]}
+        for port in sorted(before.keys() & after.keys())
+        if before[port] != after[port]
+    ]
+
+
 def diff_scans(old: dict, new: dict) -> dict:
     """Compare two scan dicts. Key devices by MAC when known, else IP.
 
-    A device counts as changed when a port opened or closed, or when it
-    kept its MAC but moved to a new IP (old_ip then differs from device.ip).
-    Devices that share a MAC are matched one by one, never merged.
+    A device counts as changed when a port opened or closed, when a service
+    on a port open in both scans reports a different product or version
+    (``service_changes``), or when it kept its MAC but moved to a new IP
+    (old_ip then differs from device.ip). Devices that share a MAC are
+    matched one by one, never merged.
     """
     def key(device):
         return (device.get("mac") or "").lower() or device["ip"]
@@ -1308,10 +1334,11 @@ def diff_scans(old: dict, new: dict) -> dict:
             new_ports = {p["port"] for p in device["open_ports"]}
             opened = sorted(new_ports - old_ports)
             closed = sorted(old_ports - new_ports)
-            if opened or closed or device["ip"] != old_device["ip"]:
+            service_changes = _service_changes(old_device, device)
+            if opened or closed or service_changes or device["ip"] != old_device["ip"]:
                 changed.append(
                     {"device": device, "opened": opened, "closed": closed,
-                     "old_ip": old_device["ip"]}
+                     "old_ip": old_device["ip"], "service_changes": service_changes}
                 )
     for k, old_devices in old_groups.items():
         if k not in new_groups:

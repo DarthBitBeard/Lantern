@@ -3,8 +3,10 @@ name: Windows package
 # Builds the portable lantern.exe (PyInstaller, one file), a one-folder
 # build for the per-user installer (Inno Setup), and the installer, then
 # installs, runs, and uninstalls it on a clean runner.
-# The files are kept as workflow artifacts. Nothing is published or
-# released from here, and nothing scans a network.
+# The files are kept as workflow artifacts. On a version tag (v*) the
+# publish job also attaches the installer, the portable exe, SHA256SUMS and
+# the SBOM to that tag's GitHub release, creating the release if needed.
+# Nothing scans a network.
 
 on:
   push:
@@ -59,14 +61,15 @@ jobs:
             --distpath build/exe --workpath build/pyi-onefile --specpath build/pyi-onefile `
             packaging/windows/lantern_launcher.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          # One folder (lantern.exe + _internal) for the installer: no
-          # self-extraction to %TEMP% on each run, which antivirus
-          # heuristics often flag.
-          python -m PyInstaller @common --onedir `
-            --distpath build/dir --workpath build/pyi-onedir --specpath build/pyi-onedir `
-            packaging/windows/lantern_launcher.py
+          # One folder (lantern.exe, the windowed lantern-tray.exe, and one
+          # _internal) for the installer, from the spec: no self-extraction
+          # to %TEMP% on each run, which antivirus heuristics often flag.
+          python -m PyInstaller --noconfirm --clean `
+            --distpath build/dir --workpath build/pyi-onedir `
+            packaging/windows/lantern.spec
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if (-not (Test-Path build/dir/lantern/_internal)) { throw "one-folder build has no _internal folder" }
+          if (-not (Test-Path build/dir/lantern/lantern-tray.exe)) { throw "one-folder build has no lantern-tray.exe" }
 
       - name: Smoke-test both builds outside the checkout
         run: |
@@ -113,7 +116,8 @@ jobs:
           }
           $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut("$menu\Lantern Dashboard.lnk")
           Write-Host "Dashboard shortcut: $($lnk.TargetPath) $($lnk.Arguments)"
-          if ($lnk.Arguments -notlike "*lantern.exe`" web --open --db `"$data\lantern.db`"*") { throw "dashboard shortcut arguments are wrong" }
+          if ($lnk.TargetPath -notlike "*lantern-tray.exe" -or $lnk.Arguments -notlike "web --tray --open --db `"$data\lantern.db`"*") { throw "dashboard shortcut is wrong: $($lnk.TargetPath) $($lnk.Arguments)" }
+          if (-not (Test-Path "$app\lantern-tray.exe")) { throw "lantern-tray.exe not installed to $app" }
 
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if (($userPath -split ';') -notcontains $app) { throw "install folder not on the user PATH: $userPath" }
@@ -154,6 +158,23 @@ jobs:
             Remove-Item Env:LANTERN_API_TOKEN
           }
 
+          # The tray build as the shortcut runs it (minus --open): it must
+          # start with no console window, serve the page, and be quitable.
+          $tray = Start-Process "$app\lantern-tray.exe" -ArgumentList 'web','--tray','--db',"$data\lantern.db",'--port','8098' -PassThru
+          try {
+            $page = $null
+            for ($i = 0; $i -lt 40 -and -not $page; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ($tray.HasExited) { throw "lantern-tray.exe exited early: $($tray.ExitCode)" }
+              try { $page = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8098/ } catch {}
+            }
+            if (-not $page -or $page.StatusCode -ne 200) { throw "tray dashboard page did not load" }
+            if ($tray.MainWindowHandle -ne 0) { throw "lantern-tray.exe opened a visible window" }
+          } finally {
+            & taskkill.exe /PID $tray.Id /T /F | Out-Null
+            for ($i = 0; $i -lt 20 -and (Get-Process lantern-tray -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 250 }
+          }
+
           $p = Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if ($p.ExitCode) { throw "uninstaller exit $($p.ExitCode)" }
           # The uninstaller copies itself to a temp folder and finishes there.
@@ -188,3 +209,54 @@ jobs:
           path: build/manifest/
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    name: attach to release
+    # Only a version tag publishes. A pull request or a push to main never does.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: windows-installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # contents: write creates the release and uploads to it; actions: read
+    # lets `gh run download` fetch the artifact the build job just made.
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download the build artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dl"
+          gh run download "${{ github.run_id }}" --dir "$RUNNER_TEMP/dl"
+          ls -lR "$RUNNER_TEMP/dl"
+
+      - name: Check the checksums, then name the portable exe
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cd "$RUNNER_TEMP/dl/lantern-${version}-windows-x64"
+          sha256sum -c SHA256SUMS
+          test -f "lantern-${version}-windows-x64-setup.exe"
+          # The portable build is lantern.exe inside the artifact. On the
+          # release it carries the version, and SHA256SUMS follows the rename.
+          mv lantern.exe "lantern-${version}-windows-x64.exe"
+          sed -i -E "s/(  \*?)lantern\.exe\$/\1lantern-${version}-windows-x64.exe/" SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Create the release if needed and upload the files
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cd "$RUNNER_TEMP/dl/lantern-${version}-windows-x64"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "Lantern ${version}" \
+              --notes "See CHANGELOG.md for what changed in ${version}."
+          fi
+          gh release upload "$TAG" --clobber \
+            "lantern-${version}-windows-x64-setup.exe" \
+            "lantern-${version}-windows-x64.exe" \
+            SHA256SUMS lantern-sbom.cdx.json

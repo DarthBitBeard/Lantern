@@ -149,6 +149,7 @@ function describeChange(change) {
   if (change.old_ip && change.old_ip !== change.device.ip) parts.push(`moved from ${change.old_ip}`);
   if (change.opened.length) parts.push(`opened ${change.opened.join(", ")}`);
   if (change.closed.length) parts.push(`closed ${change.closed.join(", ")}`);
+  for (const s of change.service_changes || []) parts.push(`port ${s.port} changed from ${s.old} to ${s.new}`);
   return `${change.device.ip}: ${parts.join("; ") || "no change"}`;
 }
 

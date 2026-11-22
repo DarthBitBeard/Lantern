@@ -30,10 +30,12 @@ Nmap is powerful and has no memory: no history, no diff, no plain English fix st
 
 Download `lantern-<version>-windows-x64-setup.exe` from the [releases page](https://github.com/DarthBitBeard/Lantern/releases) and run it. It needs no Python and no admin rights. It installs for your user only into `%LOCALAPPDATA%\Programs\Lantern`, adds `lantern` to your PATH (a checkbox), and creates these Start Menu entries:
 
-- **Lantern Dashboard** starts the dashboard and opens it in your browser. Closing its window stops Lantern.
+- **Lantern Dashboard** starts the dashboard in the system tray and opens it in your browser. No terminal window stays open. Right-click the tray icon (it may sit under the `^` overflow arrow) to open the dashboard or quit Lantern; double-click opens it. If Lantern cannot start, for example because port 8068 is already in use, a message box says why. An optional checkbox in the installer starts Lantern in the tray when you sign in.
 - **Lantern Command Prompt** opens a prompt where `lantern scan`, `lantern history`, and the other commands work.
 
 Both use the scan history in `%LOCALAPPDATA%\Lantern\lantern.db`. Uninstall from Settings > Apps. The uninstaller leaves that folder in place, so your history survives a reinstall; delete it yourself to remove it.
+
+From a terminal, `lantern web --tray` does the same on Windows and returns the dashboard to the tray (`lantern-tray.exe` is the same program with no console window). The tray is loopback only, like `--open`.
 
 The installer and `lantern.exe` are not code-signed, so SmartScreen may warn "Windows protected your PC". Choose "More info", then "Run anyway", after checking the SHA-256 in the release notes. The build is `.github/workflows/windows-package.yml`, which installs, runs, and uninstalls the package on a clean runner.
 
