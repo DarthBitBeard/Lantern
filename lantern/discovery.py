@@ -14,6 +14,7 @@ Safety rules, enforced here and in the CLI:
 from __future__ import annotations
 
 import ipaddress
+import os
 import platform
 import re
 import socket
@@ -263,6 +264,21 @@ def guess_subnet() -> str | None:
     return None
 
 
+def _no_window() -> dict:
+    """subprocess keyword arguments that keep a console window from opening.
+
+    The tray build (lantern-tray.exe) has no console. Without this, Windows
+    gives every ping, arp, ipconfig, and route it starts a console window of
+    its own, which flashes on screen hundreds of times per scan.
+    """
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0  # SW_HIDE
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": startup}
+
+
 def ping_command(ip: str, timeout_ms: int = 1000, system: str | None = None) -> list[str]:
     """Build the one-shot ping command for this OS.
 
@@ -291,7 +307,7 @@ def ping_host(ip: str, timeout_ms: int = 1000) -> bool:
     try:
         result = subprocess.run(
             ping_command(ip, timeout_ms, system), capture_output=True,
-            timeout=timeout_ms / 1000 + 2,
+            timeout=timeout_ms / 1000 + 2, **_no_window(),
         )
         if result.returncode != 0:
             return False
@@ -356,7 +372,7 @@ def _run_text(cmd: list[str], timeout: float = 5) -> str:
     # applies, and a Windows OEM code page can make it raise on a localized
     # word, which used to turn the whole ARP or route table into "".
     try:
-        raw = subprocess.run(cmd, capture_output=True, timeout=timeout).stdout
+        raw = subprocess.run(cmd, capture_output=True, timeout=timeout, **_no_window()).stdout
         return (raw or b"").decode("utf-8", errors="replace")
     except Exception:
         return ""

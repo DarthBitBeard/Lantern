@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from . import demo
@@ -47,14 +48,43 @@ def scan_one(ip: str, macs: dict[str, str], ports, *, fingerprint: bool = True) 
     }
 
 
-def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = True) -> list[dict]:
-    """Ping and port-scan these addresses. An empty list does not touch the network."""
+def _counting(fn, report):
+    """Wrap ``fn`` so each finished call bumps a shared counter and calls ``report(done)``."""
+    lock = threading.Lock()
+    done = [0]
+
+    def run(item):
+        try:
+            return fn(item)
+        finally:
+            with lock:
+                done[0] += 1
+                count = done[0]
+            try:
+                report(count)
+            except Exception:
+                pass  # progress is for display only; never fail a scan over it
+
+    return run
+
+
+def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = True,
+               progress=None) -> list[dict]:
+    """Ping and port-scan these addresses. An empty list does not touch the network.
+
+    ``progress(phase, done, total)``, when given, is called as work finishes:
+    phase "discover" counts addresses checked, then "ports" counts live
+    hosts whose ports were checked. It runs on worker threads.
+    """
     if not hosts:
         return []
+    report = progress or (lambda phase, done, total: None)
+    report("discover", 0, len(hosts))
     macs = arp_table()
 
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
-        live = {ip for ip, alive in zip(hosts, pool.map(ping_host, hosts)) if alive}
+        ping = _counting(ping_host, lambda n: report("discover", n, len(hosts)))
+        live = {ip for ip, alive in zip(hosts, pool.map(ping, hosts)) if alive}
 
     # Pinging is what fills the ARP cache, so a host found only by ping has
     # no MAC in the snapshot taken above. Read the table again and let the
@@ -86,8 +116,10 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = Tru
             log.warning("skipping %s: scan failed (%s)", ip, type(exc).__name__)
             return None
 
+    report("ports", 0, len(ordered))
     with ThreadPoolExecutor(max_workers=HOST_WORKERS) as pool:
-        return [d for d in pool.map(safe_scan_one, ordered) if d is not None]
+        counted = _counting(safe_scan_one, lambda n: report("ports", n, len(ordered)))
+        return [d for d in pool.map(counted, ordered) if d is not None]
 
 
 def describe_network(network, devices: list[dict], identities: dict | None = None,
@@ -133,6 +165,7 @@ def scan_subnet(
     demo_mode: bool = False,
     *,
     fingerprint: bool = True,
+    progress=None,
 ) -> tuple[list[dict], dict]:
     """Scan one private subnet. Returns (devices, network info for `save_scan`).
 
@@ -147,7 +180,10 @@ def scan_subnet(
     local_ip = local_ipv4_in(network)
     with ThreadPoolExecutor(max_workers=1) as pool:
         identities = pool.submit(discover_identities, network, local_ip)
-        devices = scan_hosts(hosts, ports, fingerprint=fingerprint)
+        if progress is None:
+            devices = scan_hosts(hosts, ports, fingerprint=fingerprint)
+        else:
+            devices = scan_hosts(hosts, ports, fingerprint=fingerprint, progress=progress)
         try:
             found = identities.result()
         except Exception as exc:

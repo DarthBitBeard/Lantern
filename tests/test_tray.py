@@ -46,6 +46,12 @@ class TrayModuleTests(unittest.TestCase):
 
 
 class TrayFlagTests(unittest.TestCase):
+    def setUp(self):
+        # Never reach a real Lantern tray running on the test machine.
+        patcher = mock.patch("lantern.tray.signal_running_instance", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def run_main(self, *argv):
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err):

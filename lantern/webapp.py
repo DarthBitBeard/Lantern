@@ -153,11 +153,38 @@ class _ScanJob:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._state = {"state": "idle", "subnet": None, "scan_id": None, "error": None}
+        self._state = {"state": "idle", "subnet": None, "scan_id": None, "error": None,
+                       "progress": None}
 
     def start(self, subnet: str) -> None:
         with self._lock:
-            self._state = {"state": "running", "subnet": subnet, "scan_id": None, "error": None}
+            self._state = {
+                "state": "running", "subnet": subnet, "scan_id": None, "error": None,
+                "progress": {"phase": "starting", "done": 0, "total": 0,
+                             "started_at": time.time()},
+            }
+
+    def report(self, phase: str, done: int, total: int) -> None:
+        """Record scan progress for `GET /api/scan`. Called from worker threads."""
+        with self._lock:
+            progress = self._state.get("progress")
+            if self._state.get("state") != "running" or progress is None:
+                return
+            if progress["phase"] == phase and done < progress["done"]:
+                return  # a late report from a slower worker
+            self._state["progress"] = {**progress, "phase": phase, "done": int(done),
+                                       "total": int(total)}
+
+    def progress_text(self) -> str | None:
+        """A short line such as "Checking ports 8/21", or None when idle."""
+        snapshot = self.snapshot()
+        progress = snapshot.get("progress")
+        if snapshot.get("state") != "running" or not progress:
+            return None
+        label = {"discover": "Finding devices", "ports": "Checking ports"}.get(progress["phase"])
+        if not label or not progress["total"]:
+            return "Starting scan"
+        return f"{label} {progress['done']}/{progress['total']}"
 
     def finish(self, scan_id: int) -> None:
         with self._lock:
@@ -169,7 +196,12 @@ class _ScanJob:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return dict(self._state)
+            state = dict(self._state)
+            if state.get("progress"):
+                progress = dict(state["progress"])
+                progress["elapsed_seconds"] = round(time.time() - progress.pop("started_at"), 1)
+                state["progress"] = progress
+            return state
 
 
 class _SubnetGuess:
@@ -211,7 +243,9 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
     """
     scan_id = None
     try:
-        devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS, fingerprint=fingerprint)
+        devices, network = engine.scan_subnet(
+            subnet, DEFAULT_PORTS, fingerprint=fingerprint, progress=job.report,
+        )
         topo = None
         if switches:
             ips, community = switches
@@ -1927,7 +1961,7 @@ def tray_status_line(handler, now: float | None = None) -> str:
 
     now = time.time() if now is None else now
     if _scan_lock.locked():
-        return "Scanning now…"
+        return handler.scan_job.progress_text() or "Scanning now…"
     conn = connect(handler.db_path)
     try:
         newest = list_scans(conn, limit=1)
