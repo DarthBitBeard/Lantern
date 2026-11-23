@@ -2042,33 +2042,10 @@ def serve(
         # In the tray, alerts are notifications instead (see _serve_in_tray).
         handler.scan_listeners.append(alert_listener(handler.db_path, _print_alert))
     watcher = _make_watcher(handler, watch_seconds, watch_subnet) if watch_seconds else None
-    for line in startup_lines(
-        str(bound_host),
-        int(bound_port),
-        lan_bound=bool(handler.lan_bound),
-        allowed_hosts=handler.allowed_hosts,
-        strict_auth=bool(handler.strict_auth),
-    ):
-        print(line, flush=True)
-    print(f"Database: {db_path}", flush=True)
-    if not handler.lan_bound:
-        extras = _extra_allowed_hosts(handler.allowed_hosts, int(bound_port))
-        if extras:
-            print("Additional allowed Host headers: " + ", ".join(extras), flush=True)
-    if debug:
-        print("Debug request logging on.", flush=True)
-    if watcher is not None:
-        kept = f"; keeping {keep_days:g} days of scans" if keep_days else ""
-        print(f"Watching {watcher.subnet} every {watcher.status()['interval']}{kept}. "
-              "Scheduled scans are skipped while this machine is on another network.", flush=True)
-        watcher.start()
-    elif keep_days:
-        print(f"Keeping {keep_days:g} days of scans.", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-    if open_url:
-        # The socket is already listening, so the browser's first request
-        # waits in the backlog until serve_forever starts.
-        _open_browser(open_url)
+    # Install the SIGTERM handler before announcing the address: anything
+    # that stops Lantern right after it reads the startup line must get a
+    # clean shutdown, not the default kill. shutdown() before serve_forever
+    # starts is fine: serve_forever then returns at once.
     previous_term = None
     if (
         hasattr(signal, "SIGTERM")
@@ -2083,6 +2060,33 @@ def serve(
         except (ValueError, OSError):
             previous_term = None
     try:
+        for line in startup_lines(
+            str(bound_host),
+            int(bound_port),
+            lan_bound=bool(handler.lan_bound),
+            allowed_hosts=handler.allowed_hosts,
+            strict_auth=bool(handler.strict_auth),
+        ):
+            print(line, flush=True)
+        print(f"Database: {db_path}", flush=True)
+        if not handler.lan_bound:
+            extras = _extra_allowed_hosts(handler.allowed_hosts, int(bound_port))
+            if extras:
+                print("Additional allowed Host headers: " + ", ".join(extras), flush=True)
+        if debug:
+            print("Debug request logging on.", flush=True)
+        if watcher is not None:
+            kept = f"; keeping {keep_days:g} days of scans" if keep_days else ""
+            print(f"Watching {watcher.subnet} every {watcher.status()['interval']}{kept}. "
+                  "Scheduled scans are skipped while this machine is on another network.", flush=True)
+            watcher.start()
+        elif keep_days:
+            print(f"Keeping {keep_days:g} days of scans.", flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
+        if open_url:
+            # The socket is already listening, so the browser's first request
+            # waits in the backlog until serve_forever starts.
+            _open_browser(open_url)
         if tray:
             _serve_in_tray(server, str(bound_host), int(bound_port), tray_url)
         else:
