@@ -93,7 +93,7 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | List saved scans | `python3 -m lantern history` (add `--scope home` to list one scope) |
 | Delete old scans | `python3 -m lantern prune --keep 30` shows what would go; add `--yes` to delete. `--older-than DAYS` works too, and `--vacuum` shrinks the file. The newest scan of each scope is always kept, and inventory and trust records are kept. |
 | HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` or `--scope home`) |
-| Export devices, findings, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
+| Export devices, findings, services, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
 | Tests | `python3 tests/run_tests.py` |
 
 Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <command> --help`. Errors go to stderr with exit code 2.
@@ -214,9 +214,27 @@ The demo (`lantern demo`, or **Run demo** on the dashboard) includes two example
 
 Scans saved before 1.1.0 still draw. They have no stored router or names, so the router is guessed and devices are grouped by ports and hostnames only.
 
+## Watch mode and alerts
+
+`lantern web --watch 1h` scans again every hour while the dashboard runs (any of `30m`, `2h`, `1d`; 5 minutes to 7 days). Scheduled scans use the same job as the dashboard's Scan button, so two scans never overlap.
+
+```bash
+python3 -m lantern web --watch 1h                 # the detected subnet, fixed at start
+python3 -m lantern web --watch 2h --watch-subnet 192.168.1.0/24
+python3 -m lantern web --watch 1h --keep-days 30  # default 90 with --watch; 0 keeps everything
+```
+
+- **It only scans the network it started on.** The subnet is fixed when the dashboard starts, and a scheduled scan is skipped while this machine has no address in it. A laptop taken to another network does not scan that network on its own.
+- **Old scans are removed.** With `--watch`, scans older than 90 days are deleted after each dashboard scan (`--keep-days` changes that). The newest scan of each scope is always kept. `--keep-days` also works without `--watch`.
+- **Alerts.** After each dashboard scan the new scan is compared with the previous one. A new device that is not trusted or labelled, a high or critical risk port that opened, or a service that reports a different product or version raises an alert. In the tray it is a Windows notification (click it to open the dashboard). In a terminal it is one line. Moved addresses and closed ports stay in the diff and are not alerts.
+- **New since your last visit.** The dashboard remembers which devices this browser has seen (MAC or IP only, in the browser's local storage) and marks the ones that are new to you.
+- `GET /api/status` reports the schedule under `watch` (interval, subnet, next scan) and `keep_days`.
+
+In the tray, right-click the icon for the last and next scan time, **Scan now**, **Open dashboard**, and **Quit Lantern**. Starting the tray a second time opens the running one's dashboard instead of failing. The Windows installer has an unchecked option that adds `--watch 1h` to the tray shortcuts.
+
 ## Export and `/api/v1`
 
-`lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
+`lantern export` writes one scan's devices, findings, or services, or the scan history, as JSON or CSV. `--what services` has one row per open port whose banner was parsed: `scan_id`, `ip`, `mac`, `port`, `service`, `product`, `version`, `parse_status`. A service reports its own product and version, which can be wrong or spoofed. The devices and findings columns are unchanged. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
 
 When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every other path, including stdout and `.json`, is JSON. The suffix match ignores case. If `--format` is set and the path ends in `.csv` or `.json` and that suffix does not match, the command exits 2 and does not write the file. A different suffix, such as `.txt`, keeps the format you named.
 
@@ -355,7 +373,7 @@ What this version does, and what it does not do.
 - **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](SECURITY.md#known-limitations).
 - **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
 - **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
-- **Not in this version:** showing banner fingerprints in reports, `/api/v1`, or exports (a scan stores them), a vulnerability database or matcher, and a watch mode or local alerts. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
+- **Not in this version:** a vulnerability database or matcher. Banner fingerprints are shown, but a version is never checked against advisories. Alerts are local only (tray notifications, a console line, and dashboard markers): there is no email, push, or webhook. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
 
 ## Troubleshooting
 

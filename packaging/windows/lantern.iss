@@ -60,6 +60,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "addtopath"; Description: "Add lantern to my PATH, so it runs from any terminal"; GroupDescription: "Command line:"
 Name: "desktopicon"; Description: "Create a desktop shortcut for the dashboard"; GroupDescription: "Shortcuts:"; Flags: unchecked
 Name: "autostart"; Description: "Start Lantern in the system tray when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
+Name: "watch"; Description: "While Lantern runs in the tray, scan my network every hour and notify me about new devices and risky ports (keeps 90 days of scans)"; GroupDescription: "Watch mode:"; Flags: unchecked
 
 [Dirs]
 ; Per-user data folder shared by the shortcuts and the command prompt.
@@ -82,7 +83,7 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignor
 ; Right-click the tray icon to open the dashboard or quit Lantern. A start
 ; failure (for example, port 8068 is already in use) is shown in a message box.
 Name: "{group}\Lantern Dashboard"; Filename: "{app}\lantern-tray.exe"; \
-  Parameters: "web --tray --open --db ""{localappdata}\Lantern\lantern.db"""; \
+  Parameters: "web --tray {code:WatchArgs}--open --db ""{localappdata}\Lantern\lantern.db"""; \
   WorkingDir: "{localappdata}\Lantern"; IconFilename: "{app}\lantern.ico"; \
   Comment: "Start the Lantern dashboard in the system tray and open it in your browser"
 Name: "{group}\Lantern Command Prompt"; Filename: "{cmd}"; \
@@ -91,22 +92,31 @@ Name: "{group}\Lantern Command Prompt"; Filename: "{cmd}"; \
   Comment: "A command prompt where lantern scan, history, and report work"
 Name: "{group}\Uninstall Lantern"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\Lantern Dashboard"; Filename: "{app}\lantern-tray.exe"; \
-  Parameters: "web --tray --open --db ""{localappdata}\Lantern\lantern.db"""; \
+  Parameters: "web --tray {code:WatchArgs}--open --db ""{localappdata}\Lantern\lantern.db"""; \
   WorkingDir: "{localappdata}\Lantern"; IconFilename: "{app}\lantern.ico"; Tasks: desktopicon
 ; At sign-in the tray starts without opening a browser window.
 Name: "{userstartup}\Lantern"; Filename: "{app}\lantern-tray.exe"; \
-  Parameters: "web --tray --db ""{localappdata}\Lantern\lantern.db"""; \
+  Parameters: "web --tray {code:WatchArgs}--db ""{localappdata}\Lantern\lantern.db"""; \
   WorkingDir: "{localappdata}\Lantern"; IconFilename: "{app}\lantern.ico"; Tasks: autostart
 
 [Run]
 Filename: "{app}\lantern-tray.exe"; \
-  Parameters: "web --tray --open --db ""{localappdata}\Lantern\lantern.db"""; \
+  Parameters: "web --tray {code:WatchArgs}--open --db ""{localappdata}\Lantern\lantern.db"""; \
   WorkingDir: "{localappdata}\Lantern"; Description: "Open the Lantern dashboard now"; \
   Flags: postinstall nowait skipifsilent unchecked
 
 [Code]
 const
   EnvKey = 'Environment';
+
+function WatchArgs(Param: String): String;
+begin
+  // Watch mode is opt-in: only the "watch" task adds a schedule.
+  if WizardIsTaskSelected('watch') then
+    Result := '--watch 1h '
+  else
+    Result := '';
+end;
 
 function PathHasDir(const Path, Dir: string): Boolean;
 begin
