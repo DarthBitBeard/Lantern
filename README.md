@@ -361,7 +361,7 @@ What this version does, and what it does not do.
 
 - **The dashboard exits 2 before it listens.** Strict auth is on, and there is no terminal to print a token. Set `LANTERN_API_TOKEN_FILE` to a regular file, mode 0400 or 0600, that contains one token. Docker has no terminal, so the same exit 2 means the token file or `LANTERN_API_TOKEN` is missing. Do not put the token in the image or in `docker-compose.yml`.
 - **`Refusing to change it (schema …)`.** The database was written by a newer Lantern. This copy will not migrate it backwards. Upgrade Lantern, or restore the `.vN.bak` that the newer copy left beside the file.
-- **Database schema.** The database is at schema 7 after the upgrade; the previous layout was schema 6.
+- **Database schema.** The database is at schema 8 after the upgrade; the previous layout was schema 7. The upgrade writes a `.v7.bak` copy first.
 - **`The saved scan could not be read.`** A stored scan row is not valid JSON, or the JSON has the wrong shape. The command exits 2. The dashboard returns HTTP 500 with that same line.
 - **A subnet is refused.** Only networks fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` are accepted, and a run is at most 1024 addresses. Public, loopback, and link-local ranges are refused.
 

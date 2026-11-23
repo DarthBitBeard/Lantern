@@ -1323,7 +1323,7 @@ class FingerprintStoreTests(unittest.TestCase):
 
         conn = connect(self.path)
         try:
-            self.assertEqual(schema_version(conn), 7)
+            self.assertEqual(schema_version(conn), SCHEMA_VERSION)
             self.assertIsNotNone(conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'service_fingerprints'"
             ).fetchone())
@@ -1346,7 +1346,7 @@ class FingerprintStoreTests(unittest.TestCase):
             saved.close()
         again = connect(self.path)
         try:
-            self.assertEqual(schema_version(again), 7)
+            self.assertEqual(schema_version(again), SCHEMA_VERSION)
         finally:
             again.close()
 

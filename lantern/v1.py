@@ -639,35 +639,17 @@ def _count_devices(conn, scan_id: int) -> int:
 
 
 def _seen_bounds(conn) -> dict[tuple[str, str], tuple[str, str]]:
-    """First and last sighting per device, aggregated in SQL.
+    """First and last sighting per device (MAC, or IP when there is no MAC).
 
-    One row comes back per MAC (or per IP when there is no MAC), not one
-    row per device in every scan.
+    Read from ``device_seen`` (schema 8), which `save_scan` keeps current and
+    `delete_scans` rebuilds, so the cost does not grow with scan history.
     """
-    found: dict[tuple[str, str], tuple[str, str]] = {}
-    rows = conn.execute(
-        """
-        SELECT
-            lower(replace(trim(IFNULL(d.mac, '')), '-', ':')),
-            d.ip,
-            MIN(s.started_at),
-            MAX(s.started_at)
-        FROM devices d
-        JOIN scans s ON s.id = d.scan_id
-        GROUP BY 1, d.ip
-        """
-    )
-    for mac_text, ip, first, last in rows:
-        try:
-            key = _device_identity({"ip": ip, "mac": mac_text or None})
-        except ValueError:
-            continue
-        previous = found.get(key)
-        if previous is None:
-            found[key] = (first, last)
-        else:
-            found[key] = (min(previous[0], first), max(previous[1], last))
-    return found
+    return {
+        (key, kind): (first, last)
+        for kind, key, first, last in conn.execute(
+            "SELECT kind, key, first_seen, last_seen FROM device_seen"
+        )
+    }
 
 
 def _stored_ports(raw):
