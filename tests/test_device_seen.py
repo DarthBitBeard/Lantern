@@ -34,7 +34,8 @@ class DeviceSeenTests(unittest.TestCase):
         self.folder = tempfile.mkdtemp()
         self.path = os.path.join(self.folder, "l.db")
         self.conn = store.connect(self.path)
-        self.addCleanup(self.conn.close)
+        # A test may reopen the database; close whichever connection is current.
+        self.addCleanup(lambda: self.conn.close())
 
     def test_saving_scans_keeps_bounds_equal_to_history(self):
         store.save_scan(self.conn, "192.168.1.0/24", [_device("192.168.1.2", "AA-BB-CC-DD-EE-01"), _device("192.168.1.3")])
