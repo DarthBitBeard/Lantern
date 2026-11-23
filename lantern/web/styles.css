@@ -82,6 +82,30 @@ button:disabled { opacity: .55; cursor: wait; }
 .stat b { display: block; font-size: 1.6rem; }
 .stat span { color: var(--muted); font-size: .85rem; }
 .stat.warn b { color: var(--orange); }
+.stat.clickable { cursor: pointer; border: 1px solid transparent; }
+.stat.clickable:hover, .stat.clickable:focus-visible { border-color: var(--amber); outline: none; }
+.scan-progress { height: .5rem; max-width: 40rem; margin: .25rem 0 .5rem; background: var(--panel); border-radius: 999px; overflow: hidden; }
+.scan-progress-bar { height: 100%; width: 2%; background: var(--amber); transition: width .4s ease; }
+.chip-line { margin: .3rem 0; line-height: 1.9; overflow-wrap: anywhere; }
+.diff ul.changes { margin: .15rem 0 0; padding-left: 1.1rem; }
+.diff ul.changes li { margin: .15rem 0; }
+button.chip, span.chip {
+  display: inline-block; margin: 0 .3rem .1rem 0; padding: .1rem .6rem; border-radius: 999px;
+  border: 1px solid var(--amber-dark); background: rgba(251, 191, 36, .12); color: var(--text);
+  font-size: .85rem; font-weight: 500; line-height: 1.5;
+}
+button.chip { cursor: pointer; }
+button.chip:hover, button.chip:focus-visible { border-color: var(--amber); outline: none; }
+span.chip { opacity: .75; }
+.manage { margin-top: .6rem; }
+.manage > summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+.manage[open] > summary { margin-bottom: .4rem; }
+.device.flash { animation: device-flash 1.6s ease-out; }
+@keyframes device-flash { from { box-shadow: 0 0 0 3px var(--amber); } to { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .scan-progress-bar { transition: none; }
+  .device.flash { animation: none; outline: 2px solid var(--amber); }
+}
 .new-since-visit { margin: 0 0 6px; font-size: 0.8rem; font-weight: 600; color: var(--orange); }
 .stat.bad b { color: var(--red); }
 .diff { background: #451a03; border: 1px solid var(--amber-dark); border-radius: var(--radius-lg); padding: 1rem; }

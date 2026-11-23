@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.1 - 2026-11-23
+
+Quieter scans from the tray, and a dashboard that puts what matters first.
+
+- Scans started from the tray no longer flash console windows. `lantern-tray.exe` has no console, so Windows opened a new one for every `ping`, `arp`, `ipconfig`, and `route` it ran, hundreds per scan. Those commands now start hidden (`CREATE_NO_WINDOW`). Measured from a windowless process: 11 console windows for one `arp` and 15 pings before, none after.
+- Live scan progress: a progress bar and "Finding devices: 120 of 254 addresses checked · 0:42", then "Checking ports: 8 of 21 devices". `GET /api/scan` gains `progress` (phase, done, total, elapsed_seconds), and the tray menu's status line shows the same count while a scan runs. A scan started by the tray or `--watch` shows its progress when the dashboard is opened.
+- Devices are sorted riskiest first by default: critical, then high, then devices that are new since the previous scan or your last visit, then the rest. A Sort menu offers IP or name order.
+- The change summary names devices instead of listing bare addresses. Each new or changed device is a chip; clicking it shows and highlights that card, clearing any filter that hid it.
+- The summary numbers for new, unknown, critical, and high-risk devices are one-click filters. The filter menu gains "New since previous scan".
+- Each card is shorter: the label and trust controls and the MAC address notes fold into one "Name this device or mark it trusted" section. Run demo is now a secondary button.
+
 ## 1.6.0 - 2026-11-23
 
 Lantern watches the network for you: scheduled scans, alerts, and the service versions it already collected, now on screen.

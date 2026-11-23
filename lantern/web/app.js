@@ -229,6 +229,27 @@ function stat(value, label, tone) {
   ]);
 }
 
+// A summary number that is not zero becomes a one-click filter for the device list.
+function filterStat(el, filterValue, count) {
+  if (!count) return el;
+  el.classList.add("clickable");
+  el.setAttribute("role", "button");
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("title", "Show these devices");
+  const apply = () => {
+    showTab("devices");
+    $("filter").value = filterValue;
+    renderDevices();
+    refreshMapIfShown();
+    $("tabs").scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  el.addEventListener("click", apply);
+  el.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); apply(); }
+  });
+  return el;
+}
+
 function renderSummary(scan, diff) {
   const el = $("summary");
   if (!scan) {
@@ -243,12 +264,12 @@ function renderSummary(scan, diff) {
   const sinceVisit = scan.devices.filter(isNewSinceVisit).length;
   const cards = [
     stat(scan.devices.length, "devices"),
-    stat(added, "new since previous scan", added ? "warn" : ""),
+    filterStat(stat(added, "new since previous scan", added ? "warn" : ""), "new", added),
     viewingId === null && seenBeforeVisit instanceof Set
       ? stat(sinceVisit, "new since your last visit", sinceVisit ? "warn" : "") : null,
-    stat(unknown, "unknown / untrusted", unknown ? "warn" : ""),
-    stat(critical, "critical devices", critical ? "bad" : ""),
-    stat(high, "high-risk devices", high ? "warn" : ""),
+    filterStat(stat(unknown, "unknown / untrusted", unknown ? "warn" : ""), "unknown", unknown),
+    filterStat(stat(critical, "critical devices", critical ? "bad" : ""), "risky", critical),
+    filterStat(stat(high, "high-risk devices", high ? "warn" : ""), "risky", high),
   ];
   if (scan.scope_name) {
     cards.push(node("p", {}, ["Scope: ", String(scan.scope_name)]));
@@ -263,6 +284,47 @@ function labeledLine(label, value) {
   return node("p", {}, [node("strong", { text: label }), " ", value]);
 }
 
+const CHIPS_SHOWN = 12;
+
+function deviceChip(device, jumpable) {
+  const name = displayName(device);
+  const text = name === device.ip ? String(device.ip) : `${name} (${device.ip})`;
+  if (!jumpable) return node("span", { className: "chip", text });
+  return node("button", {
+    type: "button", className: "chip", "data-jump": deviceKey(device), title: "Show this device", text,
+  });
+}
+
+function chipLine(label, devices, jumpable) {
+  const items = devices.length ? devices.slice(0, CHIPS_SHOWN).map((d) => deviceChip(d, jumpable)) : ["none"];
+  const more = devices.length > CHIPS_SHOWN
+    ? node("span", { className: "more", text: ` and ${devices.length - CHIPS_SHOWN} more` }) : null;
+  return node("div", { className: "chip-line" }, [node("strong", { text: label }), " ", ...items, more]);
+}
+
+function findCard(key) {
+  return [...$("devices").querySelectorAll("article.device")].find((el) => el.dataset.key === key) || null;
+}
+
+function jumpToDevice(key) {
+  showTab("devices");
+  let card = findCard(key);
+  if (!card) {
+    // A filter or search is hiding it: clear them so the device can be shown.
+    $("search").value = "";
+    $("filter").value = "all";
+    $("tag-filter").value = "";
+    $("criticality-filter").value = "";
+    renderDevices();
+    card = findCard(key);
+  }
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.remove("flash");
+  void card.offsetWidth; // restart the highlight animation
+  card.classList.add("flash");
+}
+
 function renderDiff(scan, diff) {
   const el = $("diff");
   if (!scan || !diff) {
@@ -274,14 +336,16 @@ function renderDiff(scan, diff) {
   }
   const calm = diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0;
   el.className = calm ? "diff calm" : "diff";
-  const added = diff.added.map((d) => d.ip).join(", ") || "none";
-  const removed = diff.removed.map((d) => d.ip).join(", ") || "none";
-  const changedText = diff.changed.map(describeChange).join("; ") || "none";
+  const changes = diff.changed.length
+    ? node("ul", { className: "changes" }, diff.changed.map((change) => node("li", {}, [
+      deviceChip(change.device, true), " ", describeChange(change).replace(/^[^:]*:\s*/, ""),
+    ])))
+    : node("span", { text: "none" });
   mount(el, [
     node("h2", { text: "What changed since the previous scan" }),
-    labeledLine("New devices:", added),
-    labeledLine("Devices gone:", removed),
-    labeledLine("Port changes:", changedText),
+    chipLine("New devices:", diff.added, true),
+    chipLine("Devices gone:", diff.removed, false),
+    node("div", { className: "chip-line" }, [node("strong", { text: "Port and service changes:" }), " ", changes]),
     calm ? node("p", { text: "Nothing changed. Good news." }) : null,
   ]);
 }
@@ -291,6 +355,7 @@ function deviceMatches(device) {
   const filter = $("filter").value;
   if (filter === "unknown" && device.trusted) return false;
   if (filter === "trusted" && !device.trusted) return false;
+  if (filter === "new" && !addedKeys().has(deviceKey(device))) return false;
   if (filter === "risky" && !["critical", "high"].includes(worstSeverity(device))) return false;
   const tag = $("tag-filter").value;
   const criticality = $("criticality-filter").value;
@@ -745,10 +810,20 @@ function renderDevice(device) {
       text: "This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.",
     }));
   }
+  const manageItems = children.filter((el) => el && el.classList
+    && (el.classList.contains("trust-row") || el.classList.contains("hint")));
+  if (manageItems.length) {
+    for (const el of manageItems) children.splice(children.indexOf(el), 1);
+    const summaryText = device.label || device.trusted ? "Label and trust" : "Name this device or mark it trusted";
+    children.push(node("details", { className: "manage" }, [node("summary", { text: summaryText }), ...manageItems]));
+  }
   if (isNewSinceVisit(device)) {
     children.unshift(node("p", { className: "new-since-visit", text: "New since your last visit" }));
   }
-  const card = node("article", { className: device.trusted ? "device" : "device unknown" }, children);
+  const card = node("article", {
+    className: device.trusted ? "device" : "device unknown",
+    "data-key": deviceKey(device),
+  }, children);
   function refreshShown() {
     const specs = [
       ["owner", device.owner ? `Owner: ${device.owner}` : ""],
@@ -791,6 +866,33 @@ function fillTagChoices() {
   select.value = stillThere ? previous : "";
 }
 
+function addedKeys() {
+  return new Set(((currentDiff && currentDiff.added) || []).map(deviceKey));
+}
+
+function ipNumber(ip) {
+  const parts = String(ip || "").split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return Infinity;
+  return ((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3];
+}
+
+// Riskiest first by default: critical, then high, then devices that are new
+// (since the previous scan or your last visit), then everything else by risk.
+function sortDevices(list) {
+  const mode = $("sort").value;
+  const byIp = (a, b) => ipNumber(a.ip) - ipNumber(b.ip);
+  if (mode === "ip") return [...list].sort(byIp);
+  if (mode === "name") {
+    return [...list].sort((a, b) =>
+      displayName(a).localeCompare(displayName(b), undefined, { numeric: true }) || byIp(a, b));
+  }
+  const added = addedKeys();
+  const rank = (d) => { const w = worstSeverity(d); return w ? SEVERITY_ORDER[w] : 9; };
+  const isFresh = (d) => added.has(deviceKey(d)) || isNewSinceVisit(d);
+  const score = (d) => { const r = rank(d); return r <= 1 ? r : (isFresh(d) ? 2 : 3 + r); };
+  return [...list].sort((a, b) => score(a) - score(b) || byIp(a, b));
+}
+
 function renderDevices() {
   const el = $("devices");
   if (dirtyEditors.size) {
@@ -804,7 +906,7 @@ function renderDevices() {
     ])]);
     return;
   }
-  const devices = currentScan.devices.filter(deviceMatches);
+  const devices = sortDevices(currentScan.devices.filter(deviceMatches));
   if (!devices.length) {
     mount(el, [node("div", { className: "empty" }, [
       node("p", { text: "No devices match this filter." }),
@@ -918,7 +1020,37 @@ async function loadStatus() {
 }
 
 // A scan runs on the server in the background. Poll until it stops running.
-const SCAN_POLL_MS = 2000;
+const SCAN_POLL_MS = 1000;
+
+function formatElapsed(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// Discovery is roughly the first 60% of a scan, port checks the rest.
+function showScanProgress(job) {
+  const box = $("scan-progress");
+  const p = job && job.state === "running" ? job.progress : null;
+  if (!p) {
+    box.hidden = true;
+    return;
+  }
+  let pct = 2;
+  let text = "Starting the scan";
+  if (p.phase === "discover" && p.total) {
+    pct = 2 + 58 * (p.done / p.total);
+    text = `Finding devices: ${p.done} of ${p.total} addresses checked`;
+  } else if (p.phase === "ports") {
+    pct = p.total ? 60 + 40 * (p.done / p.total) : 98;
+    text = p.total ? `Checking ports: ${p.done} of ${p.total} devices` : "Finishing up";
+  }
+  pct = Math.max(2, Math.min(100, Math.round(pct)));
+  box.hidden = false;
+  box.firstElementChild.style.width = `${pct}%`;
+  box.setAttribute("aria-valuenow", String(pct));
+  box.setAttribute("aria-valuetext", text);
+  setMessage(`${text} · ${formatElapsed(p.elapsed_seconds)}`);
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -930,6 +1062,7 @@ async function waitForScan() {
   const deadline = Date.now() + SCAN_WAIT_LIMIT_MS;
   for (;;) {
     const job = await api("/api/scan");
+    showScanProgress(job);
     if (job.state !== "running") return job;
     if (Date.now() > deadline) throw new Error("The scan is taking too long. Reload to check on it.");
     await sleep(SCAN_POLL_MS);
@@ -938,14 +1071,16 @@ async function waitForScan() {
 
 async function watchScan() {
   setBusy(true);
-  setMessage("Scanning. This can take a minute on a /24.");
+  setMessage("Starting the scan");
   try {
     const job = await waitForScan();
+    showScanProgress(null);
     if (job.state === "error") throw new Error(job.error || "The scan failed.");
     const data = await loadLatest();
     await loadHistory();
     setMessage(`Scan done: ${data.scan.devices.length} devices.`);
   } catch (err) {
+    showScanProgress(null);
     setMessage(err.message, true);
   } finally {
     setBusy(false);
@@ -1016,6 +1151,18 @@ $("report-link").addEventListener("click", async (event) => {
 
 $("search").addEventListener("input", () => { renderDevices(); refreshMapIfShown(); });
 $("filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
+$("sort").addEventListener("change", () => {
+  try { sessionStorage.setItem("lantern-sort", $("sort").value); } catch (err) { /* storage blocked */ }
+  renderDevices();
+});
+try {
+  const savedSort = sessionStorage.getItem("lantern-sort");
+  if (savedSort && [...$("sort").options].some((o) => o.value === savedSort)) $("sort").value = savedSort;
+} catch (err) { /* storage blocked */ }
+$("diff").addEventListener("click", (event) => {
+  const chip = event.target.closest ? event.target.closest("[data-jump]") : null;
+  if (chip) jumpToDevice(chip.dataset.jump);
+});
 $("tag-filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
 $("criticality-filter").addEventListener("change", () => { renderDevices(); refreshMapIfShown(); });
 $("history").addEventListener("change", async (event) => {

@@ -33,11 +33,13 @@
       <label for="subnet">Subnet</label>
       <input id="subnet" name="subnet" type="text" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false" inputmode="decimal">
       <button type="submit" id="scan-btn">Run scan</button>
-      <button type="button" id="demo-btn">Run demo</button>
+      <button type="button" id="demo-btn" class="secondary">Run demo</button>
       <button type="button" id="refresh-btn">Refresh</button>
     </form>
     <p class="hint">Private home networks only. Lantern refuses public IPs. Scanning runs from this machine, so run it on your home network, not in a container, for real results.</p>
     <p id="message" class="message" role="status" aria-live="polite"></p>
+    <div id="scan-progress" class="scan-progress" role="progressbar" aria-label="Scan progress"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div class="scan-progress-bar"></div></div>
   </section>
 
   <section id="summary" class="summary" aria-label="Scan summary"></section>
@@ -53,9 +55,15 @@
     <input id="search" type="search" maxlength="200" placeholder="Search name, IP, owner, tag, or notes" aria-label="Search devices">
     <select id="filter" aria-label="Filter devices">
       <option value="all">All devices</option>
+      <option value="new">New since previous scan</option>
       <option value="unknown">Unknown only</option>
       <option value="risky">Risky ports only</option>
       <option value="trusted">Trusted only</option>
+    </select>
+    <select id="sort" aria-label="Sort devices">
+      <option value="risk">Riskiest first</option>
+      <option value="ip">By IP address</option>
+      <option value="name">By name</option>
     </select>
     <label for="tag-filter">Tag
       <select id="tag-filter">
