@@ -1904,6 +1904,43 @@ def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None):
     return watcher
 
 
+def _ago(seconds: float) -> str:
+    minutes = int(max(seconds, 0) // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    return f"{hours} h ago" if hours < 48 else f"{hours // 24} days ago"
+
+
+def _in(seconds: float) -> str:
+    minutes = int(max(seconds, 0) // 60)
+    if minutes < 1:
+        return "in under a minute"
+    return f"in {minutes} min" if minutes < 60 else f"in {minutes // 60} h {minutes % 60} min"
+
+
+def tray_status_line(handler, now: float | None = None) -> str:
+    """The greyed first line of the tray menu: last scan, and the next one with --watch."""
+    from .watch import parse_started_at
+
+    now = time.time() if now is None else now
+    if _scan_lock.locked():
+        return "Scanning now…"
+    conn = connect(handler.db_path)
+    try:
+        newest = list_scans(conn, limit=1)
+    finally:
+        conn.close()
+    started = parse_started_at(newest[0]["started_at"]) if newest else None
+    parts = [f"Last scan {_ago(now - started)}" if started is not None else "No scans yet"]
+    watcher = getattr(handler, "watcher", None)
+    if watcher is not None:
+        parts.append(f"next {_in(watcher.next_scan_at - now)}")
+    return " · ".join(parts)
+
+
 def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     """Run the server on a background thread and a tray icon on this one.
 
@@ -1911,17 +1948,47 @@ def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     """
     from .tray import TrayIcon
 
+    handler = server.RequestHandlerClass
     browser_url = url or f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
+    requested = threading.Event()  # a Scan now from the tray waits for its result
+
+    def scan_now() -> None:
+        watcher = getattr(handler, "watcher", None)
+        subnet = watcher.subnet if watcher else handler.subnet_guess.get()
+        if not subnet:
+            icon.notify("Lantern", "Could not detect your network. Use the dashboard to pick a subnet.")
+            return
+        try:
+            subnet = str(validate_subnet(subnet))
+        except ValueError:
+            icon.notify("Lantern", "The detected network is not one Lantern scans.")
+            return
+        if start_scan_job(handler, subnet):
+            requested.set()
+            icon.notify("Lantern", f"Scanning {subnet}. This takes about a minute.")
+        else:
+            icon.notify("Lantern", "A scan is already running.")
+
     icon = TrayIcon(
         f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost") else f"Lantern dashboard ({host}:{port})",
         on_open=lambda: _open_browser(browser_url),
         on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
+        on_scan=scan_now,
+        status=lambda: tray_status_line(handler),
     )
 
-    server.RequestHandlerClass.scan_listeners.append(alert_listener(
-        server.RequestHandlerClass.db_path,
-        lambda alert: icon.notify(alert.title, alert.text),
-    ))
+    def deliver(alert) -> None:
+        requested.clear()
+        icon.notify(alert.title, alert.text)
+
+    def after_scan(_scan_id: int) -> None:
+        # Runs after the alert listener: a Scan now with nothing new still gets an answer.
+        if requested.is_set():
+            requested.clear()
+            icon.notify("Lantern", "Scan finished. Nothing new.")
+
+    handler.scan_listeners.append(alert_listener(handler.db_path, deliver))
+    handler.scan_listeners.append(after_scan)
 
     def run_server() -> None:
         try:

@@ -101,8 +101,11 @@ class ServeInTrayTests(unittest.TestCase):
         opened = []
 
         class FakeIcon:
-            def __init__(self, tooltip, on_open, on_quit, icon_path=None):
+            def __init__(self, tooltip, on_open, on_quit, icon_path=None, **kwargs):
                 self.tooltip, self.on_open, self.on_quit = tooltip, on_open, on_quit
+
+            def notify(self, title, text):
+                return True
 
             def run(self):
                 self.on_open()
@@ -133,9 +136,68 @@ class ServeInTrayTests(unittest.TestCase):
             def stop(self):
                 stopped.set()
 
+            def notify(self, title, text):
+                return True
+
         with mock.patch("lantern.tray.TrayIcon", FakeIcon):
             webapp._serve_in_tray(server, "127.0.0.1", 18072, None)
         self.assertTrue(stopped.is_set())
+
+
+class TrayMenuTests(unittest.TestCase):
+    def test_menu_has_status_scan_open_and_quit(self):
+        icon = tray.TrayIcon("t", lambda: None, lambda: None, on_scan=lambda: None,
+                             status=lambda: "Last scan 5 min ago")
+        items = icon.menu_items()
+        self.assertEqual(items[0], (tray.MF_STRING | tray.MF_GRAYED, 0, "Last scan 5 min ago"))
+        self.assertEqual([i[1] for i in items if i[1]], [tray.ID_OPEN, tray.ID_SCAN, tray.ID_QUIT])
+
+    def test_menu_without_scan_or_status_and_with_a_failing_status(self):
+        def broken():
+            raise RuntimeError("db gone")
+
+        icon = tray.TrayIcon("t", lambda: None, lambda: None, status=broken)
+        self.assertEqual([i[1] for i in icon.menu_items() if i[1]], [tray.ID_OPEN, tray.ID_QUIT])
+
+    def test_no_running_instance_off_windows(self):
+        with mock.patch.object(tray, "_IS_WINDOWS", False):
+            self.assertFalse(tray.signal_running_instance())
+
+    def test_second_launch_hands_off_and_exits_cleanly(self):
+        err = io.StringIO()
+        served = []
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err),                 mock.patch("lantern.tray.is_supported", return_value=True),                 mock.patch("lantern.tray.signal_running_instance", return_value=True),                 mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)):
+            code = cli.main(["web", "--tray", "--db", os.path.join(folder, "t.db")])
+        self.assertEqual(code, 0)
+        self.assertEqual(served, [])
+        self.assertIn("already running", err.getvalue())
+
+
+class TrayStatusLineTests(unittest.TestCase):
+    def setUp(self):
+        from lantern import store
+
+        self.db = os.path.join(tempfile.mkdtemp(), "s.db")
+        conn = store.connect(self.db)
+        conn.close()
+        self.handler = type("H", (), {"db_path": self.db, "watcher": None})
+        self.store = store
+
+    def test_no_scans_yet(self):
+        self.assertEqual(webapp.tray_status_line(self.handler), "No scans yet")
+
+    def test_last_and_next_scan(self):
+        from lantern.watch import parse_started_at
+
+        conn = self.store.connect(self.db)
+        try:
+            self.store.save_scan(conn, "10.0.0.0/24", [])
+            started = parse_started_at(self.store.list_scans(conn, limit=1)[0]["started_at"])
+        finally:
+            conn.close()
+        self.handler.watcher = type("W", (), {"next_scan_at": started + 3600})()
+        line = webapp.tray_status_line(self.handler, now=started + 12 * 60)
+        self.assertEqual(line, "Last scan 12 min ago · next in 48 min")
 
 
 class LauncherTests(unittest.TestCase):

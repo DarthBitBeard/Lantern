@@ -1461,6 +1461,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err("--tray is available on Windows only.")
             if web_bind.lan_bound:
                 return _err("--tray works only with a loopback bind (the default 127.0.0.1).")
+            if tray_module.signal_running_instance():
+                print("Lantern is already running in the tray. Asked it to open the dashboard.",
+                      file=sys.stderr, flush=True)
+                return 0
         try:
             switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
         except ValueError as exc:
