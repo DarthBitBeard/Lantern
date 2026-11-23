@@ -37,6 +37,13 @@ class TrayModuleTests(unittest.TestCase):
     def test_stop_before_run_is_harmless(self):
         tray.TrayIcon("t", lambda: None, lambda: None).stop()
 
+    def test_notify_before_the_icon_exists_is_kept_and_clipped(self):
+        icon = tray.TrayIcon("t", lambda: None, lambda: None)
+        self.assertFalse(icon.notify("T" * 100, "x" * 400))
+        title, text = icon._take_pending()
+        self.assertEqual((len(title), len(text)), (tray.INFO_TITLE_MAX, tray.INFO_TEXT_MAX))
+        self.assertIsNone(icon._take_pending())  # shown once only
+
 
 class TrayFlagTests(unittest.TestCase):
     def run_main(self, *argv):
@@ -78,6 +85,7 @@ class _FakeServer:
     def __init__(self):
         self.stopped = threading.Event()
         self.shutdown_calls = 0
+        self.RequestHandlerClass = type("Handler", (), {"db_path": ":memory:", "scan_listeners": []})
 
     def serve_forever(self):
         self.stopped.wait(5)

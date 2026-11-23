@@ -1857,6 +1857,31 @@ def _open_browser(url: str) -> bool:
     return bool(opened)
 
 
+def alert_listener(db_path: str, deliver):
+    """A scan listener that calls ``deliver(alert)`` when a saved scan needs attention.
+
+    The new scan is compared with the previous scan of its scope, with trust
+    labels applied, and summarised by `alerts.summarize`.
+    """
+    from .alerts import summarize
+
+    def listener(scan_id: int) -> None:
+        conn = connect(db_path)
+        try:
+            _scan, diff = load_scan_with_diff(conn, scan_id)
+        finally:
+            conn.close()
+        alert = summarize(diff)
+        if alert is not None:
+            deliver(alert)
+
+    return listener
+
+
+def _print_alert(alert) -> None:
+    print(f"{alert.title}. {alert.text}", flush=True)
+
+
 def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None):
     """The schedule for `--watch`, pinned to one validated subnet."""
     from .discovery import local_ipv4_in
@@ -1892,6 +1917,11 @@ def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
         on_open=lambda: _open_browser(browser_url),
         on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
     )
+
+    server.RequestHandlerClass.scan_listeners.append(alert_listener(
+        server.RequestHandlerClass.db_path,
+        lambda alert: icon.notify(alert.title, alert.text),
+    ))
 
     def run_server() -> None:
         try:
@@ -1941,6 +1971,9 @@ def serve(
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass
+    if not tray:
+        # In the tray, alerts are notifications instead (see _serve_in_tray).
+        handler.scan_listeners.append(alert_listener(handler.db_path, _print_alert))
     watcher = _make_watcher(handler, watch_seconds, watch_subnet) if watch_seconds else None
     for line in startup_lines(
         str(bound_host),

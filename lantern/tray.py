@@ -21,6 +21,9 @@ WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
 WM_USER = 0x0400
 WM_TRAY = WM_USER + 1
+WM_APP = 0x8000
+WM_SHOW_PENDING = WM_APP + 2  # posted by notify() from another thread
+NIN_BALLOONUSERCLICK = WM_USER + 5
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 
@@ -30,6 +33,10 @@ NIM_DELETE = 2
 NIF_MESSAGE = 0x1
 NIF_ICON = 0x2
 NIF_TIP = 0x4
+NIF_INFO = 0x10
+NIIF_INFO = 0x1
+INFO_TITLE_MAX = 63
+INFO_TEXT_MAX = 255
 
 MF_STRING = 0x0
 MF_SEPARATOR = 0x800
@@ -54,12 +61,12 @@ def clip_tooltip(text: str) -> str:
 
 
 class TrayIcon:
-    """One tray icon with an Open and a Quit command.
+    """One tray icon with an Open and a Quit command, and notifications.
 
-    ``on_open`` runs on the tray thread when the user double-clicks the icon
-    or chooses "Open dashboard". ``on_quit`` runs once when the user chooses
-    "Quit Lantern", before the icon is removed. `stop` may be called from any
-    thread, for example when the server stops on its own.
+    ``on_open`` runs on the tray thread when the user double-clicks the icon,
+    chooses "Open dashboard", or clicks a notification. ``on_quit`` runs once
+    when the user chooses "Quit Lantern", before the icon is removed. `stop`
+    and `notify` may be called from any thread.
     """
 
     def __init__(
@@ -77,6 +84,8 @@ class TrayIcon:
         self._ready = threading.Event()
         self._quit_called = False
         self._error: BaseException | None = None
+        self._pending: tuple[str, str] | None = None
+        self._pending_lock = threading.Lock()
 
     # -- public ----------------------------------------------------------
 
@@ -92,6 +101,26 @@ class TrayIcon:
         import ctypes
 
         ctypes.WinDLL("user32").PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
+    def notify(self, title: str, text: str) -> bool:
+        """Show a notification from the icon. Safe from any thread.
+
+        Only the newest message is kept if several arrive before the tray
+        thread shows them. False when the icon is not running.
+        """
+        with self._pending_lock:
+            self._pending = (str(title)[:INFO_TITLE_MAX], str(text)[:INFO_TEXT_MAX])
+        hwnd = self._hwnd
+        if not _IS_WINDOWS or not hwnd:
+            return False
+        import ctypes
+
+        return bool(ctypes.WinDLL("user32").PostMessageW(hwnd, WM_SHOW_PENDING, 0, 0))
+
+    def _take_pending(self) -> tuple[str, str] | None:
+        with self._pending_lock:
+            pending, self._pending = self._pending, None
+        return pending
 
     def run(self) -> None:
         """Show the icon and handle its messages until Quit or `stop`. Blocks."""
@@ -208,6 +237,23 @@ class TrayIcon:
         def add_icon() -> bool:
             return bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)))
 
+        def show_pending() -> None:
+            pending = self._take_pending()
+            if pending is None:
+                return
+            title, text = pending
+            flags = data.uFlags
+            data.uFlags = NIF_INFO
+            data.szInfoTitle = title
+            data.szInfo = text
+            data.dwInfoFlags = NIIF_INFO
+            try:
+                shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data))
+            finally:
+                data.uFlags = flags
+                data.szInfo = ""
+                data.szInfoTitle = ""
+
         def show_menu(hwnd) -> None:
             menu = user32.CreatePopupMenu()
             try:
@@ -234,10 +280,13 @@ class TrayIcon:
             try:
                 if message == WM_TRAY:
                     event = lparam & 0xFFFF
-                    if event == WM_LBUTTONDBLCLK:
+                    if event in (WM_LBUTTONDBLCLK, NIN_BALLOONUSERCLICK):
                         self._safely(self.on_open)
                     elif event == WM_RBUTTONUP:
                         show_menu(hwnd)
+                    return 0
+                if message == WM_SHOW_PENDING:
+                    show_pending()
                     return 0
                 if taskbar_created and message == taskbar_created:
                     add_icon()  # Explorer restarted: put the icon back
@@ -271,6 +320,7 @@ class TrayIcon:
             if not add_icon():
                 raise OSError(ctypes.get_last_error(), "Could not add the tray icon.")
             self._ready.set()
+            show_pending()  # a notify() that came before the window existed
             message = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(message))
