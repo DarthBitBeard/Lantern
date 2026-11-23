@@ -77,6 +77,36 @@ function showTokenPrompt() {
   $("status").textContent = "Token required";
 }
 
+// Devices this browser had already seen before this page load, so cards can
+// say "New since your last visit" (watch mode scans while you are away).
+// Stored in localStorage: MAC or IP keys only, on this computer, capped.
+const SEEN_STORAGE = "lantern-seen-devices";
+const SEEN_MAX = 2048;
+let seenBeforeVisit; // undefined until the first latest scan; null on a first visit
+
+function deviceKey(device) {
+  return String(device.mac || "").toLowerCase() || String(device.ip || "");
+}
+
+function noteVisit(scan) {
+  let stored = null;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEEN_STORAGE) || "null");
+    if (Array.isArray(parsed)) stored = parsed.filter((key) => typeof key === "string");
+  } catch (err) { stored = null; }
+  if (seenBeforeVisit === undefined) seenBeforeVisit = stored ? new Set(stored) : null;
+  const keys = new Set((scan ? scan.devices : []).map(deviceKey));
+  for (const key of stored || []) {
+    if (keys.size >= SEEN_MAX) break;
+    keys.add(key);
+  }
+  try { localStorage.setItem(SEEN_STORAGE, JSON.stringify([...keys])); } catch (err) { /* storage blocked */ }
+}
+
+function isNewSinceVisit(device) {
+  return viewingId === null && seenBeforeVisit instanceof Set && !seenBeforeVisit.has(deviceKey(device));
+}
+
 // View state. `viewingId` is null when showing the latest scan.
 let currentScan = null;
 let currentDiff = null;
@@ -94,6 +124,12 @@ function hasOwn(table, key) {
 
 function kindLabel(kind) {
   return hasOwn(KIND_LABELS, kind) ? KIND_LABELS[kind] : undefined;
+}
+
+function serviceLabel(fingerprint) {
+  if (!fingerprint || typeof fingerprint.product !== "string" || !fingerprint.product) return "";
+  const version = typeof fingerprint.version === "string" ? fingerprint.version : "";
+  return `${fingerprint.product} ${version}`.trim();
 }
 
 function worstSeverity(device) {
@@ -204,9 +240,12 @@ function renderSummary(scan, diff) {
   const high = scan.devices.filter((d) => worstSeverity(d) === "high").length;
   const unknown = scan.devices.filter((d) => !d.trusted).length;
   const added = diff ? diff.added.length : 0;
+  const sinceVisit = scan.devices.filter(isNewSinceVisit).length;
   const cards = [
     stat(scan.devices.length, "devices"),
     stat(added, "new since previous scan", added ? "warn" : ""),
+    viewingId === null && seenBeforeVisit instanceof Set
+      ? stat(sinceVisit, "new since your last visit", sinceVisit ? "warn" : "") : null,
     stat(unknown, "unknown / untrusted", unknown ? "warn" : ""),
     stat(critical, "critical devices", critical ? "bad" : ""),
     stat(high, "high-risk devices", high ? "warn" : ""),
@@ -612,9 +651,15 @@ function renderDevice(device) {
   const worst = worstSeverity(device);
   const ports = (device.open_ports || []).map((p) => {
     const span = node("span", { className: "port", text: String(p.port) });
-    if (p.banner) span.setAttribute("title", String(p.banner));
+    const label = serviceLabel(p.fingerprint);
+    const tip = [label, p.banner].filter(Boolean).join(" | ");
+    if (tip) span.setAttribute("title", tip);
     return span;
   });
+  const services = (device.open_ports || [])
+    .map((p) => [p.port, serviceLabel(p.fingerprint)])
+    .filter(([, label]) => label)
+    .map(([port, label]) => `${port} ${label}`);
   const findings = (device.findings || []).map((f) => node("li", {}, [
     badge(f.severity, BADGE_CLASS),
     node("strong", { text: ` ${f.port} ${f.service || ""}:` }),
@@ -657,6 +702,13 @@ function renderDevice(device) {
   if (worst) {
     children.push(node("p", {}, ["Worst risk: ", badge(worst, BADGE_CLASS)]));
   }
+  if (services.length) {
+    children.push(node("p", {
+      className: "services",
+      title: "What each service says about itself. It can be wrong or spoofed.",
+      text: `Services: ${services.join(" | ")}`,
+    }));
+  }
   children.push(node("div", { className: "ports" }, ports.length ? ports : [
     node("span", { className: "port", text: "none" }),
   ]));
@@ -692,6 +744,9 @@ function renderDevice(device) {
       className: "hint",
       text: "This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.",
     }));
+  }
+  if (isNewSinceVisit(device)) {
+    children.unshift(node("p", { className: "new-since-visit", text: "New since your last visit" }));
   }
   const card = node("article", { className: device.trusted ? "device" : "device unknown" }, children);
   function refreshShown() {
@@ -836,6 +891,7 @@ async function loadHistory() {
 async function loadLatest() {
   viewingId = null;
   const data = await api("/api/scans/latest");
+  noteVisit(data.scan);
   showScan(data.scan, data.diff);
   return data;
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.0 - 2026-11-23
+
+Lantern watches the network for you: scheduled scans, alerts, and the service versions it already collected, now on screen.
+
+- `lantern web --watch 1h` scans again on a schedule (5 minutes to 7 days) through the dashboard's scan job, so a scheduled and a manual scan never overlap. The subnet is fixed at start (`--watch-subnet`, else the detected one) and a scheduled scan is skipped while this machine has no address in it. `GET /api/status` gains `watch` and `keep_days`.
+- `--keep-days DAYS` deletes scans older than that after each dashboard scan; it is 90 by default with `--watch`, and `0` keeps everything. The newest scan of each scope is always kept, and so is the scan just saved.
+- Alerts: after each dashboard scan, a new untrusted device, a high or critical port that opened, or a changed service product or version is summarised in one short message. The tray shows it as a Windows notification (clicking it opens the dashboard); a terminal run prints it. The dashboard marks devices that are new since this browser's last visit, stored as MAC or IP keys in local storage.
+- Banner fingerprints are shown: a Services line and port tooltips on device cards, a Services line in the HTML report, a `fingerprint` object on each `/api/v1` port (service, product, version, parse_status), and `lantern export --what services` (JSON or CSV, one row per parsed banner). Existing export columns are unchanged.
+- The tray menu shows the last scan and, with `--watch`, the next one, and has **Scan now**. Starting the tray again asks the running one to open its dashboard and exits 0. The installer has an unchecked task that adds `--watch 1h` to the tray shortcuts.
+- Schema 8 adds `device_seen`, first and last sighting per device, kept current when a scan is saved and rebuilt when scans are deleted, plus an index on scans by scope. Reading first/last seen no longer aggregates every stored device row: at a year of hourly scans it went from about 690 ms to under 1 ms per device list. A schema 7 database is copied to `.v7.bak` and upgraded in place.
+
 ## 1.5.5 - 2026-11-22
 
 A Windows release: the dashboard runs from the system tray instead of an open terminal, and the installer ships with every release.

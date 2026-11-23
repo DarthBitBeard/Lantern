@@ -320,7 +320,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_p = sub.add_parser("export", help="Write devices, findings, or scan history as JSON or CSV.")
     _add_db_arg(export_p)
-    export_p.add_argument("--what", required=True, choices=["devices", "findings", "history"])
+    export_p.add_argument(
+        "--what", required=True, choices=["devices", "findings", "history", "services"],
+        help="services: one row per open port whose banner was parsed (product and version).",
+    )
     export_p.add_argument(
         "--format",
         choices=["json", "csv"],
@@ -368,6 +371,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open the dashboard in the default browser once it is listening. "
              "Loopback only. With strict auth the token travels in the link's "
              "#fragment, as in the printed link, and is not sent to the server.",
+    )
+    web_p.add_argument(
+        "--watch",
+        metavar="EVERY",
+        help="Scan again on a schedule while the dashboard runs: 30m, 2h, or 1d "
+             "(5m to 7d). The subnet is fixed at start (--watch-subnet, else the "
+             "detected one), and a scheduled scan is skipped while this machine "
+             "is on another network.",
+    )
+    web_p.add_argument(
+        "--watch-subnet",
+        metavar="CIDR",
+        help="Private subnet for --watch, such as 192.168.1.0/24. Default: the detected subnet.",
+    )
+    web_p.add_argument(
+        "--keep-days",
+        type=float,
+        metavar="DAYS",
+        help="After each dashboard scan, delete scans older than DAYS. "
+             "Default 90 with --watch, otherwise keep everything. 0 keeps everything.",
     )
     web_p.add_argument(
         "--tray",
@@ -599,6 +622,43 @@ def _stderr_is_tty() -> bool:
         return bool(sys.stderr.isatty())
     except Exception:
         return False
+
+
+DEFAULT_WATCH_KEEP_DAYS = 90
+
+
+def _resolve_watch(args) -> str | None:
+    """Check --watch, --watch-subnet and --keep-days, and fill the resolved values on ``args``.
+
+    Returns an error message, or None. Runs before the database is opened.
+    """
+    from .watch import parse_interval
+
+    args.watch_seconds = None
+    args.keep_days_resolved = None
+    watch = getattr(args, "watch", None)
+    watch_subnet = getattr(args, "watch_subnet", None)
+    keep_days = getattr(args, "keep_days", None)
+    if keep_days is not None and not 0 <= keep_days <= 36500:
+        return "--keep-days must be between 0 and 36500."
+    if watch_subnet and not watch:
+        return "--watch-subnet needs --watch."
+    if watch:
+        try:
+            args.watch_seconds = parse_interval(watch)
+        except ValueError as exc:
+            return str(exc)
+        subnet = watch_subnet or guess_subnet()
+        if not subnet:
+            return "Could not detect your subnet for --watch. Pass --watch-subnet 192.168.1.0/24."
+        try:
+            args.watch_subnet = str(validate_subnet(subnet))
+        except ValueError as exc:
+            return str(exc)
+        if keep_days is None:
+            keep_days = DEFAULT_WATCH_KEEP_DAYS
+    args.keep_days_resolved = keep_days or None
+    return None
 
 
 def _load_serve():
@@ -1271,6 +1331,9 @@ def main(argv=None) -> int:
                 parse_allow_host(item)
         except ValueError as exc:
             return _err(str(exc))
+        watch_error = _resolve_watch(args)
+        if watch_error:
+            return _err(watch_error)
         strict_auth, strict_error = strict_auth_requested(
             bool(args.strict_auth), os.environ,
             opt_out=bool(args.no_strict_auth),
@@ -1398,6 +1461,10 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err("--tray is available on Windows only.")
             if web_bind.lan_bound:
                 return _err("--tray works only with a loopback bind (the default 127.0.0.1).")
+            if tray_module.signal_running_instance():
+                print("Lantern is already running in the tray. Asked it to open the dashboard.",
+                      file=sys.stderr, flush=True)
+                return 0
         try:
             switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
         except ValueError as exc:
@@ -1448,6 +1515,11 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
                   file=sys.stderr, flush=True)
         kwargs["fingerprint"] = not args.no_fingerprint
+        if getattr(args, "watch_seconds", None):
+            kwargs["watch_seconds"] = args.watch_seconds
+            kwargs["watch_subnet"] = args.watch_subnet
+        if getattr(args, "keep_days_resolved", None):
+            kwargs["keep_days"] = args.keep_days_resolved
         try:
             serve(db_path, **kwargs)
         except OSError as exc:

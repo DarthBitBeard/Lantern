@@ -42,7 +42,7 @@ from pathlib import Path
 # Schema 7 adds service_fingerprints. Nothing in a scan writes that table
 # until a caller puts a fingerprint on a port. The package version stays put
 # until a release; the schema version moves only when the tables or indexes change.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -628,6 +628,81 @@ def _migration_7_service_fingerprints(conn: sqlite3.Connection) -> None:
     )
 
 
+def _seen_key(ip, mac) -> tuple[str, str] | None:
+    """The identity first/last-seen is tracked by: the MAC when known, else the IP."""
+    from .assets import normalize_mac
+
+    normalized = normalize_mac(mac)
+    if normalized:
+        return "mac", normalized
+    try:
+        return "ip", str(ipaddress.ip_address(str(ip).strip()))
+    except ValueError:
+        return None
+
+
+def _record_sightings(conn: sqlite3.Connection, started_at: str, devices) -> None:
+    """Widen first/last seen for each device of one scan. Runs inside the caller's transaction."""
+    for device in devices:
+        key = _seen_key(device.get("ip"), device.get("mac"))
+        if key is None:
+            continue
+        conn.execute(
+            "INSERT INTO device_seen (kind, key, first_seen, last_seen) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (kind, key) DO UPDATE SET"
+            " first_seen = MIN(first_seen, excluded.first_seen),"
+            " last_seen = MAX(last_seen, excluded.last_seen)",
+            (*key, started_at, started_at),
+        )
+
+
+def rebuild_sightings(conn: sqlite3.Connection) -> None:
+    """Recompute device_seen from the scans that are stored. Runs inside the caller's transaction.
+
+    Used by the schema 8 upgrade and after scans are deleted, so first/last
+    seen always describe the history that is still on disk.
+    """
+    conn.execute("DELETE FROM device_seen")
+    rows = conn.execute(
+        "SELECT d.ip, d.mac, MIN(s.started_at), MAX(s.started_at)"
+        " FROM devices d JOIN scans s ON s.id = d.scan_id GROUP BY d.ip, d.mac"
+    ).fetchall()
+    for ip, mac, first, last in rows:
+        key = _seen_key(ip, mac)
+        if key is None:
+            continue
+        conn.execute(
+            "INSERT INTO device_seen (kind, key, first_seen, last_seen) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (kind, key) DO UPDATE SET"
+            " first_seen = MIN(first_seen, excluded.first_seen),"
+            " last_seen = MAX(last_seen, excluded.last_seen)",
+            (*key, first, last),
+        )
+
+
+def _migration_8_device_seen(conn: sqlite3.Connection) -> None:
+    """Schema 8: first/last seen per device, kept up to date as scans are saved.
+
+    Reading these bounds used to aggregate every stored device row on each
+    request, which grows with history (about 0.7 s at a year of hourly
+    scans). Also indexes scans by scope for the per-scope latest/previous
+    lookups.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_seen (
+            kind TEXT NOT NULL,
+            key TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            PRIMARY KEY (kind, key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS scans_scope_id ON scans (scope_name, id)")
+    rebuild_sightings(conn)
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
@@ -636,6 +711,7 @@ _MIGRATIONS: dict[int, Migration] = {
     5: _migration_5_network_map,
     6: _migration_6_topology,
     7: _migration_7_service_fingerprints,
+    8: _migration_8_device_seen,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -790,12 +866,13 @@ def save_scan(
     from `topology.map_switches`, when switches were queried.
     """
     network = network or {}
+    started_at = _now()
     with conn:
         cur = conn.execute(
             "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                _now(), subnet, 1 if demo else 0, scope_name,
+                started_at, subnet, 1 if demo else 0, scope_name,
                 network.get("gateway_ip"), network.get("gateway_mac"), network.get("local_ip"),
                 json.dumps(topology) if topology else None,
             ),
@@ -833,6 +910,7 @@ def save_scan(
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (inserted.lastrowid, *fingerprint, _now()),
                 )
+        _record_sightings(conn, started_at, devices)
     return scan_id
 
 
@@ -1109,13 +1187,21 @@ def scans_to_prune(
     return sorted(doomed)
 
 
-def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: list[int]) -> None:
-    """Put each stored parse on its port. A port with no row gets None."""
+def load_fingerprints(conn, *, scan_id: int | None = None, device_id: int | None = None) -> dict[int, dict[int, dict]]:
+    """Stored parses as {device_id: {port: fingerprint}}, for one scan or one device.
+
+    Every row is checked; a malformed or duplicate row is a CorruptScanError.
+    """
+    if (scan_id is None) == (device_id is None):
+        raise ValueError("Pass exactly one of scan_id or device_id.")
+    if scan_id is not None:
+        where, param = "device_id IN (SELECT id FROM devices WHERE scan_id = ?)", scan_id
+    else:
+        where, param = "device_id = ?", device_id
     rows = conn.execute(
         "SELECT device_id, port, service, product, version, raw_banner, parse_status"
-        " FROM service_fingerprints WHERE device_id IN"
-        " (SELECT id FROM devices WHERE scan_id = ?)",
-        (scan_id,),
+        f" FROM service_fingerprints WHERE {where}",
+        (param,),
     ).fetchall()
     by_device: dict[int, dict[int, dict]] = {}
     for device_id, port, service, product, version, raw_banner, status in rows:
@@ -1143,6 +1229,21 @@ def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: li
             "raw_banner": checked[4],
             "parse_status": checked[5],
         }
+    return by_device
+
+
+def attach_port_fingerprints(device: dict, found: dict[int, dict]) -> None:
+    """Set ``fingerprint`` on each port dict from {port: fingerprint}; None when absent."""
+    ports = device.get("open_ports")
+    if isinstance(ports, list):
+        for port in ports:
+            if isinstance(port, dict):
+                port["fingerprint"] = found.get(port.get("port"))
+
+
+def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: list[int]) -> None:
+    """Put each stored parse on its port. A port with no row gets None."""
+    by_device = load_fingerprints(conn, scan_id=scan_id)
     for device, device_id in zip(devices, device_ids):
         found = by_device.pop(device_id, {})
         ports = device["open_ports"]
@@ -1172,6 +1273,7 @@ def delete_scans(conn: sqlite3.Connection, scan_ids: list[int]) -> int:
         )
         conn.executemany("DELETE FROM devices WHERE scan_id = ?", ids)
         conn.executemany("DELETE FROM scans WHERE id = ?", ids)
+        rebuild_sightings(conn)
     return len(ids)
 
 

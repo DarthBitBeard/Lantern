@@ -70,8 +70,10 @@ from .store import (
     connect,
     count_scans,
     list_scans,
+    delete_scans,
     load_scan_with_diff,
     save_scan,
+    scans_to_prune,
     set_trusted,
 )
 from .v1 import header_value
@@ -196,12 +198,18 @@ class _SubnetGuess:
 
 
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
-                  switches: tuple | None = None, fingerprint: bool = True) -> None:
+                  switches: tuple | None = None, fingerprint: bool = True,
+                  keep_days: float | None = None,
+                  listeners: tuple = ()) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock.
 
     ``switches`` is (switch addresses, SNMP community) from `lantern web
-    --switch`, or None. The switch map is built after the sweep.
+    --switch`, or None. The switch map is built after the sweep. With
+    ``keep_days``, scans older than that are deleted after the save (the new
+    scan is never one of them). Each of ``listeners`` is called with the new
+    scan id after the save; a listener that fails does not fail the scan.
     """
+    scan_id = None
     try:
         devices, network = engine.scan_subnet(subnet, DEFAULT_PORTS, fingerprint=fingerprint)
         topo = None
@@ -211,6 +219,9 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
         conn = connect(db_path)
         try:
             scan_id = save_scan(conn, subnet, devices, demo=False, network=network, topology=topo)
+            if keep_days:
+                doomed = [i for i in scans_to_prune(conn, older_than_days=keep_days) if i != scan_id]
+                delete_scans(conn, doomed)
         finally:
             conn.close()
         job.finish(scan_id)
@@ -232,6 +243,39 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
         raise
     finally:
         _scan_lock.release()
+    if scan_id is not None:
+        for listener in listeners:
+            try:
+                listener(scan_id)
+            except Exception:
+                pass
+
+
+def start_scan_job(handler, subnet: str) -> bool:
+    """Start a background scan of ``subnet`` for this server. False if one is running.
+
+    Used by `POST /api/scan`, the watch schedule, and the tray's Scan now.
+    ``subnet`` must already be validated.
+    """
+    if not _scan_lock.acquire(blocking=False):
+        return False
+    handler.scan_job.start(subnet)
+    try:
+        threading.Thread(
+            target=_run_scan_job,
+            args=(
+                handler.scan_job, handler.db_path, subnet, bool(handler.debug),
+                handler.switch_config, bool(handler.fingerprint),
+                handler.keep_days, tuple(handler.scan_listeners),
+            ),
+            name="lantern-scan",
+            daemon=True,
+        ).start()
+    except Exception:
+        handler.scan_job.fail()
+        _scan_lock.release()
+        raise
+    return True
 
 
 def _load_view(conn, scan_id: int | None = None) -> tuple[dict | None, dict | None]:
@@ -1356,6 +1400,8 @@ class LanternHandler(BaseHTTPRequestHandler):
                     "scan_count": count_scans(conn),
                     "latest_scan_id": newest[0]["id"] if newest else None,
                     "scan_running": _scan_lock.locked(),
+                    "watch": self.watcher.status() if self.watcher else None,
+                    "keep_days": self.keep_days,
                 })
                 return
             if path == "/api/scan":
@@ -1508,28 +1554,13 @@ class LanternHandler(BaseHTTPRequestHandler):
             )
         subnet = str(validate_subnet(subnet))
 
-        if not _scan_lock.acquire(blocking=False):
-            self._send_json(409, {"error": "A scan is already running. Wait for it to finish."})
-            return
         # The scan runs on its own thread, which releases the lock when it
         # ends. The request returns at once so a proxy or tunnel with a short
         # timeout cannot cut it off, and the scan does not hold a connection
         # slot for a minute.
-        self.scan_job.start(subnet)
-        try:
-            threading.Thread(
-                target=_run_scan_job,
-                args=(
-                    self.scan_job, self.db_path, subnet, bool(self.debug),
-                    self.switch_config, bool(self.fingerprint),
-                ),
-                name="lantern-scan",
-                daemon=True,
-            ).start()
-        except Exception:
-            self.scan_job.fail()
-            _scan_lock.release()
-            raise
+        if not start_scan_job(type(self), subnet):
+            self._send_json(409, {"error": "A scan is already running. Wait for it to finish."})
+            return
         self._send_json(202, {"state": "running", "subnet": subnet})
 
     def _handle_trust(self, body: dict) -> None:
@@ -1724,6 +1755,7 @@ def make_server(
     write_deadline: float = WRITE_DEADLINE_SECONDS,
     switches: tuple | None = None,
     fingerprint: bool = True,
+    keep_days: float | None = None,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -1791,6 +1823,9 @@ def make_server(
             "scan_job": _ScanJob(),
             "switch_config": tuple(switches) if switches else None,
             "fingerprint": bool(fingerprint),
+            "keep_days": keep_days,
+            "scan_listeners": [],
+            "watcher": None,
             "subnet_guess": _SubnetGuess(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
@@ -1822,6 +1857,90 @@ def _open_browser(url: str) -> bool:
     return bool(opened)
 
 
+def alert_listener(db_path: str, deliver):
+    """A scan listener that calls ``deliver(alert)`` when a saved scan needs attention.
+
+    The new scan is compared with the previous scan of its scope, with trust
+    labels applied, and summarised by `alerts.summarize`.
+    """
+    from .alerts import summarize
+
+    def listener(scan_id: int) -> None:
+        conn = connect(db_path)
+        try:
+            _scan, diff = load_scan_with_diff(conn, scan_id)
+        finally:
+            conn.close()
+        alert = summarize(diff)
+        if alert is not None:
+            deliver(alert)
+
+    return listener
+
+
+def _print_alert(alert) -> None:
+    print(f"{alert.title}. {alert.text}", flush=True)
+
+
+def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None):
+    """The schedule for `--watch`, pinned to one validated subnet."""
+    from .discovery import local_ipv4_in
+    from .watch import Watcher, parse_started_at
+
+    subnet = str(validate_subnet(watch_subnet))
+    conn = connect(handler.db_path)
+    try:
+        newest = list_scans(conn, limit=1)
+    finally:
+        conn.close()
+    watcher = Watcher(
+        watch_seconds,
+        subnet,
+        lambda target: start_scan_job(handler, target),
+        on_network=lambda network: local_ipv4_in(network) is not None,
+        last_scan_at=parse_started_at(newest[0]["started_at"]) if newest else None,
+    )
+    handler.watcher = watcher
+    return watcher
+
+
+def _ago(seconds: float) -> str:
+    minutes = int(max(seconds, 0) // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    return f"{hours} h ago" if hours < 48 else f"{hours // 24} days ago"
+
+
+def _in(seconds: float) -> str:
+    minutes = int(max(seconds, 0) // 60)
+    if minutes < 1:
+        return "in under a minute"
+    return f"in {minutes} min" if minutes < 60 else f"in {minutes // 60} h {minutes % 60} min"
+
+
+def tray_status_line(handler, now: float | None = None) -> str:
+    """The greyed first line of the tray menu: last scan, and the next one with --watch."""
+    from .watch import parse_started_at
+
+    now = time.time() if now is None else now
+    if _scan_lock.locked():
+        return "Scanning now…"
+    conn = connect(handler.db_path)
+    try:
+        newest = list_scans(conn, limit=1)
+    finally:
+        conn.close()
+    started = parse_started_at(newest[0]["started_at"]) if newest else None
+    parts = [f"Last scan {_ago(now - started)}" if started is not None else "No scans yet"]
+    watcher = getattr(handler, "watcher", None)
+    if watcher is not None:
+        parts.append(f"next {_in(watcher.next_scan_at - now)}")
+    return " · ".join(parts)
+
+
 def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     """Run the server on a background thread and a tray icon on this one.
 
@@ -1829,12 +1948,47 @@ def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     """
     from .tray import TrayIcon
 
+    handler = server.RequestHandlerClass
     browser_url = url or f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
+    requested = threading.Event()  # a Scan now from the tray waits for its result
+
+    def scan_now() -> None:
+        watcher = getattr(handler, "watcher", None)
+        subnet = watcher.subnet if watcher else handler.subnet_guess.get()
+        if not subnet:
+            icon.notify("Lantern", "Could not detect your network. Use the dashboard to pick a subnet.")
+            return
+        try:
+            subnet = str(validate_subnet(subnet))
+        except ValueError:
+            icon.notify("Lantern", "The detected network is not one Lantern scans.")
+            return
+        if start_scan_job(handler, subnet):
+            requested.set()
+            icon.notify("Lantern", f"Scanning {subnet}. This takes about a minute.")
+        else:
+            icon.notify("Lantern", "A scan is already running.")
+
     icon = TrayIcon(
         f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost") else f"Lantern dashboard ({host}:{port})",
         on_open=lambda: _open_browser(browser_url),
         on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
+        on_scan=scan_now,
+        status=lambda: tray_status_line(handler),
     )
+
+    def deliver(alert) -> None:
+        requested.clear()
+        icon.notify(alert.title, alert.text)
+
+    def after_scan(_scan_id: int) -> None:
+        # Runs after the alert listener: a Scan now with nothing new still gets an answer.
+        if requested.is_set():
+            requested.clear()
+            icon.notify("Lantern", "Scan finished. Nothing new.")
+
+    handler.scan_listeners.append(alert_listener(handler.db_path, deliver))
+    handler.scan_listeners.append(after_scan)
 
     def run_server() -> None:
         try:
@@ -1865,6 +2019,9 @@ def serve(
     fingerprint: bool = True,
     tray: bool = False,
     tray_url: str | None = None,
+    watch_seconds: int | None = None,
+    watch_subnet: str | None = None,
+    keep_days: float | None = None,
 ) -> None:
     server = make_server(
         db_path,
@@ -1877,29 +2034,18 @@ def serve(
         strict_auth=strict_auth,
         switches=switches,
         fingerprint=fingerprint,
+        keep_days=keep_days,
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass
-    for line in startup_lines(
-        str(bound_host),
-        int(bound_port),
-        lan_bound=bool(handler.lan_bound),
-        allowed_hosts=handler.allowed_hosts,
-        strict_auth=bool(handler.strict_auth),
-    ):
-        print(line, flush=True)
-    print(f"Database: {db_path}", flush=True)
-    if not handler.lan_bound:
-        extras = _extra_allowed_hosts(handler.allowed_hosts, int(bound_port))
-        if extras:
-            print("Additional allowed Host headers: " + ", ".join(extras), flush=True)
-    if debug:
-        print("Debug request logging on.", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-    if open_url:
-        # The socket is already listening, so the browser's first request
-        # waits in the backlog until serve_forever starts.
-        _open_browser(open_url)
+    if not tray:
+        # In the tray, alerts are notifications instead (see _serve_in_tray).
+        handler.scan_listeners.append(alert_listener(handler.db_path, _print_alert))
+    watcher = _make_watcher(handler, watch_seconds, watch_subnet) if watch_seconds else None
+    # Install the SIGTERM handler before announcing the address: anything
+    # that stops Lantern right after it reads the startup line must get a
+    # clean shutdown, not the default kill. shutdown() before serve_forever
+    # starts is fine: serve_forever then returns at once.
     previous_term = None
     if (
         hasattr(signal, "SIGTERM")
@@ -1914,6 +2060,33 @@ def serve(
         except (ValueError, OSError):
             previous_term = None
     try:
+        for line in startup_lines(
+            str(bound_host),
+            int(bound_port),
+            lan_bound=bool(handler.lan_bound),
+            allowed_hosts=handler.allowed_hosts,
+            strict_auth=bool(handler.strict_auth),
+        ):
+            print(line, flush=True)
+        print(f"Database: {db_path}", flush=True)
+        if not handler.lan_bound:
+            extras = _extra_allowed_hosts(handler.allowed_hosts, int(bound_port))
+            if extras:
+                print("Additional allowed Host headers: " + ", ".join(extras), flush=True)
+        if debug:
+            print("Debug request logging on.", flush=True)
+        if watcher is not None:
+            kept = f"; keeping {keep_days:g} days of scans" if keep_days else ""
+            print(f"Watching {watcher.subnet} every {watcher.status()['interval']}{kept}. "
+                  "Scheduled scans are skipped while this machine is on another network.", flush=True)
+            watcher.start()
+        elif keep_days:
+            print(f"Keeping {keep_days:g} days of scans.", flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
+        if open_url:
+            # The socket is already listening, so the browser's first request
+            # waits in the backlog until serve_forever starts.
+            _open_browser(open_url)
         if tray:
             _serve_in_tray(server, str(bound_host), int(bound_port), tray_url)
         else:
@@ -1921,6 +2094,8 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
+        if watcher is not None:
+            watcher.stop()
         if previous_term is not None:
             try:
                 signal.signal(signal.SIGTERM, previous_term)

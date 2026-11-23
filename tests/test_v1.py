@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from lantern import v1
-from lantern.store import connect, save_scan, set_trusted
+from lantern.store import connect, rebuild_sightings, save_scan, set_trusted
 from lantern.webapp import make_server
 
 
@@ -995,6 +995,8 @@ class CliExportTests(unittest.TestCase):
                 "UPDATE scans SET started_at = ? WHERE id = ?",
                 ("2024-01-01T00:00:00+00:00", second),
             )
+            # The app never rewrites started_at; refresh first/last seen after doing it here.
+            rebuild_sightings(conn)
             conn.commit()
         finally:
             conn.close()

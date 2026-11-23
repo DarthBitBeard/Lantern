@@ -93,14 +93,14 @@ The demo runs two fake scans, saves them, prints the diff (one new unknown devic
 | List saved scans | `python3 -m lantern history` (add `--scope home` to list one scope) |
 | Delete old scans | `python3 -m lantern prune --keep 30` shows what would go; add `--yes` to delete. `--older-than DAYS` works too, and `--vacuum` shrinks the file. The newest scan of each scope is always kept, and inventory and trust records are kept. |
 | HTML/JSON report | `python3 -m lantern report --format html` (add `--scan-id N` or `--scope home`) |
-| Export devices, findings, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
+| Export devices, findings, services, or history | `python3 -m lantern export --what devices --format csv --output report.csv` |
 | Tests | `python3 tests/run_tests.py` |
 
 Every command accepts `--db PATH` and `--format`; see `python3 -m lantern <command> --help`. Errors go to stderr with exit code 2.
 
 Default database file: `data/lantern.db` (created automatically; gitignored).
 
-Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then upgrades it. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. Schema version 2 adds `scope_name` on each scan. Schema version 3 adds the inventory table. Schema version 4 adds an index on the device table and changes no rows. Schema version 5 adds the gateway and device identities. Schema version 6 adds the switch map. Schema version 7 adds `service_fingerprints`, one row per parsed banner. An older database is copied to `.vN.bak` first, and existing rows are not rewritten. A database already at schema 1 is copied to `.v1.bak` and then gains that column; older rows keep a null scope name. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
+Opening a database applies any pending schema upgrade. Lantern only migrates forward, in one transaction. A file from a newer Lantern is refused so an older copy of the program cannot rewrite it. The first time a database from 0.3.0 is opened, Lantern copies it to the same path with `.v0.bak` added (for example `data/lantern.db.v0.bak`) and then upgrades it. Scans, devices, and trusted devices stay in the file. Schema version 1 is that 0.3.0 layout plus the version table. Schema version 2 adds `scope_name` on each scan. Schema version 3 adds the inventory table. Schema version 4 adds an index on the device table and changes no rows. Schema version 5 adds the gateway and device identities. Schema version 6 adds the switch map. Schema version 7 adds `service_fingerprints`, one row per parsed banner. Schema version 8 adds `device_seen`, the first and last sighting of each device, filled from the stored scans during the upgrade, and an index on scans by scope. An older database is copied to `.vN.bak` first, and existing rows are not rewritten. A database already at schema 1 is copied to `.v1.bak` and then gains that column; older rows keep a null scope name. The backup is still a local SQLite file; remove it yourself once you trust the upgraded one.
 
 On macOS and Linux, a new database file, that migration backup, and the HTML file from `lantern demo` are created mode `0600` (readable and writable only by your user). This holds under the usual umask `022` and under a permissive umask. If the directory for a new database does not exist yet, Lantern creates it mode `0700`. A directory that already exists stays at the mode you set. If a database or backup already on disk is readable by the group or by other users, Lantern prints a warning to stderr and leaves that file unchanged. A database path that is a symlink is refused.
 
@@ -214,9 +214,27 @@ The demo (`lantern demo`, or **Run demo** on the dashboard) includes two example
 
 Scans saved before 1.1.0 still draw. They have no stored router or names, so the router is guessed and devices are grouped by ports and hostnames only.
 
+## Watch mode and alerts
+
+`lantern web --watch 1h` scans again every hour while the dashboard runs (any of `30m`, `2h`, `1d`; 5 minutes to 7 days). Scheduled scans use the same job as the dashboard's Scan button, so two scans never overlap.
+
+```bash
+python3 -m lantern web --watch 1h                 # the detected subnet, fixed at start
+python3 -m lantern web --watch 2h --watch-subnet 192.168.1.0/24
+python3 -m lantern web --watch 1h --keep-days 30  # default 90 with --watch; 0 keeps everything
+```
+
+- **It only scans the network it started on.** The subnet is fixed when the dashboard starts, and a scheduled scan is skipped while this machine has no address in it. A laptop taken to another network does not scan that network on its own.
+- **Old scans are removed.** With `--watch`, scans older than 90 days are deleted after each dashboard scan (`--keep-days` changes that). The newest scan of each scope is always kept. `--keep-days` also works without `--watch`.
+- **Alerts.** After each dashboard scan the new scan is compared with the previous one. A new device that is not trusted or labelled, a high or critical risk port that opened, or a service that reports a different product or version raises an alert. In the tray it is a Windows notification (click it to open the dashboard). In a terminal it is one line. Moved addresses and closed ports stay in the diff and are not alerts.
+- **New since your last visit.** The dashboard remembers which devices this browser has seen (MAC or IP only, in the browser's local storage) and marks the ones that are new to you.
+- `GET /api/status` reports the schedule under `watch` (interval, subnet, next scan) and `keep_days`.
+
+In the tray, right-click the icon for the last and next scan time, **Scan now**, **Open dashboard**, and **Quit Lantern**. Starting the tray a second time opens the running one's dashboard instead of failing. The Windows installer has an unchecked option that adds `--watch 1h` to the tray shortcuts.
+
 ## Export and `/api/v1`
 
-`lantern export` writes one scan's devices or findings, or the scan history, as JSON or CSV. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
+`lantern export` writes one scan's devices, findings, or services, or the scan history, as JSON or CSV. `--what services` has one row per open port whose banner was parsed: `scan_id`, `ip`, `mac`, `port`, `service`, `product`, `version`, `parse_status`. A service reports its own product and version, which can be wrong or spoofed. The devices and findings columns are unchanged. With no `--output` it prints to stdout and exits 0, including when the scan has no rows. Exit 1 means there is no scan, or the scan id is unknown. Exit 2 means the command or the output path was refused. `--tag` can be repeated and every tag must match. `--tag` and `--criticality` are refused for `--what history`.
 
 When `--format` is omitted, an `--output` path ending in `.csv` is CSV and every other path, including stdout and `.json`, is JSON. The suffix match ignores case. If `--format` is set and the path ends in `.csv` or `.json` and that suffix does not match, the command exits 2 and does not write the file. A different suffix, such as `.txt`, keeps the format you named.
 
@@ -355,13 +373,13 @@ What this version does, and what it does not do.
 - **Plain HTTP.** The dashboard does not speak TLS. With `--allow-lan` the token and the scan data cross the network in clear text. See [SECURITY.md](SECURITY.md#known-limitations).
 - **SNMP was not checked on a real switch.** The switch map sends read-only SNMPv2c and was exercised against a simulated agent ([1.2.0](CHANGELOG.md#120---2026-11-05)). SNMPv3 is not supported.
 - **Windows binaries are not code-signed** ([1.1.0](CHANGELOG.md#110---2026-11-05)). SmartScreen can warn. See [Windows installer](#windows-installer).
-- **Not in this version:** showing banner fingerprints in reports, `/api/v1`, or exports (a scan stores them), a vulnerability database or matcher, and a watch mode or local alerts. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
+- **Not in this version:** a vulnerability database or matcher. Banner fingerprints are shown, but a version is never checked against advisories. Alerts are local only (tray notifications, a console line, and dashboard markers): there is no email, push, or webhook. A reverse-DNS hostname is stored only after control characters and bidi overrides are removed, and only up to 253 characters. A saved HTML report carries its own Content-Security-Policy (`default-src 'none'`). `frame-ancestors` is not honoured in that meta tag; the HTTP header on `/api/report?format=html` still sends it. Scans stay inside the RFC1918 ranges and the 1024-address cap in [Safety rules](#safety-rules-enforced-in-code).
 
 ## Troubleshooting
 
 - **The dashboard exits 2 before it listens.** Strict auth is on, and there is no terminal to print a token. Set `LANTERN_API_TOKEN_FILE` to a regular file, mode 0400 or 0600, that contains one token. Docker has no terminal, so the same exit 2 means the token file or `LANTERN_API_TOKEN` is missing. Do not put the token in the image or in `docker-compose.yml`.
 - **`Refusing to change it (schema …)`.** The database was written by a newer Lantern. This copy will not migrate it backwards. Upgrade Lantern, or restore the `.vN.bak` that the newer copy left beside the file.
-- **Database schema.** The database is at schema 7 after the upgrade; the previous layout was schema 6.
+- **Database schema.** The database is at schema 8 after the upgrade. Lantern 1.5.x used schema 7 and 1.4.x used schema 6. The upgrade writes a `.v7.bak` (or `.v6.bak`) copy first.
 - **`The saved scan could not be read.`** A stored scan row is not valid JSON, or the JSON has the wrong shape. The command exits 2. The dashboard returns HTTP 500 with that same line.
 - **A subnet is refused.** Only networks fully inside `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` are accepted, and a run is at most 1024 addresses. Public, loopback, and link-local ranges are refused.
 

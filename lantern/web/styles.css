@@ -82,6 +82,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .stat b { display: block; font-size: 1.6rem; }
 .stat span { color: var(--muted); font-size: .85rem; }
 .stat.warn b { color: var(--orange); }
+.new-since-visit { margin: 0 0 6px; font-size: 0.8rem; font-weight: 600; color: var(--orange); }
 .stat.bad b { color: var(--red); }
 .diff { background: #451a03; border: 1px solid var(--amber-dark); border-radius: var(--radius-lg); padding: 1rem; }
 .diff.calm { background: var(--panel); border-color: var(--divider); }
