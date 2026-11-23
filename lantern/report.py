@@ -53,6 +53,18 @@ def _switch_map(scan: dict) -> dict:
     return {"switch_map": {"switches": topo.get("switches") or [], "router": topo.get("router")}}
 
 
+def service_label(fingerprint) -> str | None:
+    """"OpenSSH 9.6" (or just "OpenSSH") from a stored fingerprint, else None.
+
+    What the service says about itself. It can be wrong or spoofed.
+    """
+    if not isinstance(fingerprint, dict) or not fingerprint.get("product"):
+        return None
+    product = strip_for_text(fingerprint["product"])
+    version = strip_for_text(fingerprint.get("version") or "")
+    return f"{product} {version}".strip() or None
+
+
 def describe_change(change: dict) -> str:
     """One plain-English line for a changed device, shared by CLI and reports."""
     ip = change["device"]["ip"]
@@ -135,6 +147,15 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
         banner_html = ""
         if banners:
             banner_html = f"<p>Banner: {html.escape(' | '.join(banners))}</p>"
+        services = [
+            f"{port['port']} {label}"
+            for port in device.get("open_ports") or []
+            if (label := service_label(port.get("fingerprint")))
+        ]
+        if services:
+            banner_html += (
+                f"<p>Services (as reported by the device): {html.escape(' | '.join(services))}</p>"
+            )
         trust = ""
         if device.get("trusted"):
             trust = " <small>(trusted)</small>"

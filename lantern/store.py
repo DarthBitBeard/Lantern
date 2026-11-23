@@ -1187,13 +1187,21 @@ def scans_to_prune(
     return sorted(doomed)
 
 
-def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: list[int]) -> None:
-    """Put each stored parse on its port. A port with no row gets None."""
+def load_fingerprints(conn, *, scan_id: int | None = None, device_id: int | None = None) -> dict[int, dict[int, dict]]:
+    """Stored parses as {device_id: {port: fingerprint}}, for one scan or one device.
+
+    Every row is checked; a malformed or duplicate row is a CorruptScanError.
+    """
+    if (scan_id is None) == (device_id is None):
+        raise ValueError("Pass exactly one of scan_id or device_id.")
+    if scan_id is not None:
+        where, param = "device_id IN (SELECT id FROM devices WHERE scan_id = ?)", scan_id
+    else:
+        where, param = "device_id = ?", device_id
     rows = conn.execute(
         "SELECT device_id, port, service, product, version, raw_banner, parse_status"
-        " FROM service_fingerprints WHERE device_id IN"
-        " (SELECT id FROM devices WHERE scan_id = ?)",
-        (scan_id,),
+        f" FROM service_fingerprints WHERE {where}",
+        (param,),
     ).fetchall()
     by_device: dict[int, dict[int, dict]] = {}
     for device_id, port, service, product, version, raw_banner, status in rows:
@@ -1221,6 +1229,21 @@ def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: li
             "raw_banner": checked[4],
             "parse_status": checked[5],
         }
+    return by_device
+
+
+def attach_port_fingerprints(device: dict, found: dict[int, dict]) -> None:
+    """Set ``fingerprint`` on each port dict from {port: fingerprint}; None when absent."""
+    ports = device.get("open_ports")
+    if isinstance(ports, list):
+        for port in ports:
+            if isinstance(port, dict):
+                port["fingerprint"] = found.get(port.get("port"))
+
+
+def _attach_fingerprints(conn, scan_id: int, devices: list[dict], device_ids: list[int]) -> None:
+    """Put each stored parse on its port. A port with no row gets None."""
+    by_device = load_fingerprints(conn, scan_id=scan_id)
     for device, device_id in zip(devices, device_ids):
         found = by_device.pop(device_id, {})
         ports = device["open_ports"]

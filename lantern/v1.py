@@ -53,7 +53,9 @@ from .identify import empty_identity, identity_is_empty
 from .vendors import is_private_mac, lookup as vendor_lookup
 from .ports import SEVERITY_RANK
 from .store import (
+    attach_port_fingerprints,
     diff_scans,
+    load_fingerprints,
     get_trusted,
     apply_trust,
     ip_sort_key,
@@ -91,7 +93,7 @@ _FORMULA_FIRST = set("=+-@\t\r\n|") | {
     "\uff5c",  # fullwidth vertical line
 }
 SEVERITIES = ("critical", "high", "medium", "low", "info")
-_EXPORT_WHAT = ("devices", "findings", "history")
+_EXPORT_WHAT = ("devices", "findings", "history", "services")
 _PRIVATE = ("owner", "location", "notes")
 
 _DEVICE_COLUMNS = (
@@ -105,6 +107,7 @@ _DEVICE_COLUMNS = (
 )
 _FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
+_SERVICE_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "product", "version", "parse_status")
 
 MESSAGES = {
     "bad_request": "The request is not valid.",
@@ -694,6 +697,16 @@ def _assets(conn) -> dict[str, dict]:
     return found
 
 
+def _public_fingerprint(raw) -> dict | None:
+    """The parsed banner for one port, in a fixed shape, or None.
+
+    ``raw_banner`` is left out: the port's ``banner`` already carries it.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return {key: raw.get(key) for key in ("service", "product", "version", "parse_status")}
+
+
 def _ports(device: dict) -> list[dict]:
     ports = []
     for port in device.get("open_ports") or []:
@@ -701,6 +714,7 @@ def _ports(device: dict) -> list[dict]:
         ports.append({
             "port": int(port["port"]),
             "banner": banner if banner else None,
+            "fingerprint": _public_fingerprint(port.get("fingerprint")),
         })
     return ports
 
@@ -844,10 +858,11 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
     seen = _seen_bounds(conn)
     trusted = get_trusted(conn)
     fetched = conn.execute(
-        "SELECT ip, mac, hostname, label, open_ports, findings, identity FROM devices WHERE scan_id = ?",
+        "SELECT ip, mac, hostname, label, open_ports, findings, identity, id FROM devices WHERE scan_id = ?",
         (scan_id,),
     ).fetchall()
     fetched.sort(key=lambda row: (ip_sort_key(row[0]), normalize_mac(row[1]) or ""))
+    fingerprints = load_fingerprints(conn, scan_id=scan_id)
     # A device's kind depends on which host is the router, which depends on
     # the whole scan. Pick the router in a light first pass (stored gateway
     # if it was seen, otherwise the best-scoring candidate), then classify
@@ -870,7 +885,7 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
         router, guessed = gateway_ip, False
     else:
         router, guessed = (best[2], True) if best else (None, False)
-    for ip, mac, hostname, label, ports_json, findings_json, identity_json in fetched:
+    for ip, mac, hostname, label, ports_json, findings_json, identity_json, device_id in fetched:
         findings = _stored_findings(findings_json)
         identity = _stored_object(identity_json)
         device = {
@@ -882,6 +897,7 @@ def _iter_export_devices(conn, scan_id: int, *, private: bool, tags: list[str], 
             "findings": findings,
             "identity": identity,
         }
+        attach_port_fingerprints(device, fingerprints.get(device_id, {}))
         _overlay_trust(device, trusted)
         device["kind"], device["kind_reason"] = classify(device, router, guessed)
         shown = _device_dict(device, scan, assets, seen, private=private)
@@ -1036,7 +1052,9 @@ def _iter_stored_devices(conn, scan_id: int, accept=None):
             raise V1Error(413, "too_large")
         if accept is not None and not accept(ip, mac, stored):
             continue
-        yield _decode_stored_device(conn, device_id, ip, mac, hostname, label)
+        device = _decode_stored_device(conn, device_id, ip, mac, hostname, label)
+        attach_port_fingerprints(device, load_fingerprints(conn, device_id=device_id).get(device_id, {}))
+        yield device
 
 
 def _matching_devices(conn, scan: dict, tags: list[str], criticality: str | None, *, private: bool):
@@ -1203,6 +1221,34 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
     return scan, rows
 
 
+def services_rows(conn, query: dict) -> tuple[dict, list[dict]]:
+    """One row per open port whose banner was parsed, for the selected devices."""
+    scan, devices = device_rows(conn, query, private=False)
+    rows = []
+    raw_by_ip: dict = {}
+    for item in scan["devices"]:
+        raw_by_ip.setdefault(item["ip"], item)
+    for device in devices:
+        raw = raw_by_ip[device["ip"]]
+        for port in raw.get("open_ports") or []:
+            fingerprint = port.get("fingerprint") if isinstance(port, dict) else None
+            if not isinstance(fingerprint, dict):
+                continue
+            rows.append({
+                "scan_id": scan["id"],
+                "ip": device["ip"],
+                "mac": device["mac"],
+                "port": int(port["port"]),
+                "service": fingerprint.get("service") or "",
+                "product": fingerprint.get("product") or "",
+                "version": fingerprint.get("version") or "",
+                "parse_status": fingerprint.get("parse_status") or "",
+            })
+    _too_many(len(rows))
+    rows.sort(key=lambda row: (ip_sort_key(row["ip"]), row["port"]))
+    return scan, rows
+
+
 def findings_document(conn, query: dict) -> dict:
     limit, offset = _limit_offset(query)
     scan, rows = findings_rows(conn, query)
@@ -1359,6 +1405,8 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
         raise V1Error(400, "bad_request")
     if what == "history" and (_many(query, "tag") or _one(query, "criticality") or _one(query, "severity")):
         raise V1Error(400, "bad_request")
+    if what == "services" and _one(query, "severity"):
+        raise V1Error(400, "bad_request")
     scan_id = 0
     if what == "history":
         items = _history_items(conn, query)
@@ -1398,7 +1446,12 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
             headers, table = device_csv_table(scan_id, rows, private=private)
             body = _csv_body(headers, table)
         return body, fmt, scan_id, what, fmt
-    scan, rows = findings_rows(conn, query)
+    if what == "services":
+        scan, rows = services_rows(conn, query)
+        columns = _SERVICE_COLUMNS
+    else:
+        scan, rows = findings_rows(conn, query)
+        columns = _FINDING_COLUMNS
     scan_id = scan["id"]
     if fmt == "json":
         body = _finish({
@@ -1408,7 +1461,7 @@ def render_export(conn, query: dict, *, private: bool) -> tuple[bytes, str, int,
             "total": len(rows),
         })
     else:
-        headers = list(_FINDING_COLUMNS)
+        headers = list(columns)
         body = _csv_body(headers, _project_rows(headers, rows))
     return body, fmt, scan_id, what, fmt
 

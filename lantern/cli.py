@@ -320,7 +320,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_p = sub.add_parser("export", help="Write devices, findings, or scan history as JSON or CSV.")
     _add_db_arg(export_p)
-    export_p.add_argument("--what", required=True, choices=["devices", "findings", "history"])
+    export_p.add_argument(
+        "--what", required=True, choices=["devices", "findings", "history", "services"],
+        help="services: one row per open port whose banner was parsed (product and version).",
+    )
     export_p.add_argument(
         "--format",
         choices=["json", "csv"],

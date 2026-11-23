@@ -126,6 +126,12 @@ function kindLabel(kind) {
   return hasOwn(KIND_LABELS, kind) ? KIND_LABELS[kind] : undefined;
 }
 
+function serviceLabel(fingerprint) {
+  if (!fingerprint || typeof fingerprint.product !== "string" || !fingerprint.product) return "";
+  const version = typeof fingerprint.version === "string" ? fingerprint.version : "";
+  return `${fingerprint.product} ${version}`.trim();
+}
+
 function worstSeverity(device) {
   let worst = null;
   for (const f of device.findings || []) {
@@ -645,9 +651,15 @@ function renderDevice(device) {
   const worst = worstSeverity(device);
   const ports = (device.open_ports || []).map((p) => {
     const span = node("span", { className: "port", text: String(p.port) });
-    if (p.banner) span.setAttribute("title", String(p.banner));
+    const label = serviceLabel(p.fingerprint);
+    const tip = [label, p.banner].filter(Boolean).join(" | ");
+    if (tip) span.setAttribute("title", tip);
     return span;
   });
+  const services = (device.open_ports || [])
+    .map((p) => [p.port, serviceLabel(p.fingerprint)])
+    .filter(([, label]) => label)
+    .map(([port, label]) => `${port} ${label}`);
   const findings = (device.findings || []).map((f) => node("li", {}, [
     badge(f.severity, BADGE_CLASS),
     node("strong", { text: ` ${f.port} ${f.service || ""}:` }),
@@ -689,6 +701,13 @@ function renderDevice(device) {
   children.push(switchPortLine(device));
   if (worst) {
     children.push(node("p", {}, ["Worst risk: ", badge(worst, BADGE_CLASS)]));
+  }
+  if (services.length) {
+    children.push(node("p", {
+      className: "services",
+      title: "What each service says about itself. It can be wrong or spoofed.",
+      text: `Services: ${services.join(" | ")}`,
+    }));
   }
   children.push(node("div", { className: "ports" }, ports.length ? ports : [
     node("span", { className: "port", text: "none" }),
