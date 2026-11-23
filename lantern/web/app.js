@@ -229,10 +229,20 @@ function stat(value, label, tone) {
   ]);
 }
 
+// className, not classList: the dashboard's Node tests run on a small DOM without classList.
+function hasClass(el, name) {
+  return Boolean(el) && ` ${el.className || ""} `.includes(` ${name} `);
+}
+
+function setClass(el, name, on) {
+  const others = String(el.className || "").split(/\s+/).filter((c) => c && c !== name);
+  el.className = (on ? others.concat(name) : others).join(" ");
+}
+
 // A summary number that is not zero becomes a one-click filter for the device list.
 function filterStat(el, filterValue, count) {
   if (!count) return el;
-  el.classList.add("clickable");
+  setClass(el, "clickable", true);
   el.setAttribute("role", "button");
   el.setAttribute("tabindex", "0");
   el.setAttribute("title", "Show these devices");
@@ -320,9 +330,9 @@ function jumpToDevice(key) {
   }
   if (!card) return;
   card.scrollIntoView({ behavior: "smooth", block: "center" });
-  card.classList.remove("flash");
+  setClass(card, "flash", false);
   void card.offsetWidth; // restart the highlight animation
-  card.classList.add("flash");
+  setClass(card, "flash", true);
 }
 
 function renderDiff(scan, diff) {
@@ -810,8 +820,7 @@ function renderDevice(device) {
       text: "This MAC address looks randomized (a private Wi-Fi address). If this device changes it, it will show up as a new device and need trusting again.",
     }));
   }
-  const manageItems = children.filter((el) => el && el.classList
-    && (el.classList.contains("trust-row") || el.classList.contains("hint")));
+  const manageItems = children.filter((el) => hasClass(el, "trust-row") || hasClass(el, "hint"));
   if (manageItems.length) {
     for (const el of manageItems) children.splice(children.indexOf(el), 1);
     const summaryText = device.label || device.trusted ? "Label and trust" : "Name this device or mark it trusted";

@@ -846,7 +846,7 @@ if (network.length) {
 }
 let details = null;
 walk(elements.devices, (node) => {
-  if (node.tagName === "DETAILS") details = node;
+  if (node.tagName === "DETAILS" && node.className === "asset-editor") details = node;
 });
 if (!details) {
   console.error("missing editor");
@@ -938,7 +938,7 @@ planned.push({ status: 200, body: { items: [{
   owner: "Latest", location: "Rack", tags: ["web"], notes: "keep", criticality: "high",
 }] } });
 let detailsAfter = null;
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") detailsAfter = node; });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") detailsAfter = node; });
 for (const fn of save.listeners.click || []) fn();
 await new Promise((resolve) => setTimeout(resolve, 0));
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1015,7 +1015,7 @@ if (!textIncludes(elements.devices, "No devices match")) {
 elements["tag-filter"].value = "";
 for (const fn of elements["tag-filter"].listeners.change || []) fn();
 let reopened = null;
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") reopened = node; });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") reopened = node; });
 reopened.open = true;
 for (const fn of reopened.listeners.toggle || []) fn();
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1066,7 +1066,7 @@ context.showScan({
   devices: [left, right],
 }, null);
 const editors = [];
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") editors.push(node); });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") editors.push(node); });
 if (editors.length !== 2) {
   console.error("editors", editors.length);
   process.exit(24);
@@ -1109,7 +1109,7 @@ if (!textIncludes(elements.devices, "No devices match")) {
 elements["tag-filter"].value = "";
 for (const fn of elements["tag-filter"].listeners.change || []) fn();
 const again = [];
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") again.push(node); });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") again.push(node); });
 again[0].open = true;
 for (const fn of again[0].listeners.toggle || []) fn();
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1135,7 +1135,7 @@ if (!textIncludes(elements.devices, "No devices match")) {
 elements["tag-filter"].value = "";
 for (const fn of elements["tag-filter"].listeners.change || []) fn();
 const third = [];
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") third.push(node); });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") third.push(node); });
 third[0].open = true;
 for (const fn of third[0].listeners.toggle || []) fn();
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1201,7 +1201,7 @@ context.showScan({
   devices: [left],
 }, null);
 let switched = null;
-walk(elements.devices, (node) => { if (node.tagName === "DETAILS") switched = node; });
+walk(elements.devices, (node) => { if (node.tagName === "DETAILS" && node.className === "asset-editor") switched = node; });
 switched.open = true;
 for (const fn of switched.listeners.toggle || []) fn();
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2824,7 +2824,7 @@ const payload = "<script>alert(1)</script>";
 const allow = new Set(["device", "unknown", "kind", "meta", "ports", "port", "findings",
   "trust-row", "hint", "badge", "critical", "high", "medium", "low", "info", "trusted", "secondary",
   "asset-editor", "asset-editor-body", "asset-form", "tag-chips", "tag-chip", "asset-actions", "asset-error",
-  "shown-owner", "shown-location", "shown-criticality", "shown-tags", "shown-notes"]);
+  "shown-owner", "shown-location", "shown-criticality", "shown-tags", "shown-notes", "manage"]);
 function walk(node, visit) {
   if (!node) return;
   if (node.nodeType === 3) { visit(node); return; }
