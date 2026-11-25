@@ -379,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument(
         "--config",
         help="TOML file. When set, [checks] disabled applies to every dashboard scan. "
-             "port-rules cannot be turned off. Without --config the file is not read.",
+             "port-rules and vuln-match cannot be turned off. Without --config the file is not read.",
     )
     _add_disable_check_arg(web_p)
     web_p.add_argument(
@@ -474,7 +474,7 @@ def _add_disable_check_arg(parser: argparse.ArgumentParser) -> None:
         metavar="ID",
         help="Turn off this check. Repeat to turn off more than one. "
              "`lantern checks` lists the ids. An unknown id exits 2 and names the valid ones. "
-             "port-rules cannot be turned off until a scan records which checks ran. "
+             "port-rules and vuln-match cannot be turned off until a scan records which checks ran. "
              "The dashboard and the API cannot change this.",
     )
 
@@ -1678,6 +1678,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(str(exc))
             ran: list[str] = []
             failed: list[tuple[str, str]] = []
+            from .vulndata import load_for_scan
+
+            scan_dataset = load_for_scan()
             saved: list[tuple[dict, dict | None]] = []
             stored: list[tuple[int, list[dict], dict]] = []
             seen_hosts: set[str] = set()
@@ -1701,6 +1704,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             for device in engine.scan_hosts(
                                 fresh, DEFAULT_PORTS, fingerprint=not args.no_fingerprint,
                                 disabled=getattr(args, "disabled_checks", frozenset()),
+                                dataset=scan_dataset,
                             ):
                                 found[device["ip"]] = device
                             identities = pending.result()

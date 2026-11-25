@@ -91,7 +91,7 @@ class FingerprintViewTests(unittest.TestCase):
         code, out, err = self.cli("export", "--what", "findings", "--format", "csv")
         self.assertEqual(code, 0, err)
         self.assertEqual(next(csv.reader(io.StringIO(out))),
-                         ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"])
+                         ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix", "note"])
 
 
 if __name__ == "__main__":

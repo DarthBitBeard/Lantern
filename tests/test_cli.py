@@ -516,9 +516,17 @@ class CliTests(unittest.TestCase):
             code, out, err = self.run_cli("checks")
             self.assertEqual(code, 0, err)
             self.assertIn("port-rules  enabled", out)
+            self.assertIn("vuln-match  enabled", out)
             self.assertIn("dataset status: missing", out)
             self.assertNotIn("Traceback", err)
             self.assertFalse(Path(self.db).exists())
+
+            code, out, err = self.run_cli("checks", "--disable-check", "vuln-match")
+            self.assertEqual(code, 2)
+            self.assertIn("cannot be disabled", err)
+            self.assertIn("'vuln-match'", err)
+            self.assertNotIn("vuln-match  disabled", out)
+            self.assertNotIn("Traceback", err)
 
             code, out, err = self.run_cli("checks", "--disable-check", "port-rules")
             self.assertEqual(code, 2)
@@ -566,6 +574,39 @@ class CliTests(unittest.TestCase):
             ports = [item["port"] for item in device["open_ports"]]
             self.assertEqual(device["findings"], findings_for_ports(ports))
         self.assertNotIn("Checks disabled", err)
+
+    def test_vuln_match_cannot_be_disabled_on_any_route(self):
+        for args in (
+            ("checks", "--disable-check", "vuln-match"),
+            ("scan", "--demo", "--disable-check", "vuln-match"),
+            ("web", "--disable-check", "vuln-match"),
+        ):
+            code, out, err = self.run_cli(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn(
+                "Check 'vuln-match' cannot be disabled until a scan records which checks ran.",
+                err,
+            )
+            self.assertNotIn("Traceback", err)
+            self.assertNotIn("vuln-match  disabled", out)
+        self.assertFalse(Path(self.db).exists())
+
+        path = self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.9.9.0/24"\n\n[checks]\ndisabled = ["vuln-match"]\n',
+            name="lock.toml",
+        )
+        for args in (
+            ("checks", "--config", str(path)),
+            ("scan", "--config", str(path)),
+            ("web", "--config", str(path)),
+        ):
+            code, out, err = self.run_cli(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("'vuln-match'", err)
+            self.assertIn("cannot be disabled", err)
+            self.assertNotIn("Traceback", err)
+            self.assertNotIn("Checks disabled", err)
+        self.assertFalse(Path(self.db).exists())
 
     def test_config_disabled_checks_reach_the_scan_and_unknown_ids_exit_2(self):
         bad = self._write_scopes(

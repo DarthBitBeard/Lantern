@@ -1,11 +1,13 @@
 """Static checks over what a scan already collected.
 
 The registry is a fixed literal. A config file can disable a check by
-id and cannot add one. ``port-rules`` cannot be disabled until a scan
-records which checks ran: with it off, every device would be stored with
-no findings and would look like a clean network. Nothing here loads
-plugins, discovers files, or runs user code, and nothing here touches
-the network.
+id and cannot add one. ``port-rules`` and ``vuln-match`` cannot be
+disabled until a scan records which checks ran. With ``port-rules`` off,
+every device would be stored with no findings and would look like a
+clean network. With ``vuln-match`` off, a later dataset would drop
+banner matches and leave no record that the check did not run. Nothing
+here loads plugins, discovers files, or runs user code, and nothing here
+touches the network.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ class Finding:
     id: str | None = None
     refs: tuple[str, ...] = ()
     evidence: str | None = None
+    note: str | None = None
 
     def as_dict(self) -> dict:
         """The stored JSON object.
@@ -60,6 +63,8 @@ class Finding:
             item["refs"] = list(self.refs)
         if self.evidence:
             item["evidence"] = self.evidence
+        if self.note:
+            item["note"] = self.note
         return item
 
 
@@ -95,16 +100,25 @@ def _port_rules(obs: Observation, dataset: object) -> list[Finding]:
     return found
 
 
+def _vuln_match(obs: Observation, dataset: object) -> list[Finding]:
+    """Banner findings. A missing dataset produces nothing."""
+    from .vuln_match import vuln_match_findings
+
+    return vuln_match_findings(obs, dataset)
+
+
 # Fixed literal. Do not build this from entry points, directories, or imports
 # of anything the user can drop in beside the program.
 REGISTRY: dict[str, object] = {
     "port-rules": _port_rules,
+    "vuln-match": _vuln_match,
 }
 
 # These stay on until a scan records which checks ran. Other ids in the
-# registry can still be disabled. port-rules is the only entry today;
-# turning it off would store an empty findings list.
-LOCKED_CHECK_IDS = frozenset({_PORT_CHECK_ID})
+# registry can still be disabled. Turning port-rules off would store an
+# empty findings list. Turning vuln-match off would drop banner matches
+# and leave no record that the check did not run.
+LOCKED_CHECK_IDS = frozenset({_PORT_CHECK_ID, "vuln-match"})
 
 
 def known_check_ids() -> tuple[str, ...]:
@@ -163,8 +177,10 @@ def run_checks(obs: Observation, dataset: object, disabled: frozenset[str]) -> l
 def describe_checks(disabled: frozenset[str]) -> str:
     """Text for ``lantern checks``. One line per check, then the dataset.
 
-    There is no dataset in this version, so the status is ``missing``.
+    With no packaged file the status is ``missing`` and nothing is matched.
     """
+    from ..vulndata import format_dataset, load_packaged
+
     disabled = frozenset(disabled)
     validate_disabled(disabled)
     width = max(len(check_id) for check_id in REGISTRY)
@@ -172,5 +188,5 @@ def describe_checks(disabled: frozenset[str]) -> str:
     for check_id in REGISTRY:
         state = "disabled" if check_id in disabled else "enabled"
         lines.append(f"{check_id:<{width}}  {state}")
-    lines.append("dataset status: missing")
+    lines.extend(format_dataset(load_packaged()))
     return "\n".join(lines)

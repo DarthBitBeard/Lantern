@@ -105,7 +105,11 @@ _DEVICE_COLUMNS = (
     # Added in 1.3.0.
     "vendor", "private_mac",
 )
-_FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
+_FINDING_COLUMNS = (
+    "scan_id", "ip", "mac", "port", "service", "severity", "title", "fix",
+    # The banner-only caveat. Empty for a port-rules finding.
+    "note",
+)
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
 _SERVICE_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "product", "version", "parse_status")
 
@@ -1202,6 +1206,7 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
         for finding in raw.get("findings") or []:
             if severity is not None and finding.get("severity") != severity:
                 continue
+            note = finding.get("note")
             rows.append({
                 "scan_id": scan["id"],
                 "ip": device["ip"],
@@ -1211,6 +1216,7 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
                 "severity": finding.get("severity") or "",
                 "title": finding.get("title") or "",
                 "fix": finding.get("fix") or "",
+                "note": note if isinstance(note, str) else "",
             })
     _too_many(len(rows))
     rows.sort(key=lambda row: (

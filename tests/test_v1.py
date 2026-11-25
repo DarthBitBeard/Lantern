@@ -961,7 +961,7 @@ class CliExportTests(unittest.TestCase):
         parsed = list(csv.reader(io.StringIO(out, newline="")))
         self.assertEqual(
             parsed[0],
-            ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"],
+            ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix", "note"],
         )
         self.assertEqual(len(parsed[1]), len(parsed[0]))
         row = dict(zip(parsed[0], parsed[1]))
@@ -975,6 +975,54 @@ class CliExportTests(unittest.TestCase):
         self.assertEqual(document["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["scan_id"], scan_id)
         self.assertEqual(document["items"][0]["service"], "telnet")
+        self.assertEqual(document["items"][0]["note"], "")
+
+    def test_findings_csv_and_api_show_the_banner_only_sentence(self):
+        from lantern.checks.vuln_match import BANNER_SENTENCE
+
+        conn = connect(self.db)
+        try:
+            scan_id = save_scan(
+                conn,
+                "192.168.50.0/24",
+                [_device(
+                    "192.168.50.10",
+                    "aa:bb:cc:dd:ee:10",
+                    findings=[{
+                        "port": 22,
+                        "service": "ssh",
+                        "severity": "high",
+                        "title": "Banner match",
+                        "fix": "Upgrade",
+                        "note": BANNER_SENTENCE,
+                    }, {
+                        "port": 22,
+                        "service": "ssh",
+                        "severity": "low",
+                        "title": "Formula",
+                        "fix": "Ignore",
+                        "note": "=1+1",
+                    }],
+                )],
+            )
+        finally:
+            conn.close()
+        code, out, err = self.run_cli("export", "--what", "findings", "--format", "csv")
+        self.assertEqual(code, 0, err)
+        parsed = list(csv.reader(io.StringIO(out, newline="")))
+        self.assertEqual(parsed[0][-1], "note")
+        by_title = {row[parsed[0].index("title")]: row for row in parsed[1:]}
+        self.assertEqual(by_title["Banner match"][-1], BANNER_SENTENCE)
+        self.assertTrue(by_title["Formula"][-1].startswith("'"))
+        self.assertIn("=1+1", by_title["Formula"][-1])
+        conn = connect(self.db)
+        try:
+            document = v1.findings_document(conn, {"scan_id": [str(scan_id)]})
+        finally:
+            conn.close()
+        notes = {item["title"]: item["note"] for item in document["items"]}
+        self.assertEqual(notes["Banner match"], BANNER_SENTENCE)
+        self.assertEqual(notes["Formula"], "=1+1")
 
     def test_seen_bounds_follow_a_normalized_mac(self):
         conn = connect(self.db)

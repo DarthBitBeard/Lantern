@@ -27,6 +27,7 @@ from .discovery import (
 )
 from .identify import discover_identities
 from .checks import Observation, run_checks, validate_disabled
+from .vulndata import load_for_scan
 from .ports import DEFAULT_PORTS
 from .scanner import scan_host
 
@@ -106,6 +107,7 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = Tru
     """
     disabled = frozenset(disabled)
     validate_disabled(disabled)
+    dataset = load_for_scan(dataset)
     if not hosts:
         return []
     report = progress or (lambda phase, done, total: None)
@@ -220,6 +222,7 @@ def scan_subnet(
     """
     disabled = frozenset(disabled)
     validate_disabled(disabled)
+    dataset = load_for_scan(dataset)
     if demo_mode:
         devices, info = demo.demo_scan_1(), dict(demo.DEMO_NETWORK)
         _apply_checks(devices, dataset, disabled)

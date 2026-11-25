@@ -16,8 +16,8 @@
 #
 # The only other root table is [checks], and its only key is "disabled":
 # a list of check ids to turn off (see `lantern checks`). An unknown id
-# is refused. port-rules cannot be turned off until a scan records which
-# checks ran. [checks] applies only when this file is passed with --config,
+# is refused. port-rules and vuln-match cannot be turned off until a scan
+# records which checks ran. [checks] applies only when this file is passed with --config,
 # not when lantern.toml is merely sitting in the working directory.
 # The dashboard and the API cannot change this.
 #

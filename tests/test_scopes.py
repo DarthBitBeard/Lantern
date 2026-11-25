@@ -81,6 +81,16 @@ class LoadScopesTests(unittest.TestCase):
         self.assertIn("'port-rules'", str(ctx.exception))
         self.assertEqual(load_scopes(self.path)["home"].subnet, "10.0.0.0/24")
 
+        self.write(
+            '[scopes.home]\nsubnet = "10.0.0.0/24"\n\n'
+            '[checks]\ndisabled = ["vuln-match"]\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            load_disabled_checks(self.path)
+        self.assertIn("cannot be disabled", str(ctx.exception))
+        self.assertIn("'vuln-match'", str(ctx.exception))
+        self.assertEqual(load_scopes(self.path)["home"].subnet, "10.0.0.0/24")
+
         self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\nplugins = true\n')
         with self.assertRaises(ValueError) as ctx:
             load_scopes(self.path)
