@@ -10,6 +10,7 @@ needed. On other systems `is_supported()` is False and `TrayIcon.run` raises.
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import threading
 from collections.abc import Callable
@@ -23,8 +24,14 @@ WM_USER = 0x0400
 WM_TRAY = WM_USER + 1
 WM_APP = 0x8000
 WM_SHOW_PENDING = WM_APP + 2  # posted by notify() from another thread
-WM_OPEN_DASHBOARD = WM_APP + 3  # posted by a second launch (see signal_running_instance)
+WM_OPEN_DASHBOARD = WM_APP + 3  # posted by a verified second launch
+WM_TRAY_STOP = WM_APP + 4  # posted by TrayIcon.stop() with this run's lParam
+_STOP_MASK = (1 << 64) - 1
 WINDOW_CLASS = "LanternTrayWindow"  # fixed, so a second launch can find the first
+INSTANCE_NONE = "none"
+INSTANCE_OURS = "ours"
+INSTANCE_FOREIGN = "foreign"
+_TRAY_IMAGE_NAMES = frozenset({"lantern-tray.exe", "lantern.exe"})
 NIN_BALLOONUSERCLICK = WM_USER + 5
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
@@ -50,6 +57,7 @@ TPM_RETURNCMD = 0x100
 ID_OPEN = 1
 ID_QUIT = 2
 ID_SCAN = 3
+ID_WATCH = 4
 IDI_APPLICATION = 32512
 TOOLTIP_MAX = 127  # szTip holds 128 UTF-16 units including the terminator
 
@@ -59,22 +67,127 @@ def is_supported() -> bool:
     return _IS_WINDOWS
 
 
-def signal_running_instance() -> bool:
-    """Ask a Lantern tray already running for this user to open its dashboard.
+def tray_image_is_ours(image: str | None, our_executable: str | None) -> bool:
+    """True when ``image`` is this install's lantern-tray.exe or lantern.exe.
 
-    True when one was found and asked; the caller can then exit instead of
-    failing to bind the same port. Always False off Windows.
+    The comparison is the executable's file name and its directory. A window
+    of the tray class that belongs to some other program is not ours.
+    """
+    if not image or not our_executable:
+        return False
+    try:
+        image_path = os.path.abspath(image)
+        our_path = os.path.abspath(our_executable)
+    except (OSError, ValueError):
+        return False
+    if os.path.basename(image_path).lower() not in _TRAY_IMAGE_NAMES:
+        return False
+    return os.path.normcase(os.path.dirname(image_path)) == os.path.normcase(os.path.dirname(our_path))
+
+
+def classify_running_instance() -> str:
+    """``ours`` when a verified tray was asked to open, ``foreign`` or ``none``.
+
+    A window of the tray class is trusted only when its process image is
+    this install's tray program. Off Windows this is always ``none``.
     """
     if not _IS_WINDOWS:
+        return INSTANCE_NONE
+    found = _windows_tray_target()
+    if found is None:
+        return INSTANCE_NONE
+    hwnd, image = found
+    if not tray_image_is_ours(image, sys.executable):
+        return INSTANCE_FOREIGN
+    if not _post_tray_message(hwnd, WM_OPEN_DASHBOARD):
+        return INSTANCE_FOREIGN
+    return INSTANCE_OURS
+
+
+def signal_running_instance() -> bool:
+    """Ask a verified Lantern tray to open its dashboard.
+
+    True only when that tray was found and asked. A window that is not this
+    install's tray does not count, so a second launch does not exit as if
+    it had handed off. Always False off Windows.
+    """
+    return classify_running_instance() == INSTANCE_OURS
+
+
+def stop_lparam_bits(value: int) -> int:
+    """The low 64 bits of an lParam, as an unsigned value."""
+    return int(value) & _STOP_MASK
+
+
+def signed_stop_lparam(value: int) -> int:
+    """``value`` as the signed LPARAM PostMessageW carries on 64-bit Windows."""
+    bits = stop_lparam_bits(value)
+    if bits >= (1 << 63):
+        return bits - (1 << 64)
+    return bits
+
+
+def accepts_stop(message: int, lparam: int, token: int) -> bool:
+    """True only for this run's stop message.
+
+    ``WM_TRAY_STOP`` is the fixed number ``WM_APP+4``. Any same-desktop
+    process can post that number. It quits Lantern only when ``lParam`` is
+    the random 64-bit value chosen at startup and never written out. ``WM_CLOSE``
+    and a stop message with any other lParam do not match.
+    """
+    if int(message) != WM_TRAY_STOP:
         return False
+    return stop_lparam_bits(lparam) == stop_lparam_bits(token)
+
+
+def _post_tray_message(hwnd, message: int, lparam: int = 0) -> bool:
     import ctypes
 
     user32 = ctypes.WinDLL("user32")
-    user32.FindWindowW.restype = ctypes.c_void_p
-    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
     user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    user32.PostMessageW.restype = ctypes.c_int
+    return bool(user32.PostMessageW(hwnd, message, 0, signed_stop_lparam(lparam)))
+
+
+def _windows_tray_target():
+    """``(hwnd, image path)`` for the tray window, or None when there is no window.
+
+    The image path is None when the process cannot be queried. Callers must
+    treat that as not ours.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32")
+    kernel32 = ctypes.WinDLL("kernel32")
+    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    user32.FindWindowW.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_wchar_p, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     hwnd = user32.FindWindowW(WINDOW_CLASS, None)
-    return bool(hwnd) and bool(user32.PostMessageW(hwnd, WM_OPEN_DASHBOARD, 0, 0))
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    # PROCESS_QUERY_LIMITED_INFORMATION. Enough to read the image path.
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)
+    if not handle:
+        return (hwnd, None)
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return (hwnd, None)
+        return (hwnd, buf.value)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def clip_tooltip(text: str) -> str:
@@ -99,12 +212,16 @@ class TrayIcon:
         icon_path: str | None = None,
         on_scan: Callable[[], None] | None = None,
         status: Callable[[], str] | None = None,
+        on_watch: Callable[[], None] | None = None,
+        watch_label: Callable[[], str] | None = None,
     ) -> None:
         self.tooltip = clip_tooltip(tooltip)
         self.on_open = on_open
         self.on_quit = on_quit
         self.on_scan = on_scan
         self.status = status
+        self.on_watch = on_watch
+        self.watch_label = watch_label
         self.icon_path = icon_path
         self._hwnd = None
         self._ready = threading.Event()
@@ -112,6 +229,9 @@ class TrayIcon:
         self._error: BaseException | None = None
         self._pending: tuple[str, str] | None = None
         self._pending_lock = threading.Lock()
+        # 64 bits, chosen in this process, never exported. stop() posts it as
+        # lParam. A foreign WM_TRAY_STOP does not carry it, so it is ignored.
+        self._stop_token = secrets.randbits(64)
 
     # -- public ----------------------------------------------------------
 
@@ -124,9 +244,7 @@ class TrayIcon:
         hwnd = self._hwnd
         if not _IS_WINDOWS or not hwnd:
             return
-        import ctypes
-
-        ctypes.WinDLL("user32").PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        _post_tray_message(hwnd, WM_TRAY_STOP, self._stop_token)
 
     def notify(self, title: str, text: str) -> bool:
         """Show a notification from the icon. Safe from any thread.
@@ -157,7 +275,15 @@ class TrayIcon:
             items.append((MF_SEPARATOR, 0, None))
         items.append((MF_STRING, ID_OPEN, "Open dashboard"))
         if self.on_scan is not None:
-            items.append((MF_STRING, ID_SCAN, "Scan now"))
+            items.append((MF_STRING, ID_SCAN, "Scan now (manual)"))
+        if self.on_watch is not None:
+            label = "Watch this network"
+            if self.watch_label is not None:
+                try:
+                    label = str(self.watch_label() or label)
+                except Exception:
+                    label = "Watch this network"
+            items.append((MF_STRING, ID_WATCH, label[:80]))
         items.append((MF_SEPARATOR, 0, None))
         items.append((MF_STRING, ID_QUIT, "Quit Lantern"))
         return items
@@ -319,6 +445,8 @@ class TrayIcon:
                 self._safely(self.on_open)
             elif command == ID_SCAN and self.on_scan is not None:
                 self._safely(self.on_scan)
+            elif command == ID_WATCH and self.on_watch is not None:
+                self._safely(self.on_watch)
             elif command == ID_QUIT:
                 self._quit(user32, hwnd)
 
@@ -340,8 +468,15 @@ class TrayIcon:
                 if taskbar_created and message == taskbar_created:
                     add_icon()  # Explorer restarted: put the icon back
                     return 0
+                if message == WM_TRAY_STOP:
+                    # The message number is public. Quit only when lParam is
+                    # this run's random value, which stop() posts and nothing
+                    # else is given.
+                    if accepts_stop(message, lparam, self._stop_token):
+                        self._quit(user32, hwnd)
+                    return 0
                 if message == WM_CLOSE:
-                    self._quit(user32, hwnd)
+                    # An outside process can post WM_CLOSE. It is ignored.
                     return 0
                 if message == WM_DESTROY:
                     shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))

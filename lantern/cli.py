@@ -369,21 +369,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--open",
         action="store_true",
         help="Open the dashboard in the default browser once it is listening. "
-             "Loopback only. With strict auth the token travels in the link's "
-             "#fragment, as in the printed link, and is not sent to the server.",
+             "Loopback only. With strict auth the browser is given a single-use "
+             "login nonce (#login=), which the page exchanges once for the session "
+             "token. That token is valid until restart and is not put in the URL.",
     )
     web_p.add_argument(
         "--watch",
         metavar="EVERY",
         help="Scan again on a schedule while the dashboard runs: 30m, 2h, or 1d "
-             "(5m to 7d). The subnet is fixed at start (--watch-subnet, else the "
-             "detected one), and a scheduled scan is skipped while this machine "
-             "is on another network.",
+             "(5m to 7d). The subnet and the gateway's MAC address are saved "
+             "when this starts (--watch-subnet, else the detected subnet). "
+             "A scheduled scan is skipped when that gateway is not the current one. "
+             "A saved network that names a different network is not replaced unless "
+             "--watch-adopt is set. An unattended start should use --watch-saved.",
     )
     web_p.add_argument(
         "--watch-subnet",
         metavar="CIDR",
-        help="Private subnet for --watch, such as 192.168.1.0/24. Default: the detected subnet.",
+        help="Private subnet to opt into with --watch, such as 192.168.1.0/24. "
+             "Default: the detected subnet. The gateway on that subnet is saved with it.",
+    )
+    web_p.add_argument(
+        "--watch-saved",
+        action="store_true",
+        help="With --watch, reuse the network saved by an earlier --watch. "
+             "Does not detect a network and does not replace the saved one. "
+             "If none was saved, the dashboard starts and nothing is scheduled. "
+             "This is what an unattended start should use.",
+    )
+    web_p.add_argument(
+        "--watch-adopt",
+        action="store_true",
+        help="With --watch, replace a saved network that names a different subnet "
+             "or gateway. Without this flag that saved network is left as it is "
+             "and nothing is scheduled.",
     )
     web_p.add_argument(
         "--keep-days",
@@ -420,8 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
             "0, false, no, or off to opt out. An empty value is treated as "
             "unset. Any other non-empty value refuses to start. 0 does not "
             "override this flag. On a terminal, a generated token is printed once as "
-            "a link. The token is valid until Lantern restarts. The #token "
-            "fragment is not sent to the server. Without a terminal, set "
+            "a link. The token is valid until Lantern restarts. It is not "
+            "single-use. The #token fragment is not sent to the server. "
+            "A browser opened by --open or the tray gets a single-use #login= "
+            "nonce instead, and the token is not put in that URL. "
+            "Without a terminal, set "
             "LANTERN_API_TOKEN_FILE or LANTERN_API_TOKEN."
         ),
     )
@@ -600,11 +622,19 @@ def strict_auth_requested(
     return True, None
 
 
-def one_time_open_link(host: str, port: int, token: str) -> str:
-    """Browser URL whose fragment carries the token. The fragment is not a request.
+def dashboard_url(host: str, port: int) -> str:
+    """The dashboard address with no fragment. The session token is not in it."""
+    return one_time_open_link(host, port, "").split("#", 1)[0]
 
-    ``localhost`` is written as 127.0.0.1 so the printed link matches the
-    default bind. The token is urlsafe and is not placed in the path or query.
+
+def one_time_open_link(host: str, port: int, token: str) -> str:
+    """Printed terminal URL whose fragment carries the session token.
+
+    The token is valid until restart. It is not single-use. The fragment is
+    not a request. ``--open`` and the tray do not use this URL: they mint a
+    single-use ``#login=`` nonce so the token is not placed on the browser
+    command line. ``localhost`` is written as 127.0.0.1. The token is urlsafe
+    and is not placed in the path or query.
     """
     shown = "127.0.0.1" if str(host).lower() == "localhost" else str(host)
     if ":" in shown and not shown.startswith("["):
@@ -630,34 +660,132 @@ DEFAULT_WATCH_KEEP_DAYS = 90
 def _resolve_watch(args) -> str | None:
     """Check --watch, --watch-subnet and --keep-days, and fill the resolved values on ``args``.
 
-    Returns an error message, or None. Runs before the database is opened.
+    Returns an error message, or None. An explicit ``--watch`` records the
+    subnet and the current gateway MAC. ``--watch-saved`` does not detect a
+    network; the saved opt-in is read later, beside the database.
     """
-    from .watch import parse_interval
+    from .watch import current_gateway_mac, parse_interval
 
     args.watch_seconds = None
+    args.watch_gateway_mac = None
+    args.watch_opt_in_save = False
+    args.watch_note = None
+    args.watch_pending_seconds = None
     args.keep_days_resolved = None
     watch = getattr(args, "watch", None)
     watch_subnet = getattr(args, "watch_subnet", None)
+    watch_saved = bool(getattr(args, "watch_saved", False))
+    watch_adopt = bool(getattr(args, "watch_adopt", False))
     keep_days = getattr(args, "keep_days", None)
     if keep_days is not None and not 0 <= keep_days <= 36500:
         return "--keep-days must be between 0 and 36500."
     if watch_subnet and not watch:
         return "--watch-subnet needs --watch."
+    if watch_saved and not watch:
+        return "--watch-saved needs --watch."
+    if watch_saved and watch_subnet:
+        return "--watch-saved cannot be combined with --watch-subnet."
+    if watch_adopt and not watch:
+        return "--watch-adopt needs --watch."
+    if watch_adopt and watch_saved:
+        return "--watch-adopt cannot be combined with --watch-saved."
     if watch:
         try:
             args.watch_seconds = parse_interval(watch)
         except ValueError as exc:
             return str(exc)
-        subnet = watch_subnet or guess_subnet()
-        if not subnet:
-            return "Could not detect your subnet for --watch. Pass --watch-subnet 192.168.1.0/24."
-        try:
-            args.watch_subnet = str(validate_subnet(subnet))
-        except ValueError as exc:
-            return str(exc)
+        if watch_saved:
+            # The subnet comes from the saved file, after the database path is known.
+            args.watch_subnet = None
+        else:
+            subnet = watch_subnet or guess_subnet()
+            if not subnet:
+                return "Could not detect your subnet for --watch. Pass --watch-subnet 192.168.1.0/24."
+            try:
+                args.watch_subnet = str(validate_subnet(subnet))
+            except ValueError as exc:
+                return str(exc)
+            mac = current_gateway_mac(args.watch_subnet)
+            if not mac:
+                return (
+                    "Could not confirm the gateway for this network, so --watch will not start. "
+                    "Lantern only watches a network after it has seen that network's gateway."
+                )
+            args.watch_gateway_mac = mac
+            args.watch_opt_in_save = True
         if keep_days is None:
             keep_days = DEFAULT_WATCH_KEEP_DAYS
     args.keep_days_resolved = keep_days or None
+    return None
+
+
+def _clear_watch_schedule(args, note: str) -> None:
+    """Keep the interval for a later opt-in, and do not schedule now."""
+    args.watch_pending_seconds = args.watch_seconds
+    args.watch_seconds = None
+    args.watch_subnet = None
+    args.watch_gateway_mac = None
+    args.watch_opt_in_save = False
+    args.watch_note = note
+
+
+def _apply_saved_watch(args, db_path: Path) -> str | None:
+    """Save a new opt-in, or load the saved one for ``--watch-saved``.
+
+    Returns an error message, or None. ``--watch-saved`` with no file does
+    not guess a subnet and does not start the schedule. A plain ``--watch``
+    does not replace a saved network that names a different subnet or gateway
+    unless ``--watch-adopt`` is set.
+    """
+    from .watch import (
+        NetworkIdentity,
+        corrupt_opt_in_message,
+        different_network_message,
+        load_opt_in_status,
+        no_opt_in_message,
+        save_opt_in,
+    )
+
+    if not getattr(args, "watch_seconds", None):
+        return None
+    if getattr(args, "watch_saved", False):
+        status, identity = load_opt_in_status(db_path)
+        if status == "missing":
+            print(no_opt_in_message(), file=sys.stderr, flush=True)
+            _clear_watch_schedule(args, "Not watching: no network chosen.")
+            return None
+        if status != "ok" or identity is None:
+            print(corrupt_opt_in_message(), file=sys.stderr, flush=True)
+            _clear_watch_schedule(args, "Not watching: the saved network file could not be read.")
+            return None
+        args.watch_subnet = identity.subnet
+        args.watch_gateway_mac = identity.gateway_mac
+        args.watch_note = f"Watching {identity.subnet}."
+        return None
+    if getattr(args, "watch_opt_in_save", False):
+        status, existing = load_opt_in_status(db_path)
+        if status == "unusable":
+            print(corrupt_opt_in_message(), file=sys.stderr, flush=True)
+            _clear_watch_schedule(args, "Not watching: the saved network file could not be read.")
+            return None
+        if (
+            existing is not None
+            and (
+                existing.subnet != args.watch_subnet
+                or existing.gateway_mac != args.watch_gateway_mac
+            )
+            and not getattr(args, "watch_adopt", False)
+        ):
+            print(different_network_message(existing.subnet), file=sys.stderr, flush=True)
+            _clear_watch_schedule(
+                args, f"Not watching: saved network is {existing.subnet} (pass --watch-adopt to replace it).",
+            )
+            return None
+        try:
+            save_opt_in(db_path, NetworkIdentity(args.watch_subnet, args.watch_gateway_mac))
+        except OSError:
+            return "Could not save the network chosen for --watch."
+        args.watch_note = f"Watching {args.watch_subnet}."
     return None
 
 
@@ -1461,10 +1589,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err("--tray is available on Windows only.")
             if web_bind.lan_bound:
                 return _err("--tray works only with a loopback bind (the default 127.0.0.1).")
-            if tray_module.signal_running_instance():
+            found = tray_module.classify_running_instance()
+            if found == tray_module.INSTANCE_OURS:
                 print("Lantern is already running in the tray. Asked it to open the dashboard.",
                       file=sys.stderr, flush=True)
                 return 0
+            if found == tray_module.INSTANCE_FOREIGN:
+                print(
+                    "lantern: a tray window is open, but it is not this Lantern. Not handing off.",
+                    file=sys.stderr, flush=True,
+                )
         try:
             switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
         except ValueError as exc:
@@ -1499,10 +1633,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             "strict_auth": web_bind.strict_auth,
         }
         if getattr(args, "open", False) or getattr(args, "tray", False):
-            if web_bind.strict_auth and web_bind.token:
-                link = one_time_open_link(args.host, args.port, web_bind.token)
-            else:
-                link = one_time_open_link(args.host, args.port, "").split("#", 1)[0]
+            # Never put the session token in a URL the browser will open.
+            # serve() mints a single-use nonce when strict auth is on.
+            link = dashboard_url(args.host, args.port)
             if getattr(args, "open", False):
                 kwargs["open_url"] = link
             if getattr(args, "tray", False):
@@ -1515,9 +1648,17 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
                   file=sys.stderr, flush=True)
         kwargs["fingerprint"] = not args.no_fingerprint
+        saved_watch_error = _apply_saved_watch(args, db_path)
+        if saved_watch_error:
+            return _err(saved_watch_error)
+        if getattr(args, "watch_note", None):
+            kwargs["watch_note"] = args.watch_note
+        if getattr(args, "watch_pending_seconds", None):
+            kwargs["watch_pending_seconds"] = args.watch_pending_seconds
         if getattr(args, "watch_seconds", None):
             kwargs["watch_seconds"] = args.watch_seconds
             kwargs["watch_subnet"] = args.watch_subnet
+            kwargs["watch_gateway_mac"] = args.watch_gateway_mac
         if getattr(args, "keep_days_resolved", None):
             kwargs["keep_days"] = args.keep_days_resolved
         try:

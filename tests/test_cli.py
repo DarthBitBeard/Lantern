@@ -1440,8 +1440,9 @@ class WebBindTests(unittest.TestCase):
 
     def test_cli_open_without_a_terminal_hands_the_link_to_the_browser_only(self):
         # A Start Menu shortcut may have no console to print on. --open
-        # mints the token anyway and passes the fragment link to serve(),
-        # which gives it to the local browser. Nothing is printed.
+        # mints the token anyway and asks serve() to open the dashboard.
+        # The session token is not in that URL. serve() adds a login nonce.
+        # Nothing is printed.
         token = "o" * 43
         env = self._no_token_env()
         env.pop(cli.STRICT_AUTH_ENV, None)
@@ -1454,11 +1455,13 @@ class WebBindTests(unittest.TestCase):
         self.assertNotIn(token, out)
         self.assertNotIn(token, err)
         kwargs = serve.call_args.kwargs
-        self.assertEqual(kwargs["open_url"], f"http://127.0.0.1:9/#token={token}")
+        self.assertEqual(kwargs["open_url"], "http://127.0.0.1:9/")
+        self.assertNotIn(token, kwargs["open_url"])
+        self.assertNotIn("#token=", kwargs["open_url"])
         self.assertEqual(kwargs["api_token"], token)
         self.assertTrue(kwargs["strict_auth"])
 
-    def test_cli_open_on_a_tty_prints_and_opens_the_same_link(self):
+    def test_cli_open_on_a_tty_prints_the_token_but_does_not_put_it_in_the_browser_url(self):
         token = "p" * 43
         env = self._no_token_env()
         env.pop(cli.STRICT_AUTH_ENV, None)
@@ -1469,7 +1472,8 @@ class WebBindTests(unittest.TestCase):
             code, _out, err = self.run_cli("web", "--open", "--port", "9")
         self.assertEqual(code, 0, err)
         self.assertEqual(err.count(token), 1)
-        self.assertEqual(serve.call_args.kwargs["open_url"], f"http://127.0.0.1:9/#token={token}")
+        self.assertNotIn(token, serve.call_args.kwargs["open_url"])
+        self.assertEqual(serve.call_args.kwargs["open_url"], "http://127.0.0.1:9/")
 
     def test_cli_open_without_strict_auth_opens_the_plain_page(self):
         env = self._no_token_env()

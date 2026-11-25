@@ -33,10 +33,12 @@
       <label for="subnet">Subnet</label>
       <input id="subnet" name="subnet" type="text" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false" inputmode="decimal">
       <button type="submit" id="scan-btn">Run scan</button>
+      <button type="button" id="watch-btn" class="secondary">Watch this network</button>
       <button type="button" id="demo-btn" class="secondary">Run demo</button>
       <button type="button" id="refresh-btn">Refresh</button>
     </form>
-    <p class="hint">Private home networks only. Lantern refuses public IPs. Scanning runs from this machine, so run it on your home network, not in a container, for real results.</p>
+    <p id="watch-status" class="hint"></p>
+    <p class="hint">Private home networks only. Lantern refuses public IPs. Scanning runs from this machine, so run it on your home network, not in a container, for real results. Watch this network saves that choice beside this dashboard's database. Run scan is manual.</p>
     <p id="message" class="message" role="status" aria-live="polite"></p>
     <div id="scan-progress" class="scan-progress" role="progressbar" aria-label="Scan progress"
          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div class="scan-progress-bar"></div></div>

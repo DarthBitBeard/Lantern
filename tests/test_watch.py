@@ -2,11 +2,15 @@
 
 import contextlib
 import io
+import ipaddress
+import json
 import os
 import secrets
 import tempfile
+import stat
 import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from lantern import cli, store, watch, webapp
@@ -78,6 +82,54 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(watcher.next_scan_at, clock.now + 3600)
 
+    def test_same_subnet_different_gateway_never_scans(self):
+        """A lookalike address range with another gateway is not the opted-in network."""
+        network = ipaddress.ip_network("192.168.1.0/24")
+        expected = "aa:bb:cc:dd:ee:01"
+        calls = []
+        skipped = []
+
+        def on_network(net):
+            return watch.identity_matches(
+                net, expected, "192.168.1.10",
+                ["192.168.1.1"], {"192.168.1.1": "11:22:33:44:55:66"},
+            )
+
+        watcher = watch.Watcher(
+            3600, str(network), lambda subnet: calls.append(subnet),
+            on_network=on_network, on_skip=skipped.append, first_delay=30,
+        )
+        self.assertEqual(watcher.run_once(), "away")
+        self.assertEqual(calls, [])
+        self.assertEqual(skipped, ["192.168.1.0/24"])
+        self.assertTrue(watch.identity_matches(
+            network, expected, "192.168.1.10", ["192.168.1.1"], {"192.168.1.1": expected},
+        ))
+        self.assertFalse(watch.identity_matches(
+            network, expected, None, ["192.168.1.1"], {"192.168.1.1": expected},
+        ))
+        # The local-address check is its own guard. A matching gateway inside
+        # the subnet must not pass when this machine's address is elsewhere.
+        self.assertFalse(watch.identity_matches(
+            network, expected, "10.0.0.5", ["192.168.1.1"], {"192.168.1.1": expected},
+        ))
+        self.assertEqual(watch.identity_problem(
+            network, expected, "10.0.0.5", ["192.168.1.1"], {"192.168.1.1": expected},
+        ), "subnet")
+        self.assertEqual(watch.identity_problem(
+            network, expected, "192.168.1.10", ["192.168.1.1"], {"192.168.1.1": "11:22:33:44:55:66"},
+        ), "gateway")
+        self.assertIn("gateway did not match", watch.skip_message("192.168.1.0/24", "gateway"))
+        self.assertNotIn("gateway did not match", watch.skip_message("192.168.1.0/24", "subnet"))
+        self.assertIsNone(watch.canonical_mac("01:00:5e:00:00:01"))
+        self.assertIsNone(watch.canonical_mac("ff:ff:ff:ff:ff:ff"))
+        self.assertIsNone(watch.canonical_mac("03:00:00:00:00:01"))
+        self.assertEqual(watch.canonical_mac("aa:bb:cc:dd:ee:01"), "aa:bb:cc:dd:ee:01")
+        # A gateway outside the subnet cannot stand in for the one inside it.
+        self.assertIsNone(watch.gateway_mac_for(
+            network, ["10.0.0.1"], {"10.0.0.1": expected},
+        ))
+
     def test_status_is_json_friendly(self):
         watcher, _ = self.make()
         watcher.run_once()
@@ -105,8 +157,15 @@ class WatchFlagTests(unittest.TestCase):
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
                 mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
-                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"),                 mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
-            code = cli.main(["web", "--db", os.path.join(folder, "t.db"), *argv])
+                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"), \
+                mock.patch.object(watch, "current_gateway_mac", return_value="aa:bb:cc:dd:ee:01"), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            code = cli.main(["web", "--db", db, *argv])
+            path = watch.opt_in_path(db)
+            calls["_db"] = db
+            calls["_opt_in"] = path.read_text(encoding="utf-8") if path.is_file() else None
+            calls["_mode"] = stat.S_IMODE(path.stat().st_mode) if path.is_file() else None
         return code, calls, err.getvalue()
 
     def test_watch_defaults_to_detected_subnet_and_90_days(self):
@@ -114,12 +173,19 @@ class WatchFlagTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(calls["watch_seconds"], 7200)
         self.assertEqual(calls["watch_subnet"], "192.168.7.0/24")
+        self.assertEqual(calls["watch_gateway_mac"], "aa:bb:cc:dd:ee:01")
         self.assertEqual(calls["keep_days"], 90)
+        saved = json.loads(calls["_opt_in"])
+        self.assertEqual(saved["subnet"], "192.168.7.0/24")
+        self.assertEqual(saved["gateway_mac"], "aa:bb:cc:dd:ee:01")
+        if os.name != "nt":
+            self.assertEqual(calls["_mode"], 0o600)
 
     def test_explicit_subnet_and_keep_forever(self):
         code, calls, err = self.run_web("--watch", "30m", "--watch-subnet", "10.0.5.0/24", "--keep-days", "0")
         self.assertEqual(code, 0, err)
         self.assertEqual(calls["watch_subnet"], "10.0.5.0/24")
+        self.assertEqual(calls["watch_gateway_mac"], "aa:bb:cc:dd:ee:01")
         self.assertNotIn("keep_days", calls)
 
     def test_no_watch_keeps_everything_unless_asked(self):
@@ -139,8 +205,203 @@ class WatchFlagTests(unittest.TestCase):
         ):
             code, calls, err = self.run_web(*argv)
             self.assertEqual(code, 2, argv)
-            self.assertEqual(calls, {}, argv)
+            self.assertNotIn("watch_seconds", calls, argv)
             self.assertIn(text, err)
+
+    def test_installer_watch_shortcut_reuses_the_saved_network(self):
+        text = (Path(__file__).resolve().parents[1] / "packaging" / "windows" / "lantern.iss").read_text(encoding="utf-8")
+        self.assertIn("--watch 1h --watch-saved", text)
+        self.assertNotIn("Result := '--watch 1h '", text)
+
+    def test_watch_refuses_to_start_without_a_gateway_mac(self):
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", side_effect=AssertionError("serve")), \
+                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"), \
+                mock.patch.object(watch, "current_gateway_mac", return_value=None), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            code = cli.main(["web", "--db", os.path.join(folder, "t.db"), "--watch", "1h"])
+        self.assertEqual(code, 2)
+        self.assertIn("gateway", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_saved_watch_does_not_detect_a_network(self):
+        guess = mock.Mock(side_effect=AssertionError("detected a network"))
+        code, calls, err = self._run_saved(guess, opt_in=None)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(guess.called)
+        self.assertNotIn("watch_seconds", calls)
+        self.assertIn("No network has been chosen", err)
+        self.assertNotIn("could not be read", err)
+        self.assertIsNone(calls["_opt_in"])
+        self.assertEqual(calls.get("watch_note"), "Not watching: no network chosen.")
+
+    def test_saved_watch_reuses_the_opt_in_and_does_not_replace_it(self):
+        guess = mock.Mock(side_effect=AssertionError("detected a network"))
+        code, calls, err = self._run_saved(
+            guess,
+            opt_in='{"subnet":"10.1.2.0/24","gateway_mac":"aa:bb:cc:dd:ee:09"}\n',
+        )
+        self.assertEqual(code, 0, err)
+        self.assertFalse(guess.called)
+        self.assertEqual(calls["watch_subnet"], "10.1.2.0/24")
+        self.assertEqual(calls["watch_gateway_mac"], "aa:bb:cc:dd:ee:09")
+        self.assertIn("aa:bb:cc:dd:ee:09", calls["_opt_in"])
+        self.assertNotIn("aa:bb:cc:dd:ee:01", calls["_opt_in"])
+
+    def _run_saved(self, guess, opt_in):
+        calls = {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
+                mock.patch.object(cli, "guess_subnet", guess), \
+                mock.patch.object(watch, "current_gateway_mac", side_effect=AssertionError("live gateway")), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            if opt_in is not None:
+                path = watch.opt_in_path(db)
+                path.write_text(opt_in, encoding="utf-8")
+                if os.name != "nt":
+                    os.chmod(path, 0o600)
+            code = cli.main(["web", "--db", db, "--watch", "1h", "--watch-saved"])
+            calls["_db"] = db
+            path = watch.opt_in_path(db)
+            calls["_opt_in"] = path.read_text(encoding="utf-8") if path.is_file() else None
+        return code, calls, err.getvalue()
+
+    def test_a_corrupt_opt_in_is_not_reported_as_no_network_chosen(self):
+        code, calls, err = self._run_saved(mock.Mock(side_effect=AssertionError("detected")), opt_in="{")
+        self.assertEqual(code, 0, err)
+        self.assertIn("could not be read", err)
+        self.assertNotIn("No network has been chosen", err)
+        self.assertNotIn("watch_seconds", calls)
+        self.assertIn("could not be read", calls.get("watch_note", ""))
+
+    def test_duplicate_json_keys_are_rejected(self):
+        opt_in = '{"subnet":"10.0.0.0/24","subnet":"192.168.1.0/24","gateway_mac":"aa:bb:cc:dd:ee:01"}\n'
+        code, calls, err = self._run_saved(mock.Mock(side_effect=AssertionError("detected")), opt_in=opt_in)
+        self.assertEqual(code, 0, err)
+        self.assertIn("could not be read", err)
+        self.assertNotIn("watch_seconds", calls)
+        self.assertIsNone(watch.load_opt_in_status(calls["_db"])[1])
+
+    def test_a_symlinked_opt_in_is_not_a_chosen_network(self):
+        calls = {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
+                mock.patch.object(cli, "guess_subnet", side_effect=AssertionError("detected")), \
+                mock.patch.object(watch, "current_gateway_mac", side_effect=AssertionError("live")), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            target = Path(folder) / "real.json"
+            target.write_text('{"subnet":"10.1.2.0/24","gateway_mac":"aa:bb:cc:dd:ee:09"}\n', encoding="utf-8")
+            link = watch.opt_in_path(db)
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are not available")
+            code = cli.main(["web", "--db", db, "--watch", "1h", "--watch-saved"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("could not be read", err.getvalue())
+        self.assertNotIn("No network has been chosen", err.getvalue())
+        self.assertNotIn("watch_seconds", calls)
+
+    def test_plain_watch_does_not_replace_a_different_saved_network(self):
+        calls = {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
+                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"), \
+                mock.patch.object(watch, "current_gateway_mac", return_value="aa:bb:cc:dd:ee:01"), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            path = watch.opt_in_path(db)
+            path.write_text(
+                '{"subnet":"10.1.2.0/24","gateway_mac":"aa:bb:cc:dd:ee:09"}\n', encoding="utf-8",
+            )
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+            code = cli.main(["web", "--db", db, "--watch", "1h"])
+            saved = watch.opt_in_path(db).read_text(encoding="utf-8")
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertNotIn("watch_seconds", calls)
+        self.assertIn("aa:bb:cc:dd:ee:09", saved)
+        self.assertNotIn("aa:bb:cc:dd:ee:01", saved)
+        self.assertIn("--watch-adopt", err.getvalue())
+        self.assertIn("10.1.2.0/24", err.getvalue())
+
+    def test_watch_adopt_replaces_a_different_saved_network(self):
+        calls = {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
+                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"), \
+                mock.patch.object(watch, "current_gateway_mac", return_value="aa:bb:cc:dd:ee:01"), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            path = watch.opt_in_path(db)
+            path.write_text(
+                '{"subnet":"10.1.2.0/24","gateway_mac":"aa:bb:cc:dd:ee:09"}\n', encoding="utf-8",
+            )
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+            code = cli.main(["web", "--db", db, "--watch", "1h", "--watch-adopt"])
+            saved = json.loads(watch.opt_in_path(db).read_text(encoding="utf-8"))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(calls["watch_subnet"], "192.168.7.0/24")
+        self.assertEqual(saved["gateway_mac"], "aa:bb:cc:dd:ee:01")
+
+    def test_the_same_saved_network_can_be_written_again_without_adopt(self):
+        code, calls, err = self.run_web("--watch", "1h")
+        self.assertEqual(code, 0, err)
+        db = calls["_db"]
+        # run_web used a temp dir that is already gone. Repeat inside one directory.
+        calls = {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: calls.update(kw)), \
+                mock.patch.object(cli, "guess_subnet", return_value="192.168.7.0/24"), \
+                mock.patch.object(watch, "current_gateway_mac", return_value="aa:bb:cc:dd:ee:01"), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": secrets.token_urlsafe(32)}):
+            db = os.path.join(folder, "t.db")
+            watch.save_opt_in(db, watch.NetworkIdentity("192.168.7.0/24", "aa:bb:cc:dd:ee:01"))
+            code = cli.main(["web", "--db", db, "--watch", "1h"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(calls["watch_subnet"], "192.168.7.0/24")
+        self.assertNotIn("--watch-adopt", err.getvalue())
+
+    def test_installer_database_reads_an_opt_in_saved_under_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / "data"
+            data.mkdir()
+            (data / watch.OPT_IN_NAME).write_text(
+                '{"subnet":"10.1.2.0/24","gateway_mac":"aa:bb:cc:dd:ee:09"}\n', encoding="utf-8",
+            )
+            if os.name != "nt":
+                os.chmod(data / watch.OPT_IN_NAME, 0o600)
+            status, identity = watch.load_opt_in_status(root / "lantern.db")
+            self.assertEqual(status, "ok")
+            self.assertEqual(identity.subnet, "10.1.2.0/24")
+            copied = watch.opt_in_path(root / "lantern.db")
+            self.assertTrue(copied.is_file())
+            self.assertIn("10.1.2.0/24", copied.read_text(encoding="utf-8"))
+
+    def test_a_loose_or_foreign_opt_in_is_not_used(self):
+        if os.name == "nt":
+            self.skipTest("owner and mode checks are not available on Windows")
+        with tempfile.TemporaryDirectory() as folder:
+            db = os.path.join(folder, "t.db")
+            watch.save_opt_in(db, watch.NetworkIdentity("10.1.2.0/24", "aa:bb:cc:dd:ee:09"))
+            path = watch.opt_in_path(db)
+            os.chmod(path, 0o644)
+            self.assertEqual(watch.load_opt_in_status(db)[0], "unusable")
+            os.chmod(path, 0o600)
+            self.assertEqual(watch.load_opt_in_status(db)[0], "ok")
+            with mock.patch("lantern.watch._current_uid", return_value=os.geteuid() + 1):
+                self.assertEqual(watch.load_opt_in_status(db)[0], "unusable")
+                self.assertIsNone(watch.load_opt_in(db))
 
 
 def _device(ip):
@@ -183,6 +444,53 @@ class ScanJobTests(unittest.TestCase):
         state = self.run_job(listeners=(broken, seen.append))
         self.assertEqual(state["state"], "done")
         self.assertEqual(seen, [state["scan_id"]])
+
+    def test_scheduled_scan_skips_a_different_gateway_and_logs_it(self):
+        handler = type("H", (), {"db_path": self.db})
+        with mock.patch("lantern.discovery.local_ipv4_in", return_value="192.168.1.10"), \
+                mock.patch("lantern.discovery.default_gateways", return_value=["192.168.1.1"]), \
+                mock.patch("lantern.discovery.gateway_arp_table", return_value={"192.168.1.1": "11:22:33:44:55:66"}), \
+                mock.patch("lantern.webapp.start_scan_job", side_effect=AssertionError("scanned")):
+            watcher = webapp._make_watcher(handler, 3600, "192.168.1.0/24", "aa:bb:cc:dd:ee:01")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(watcher.run_once(), "away")
+        self.assertIn("gateway did not match", err.getvalue())
+        self.assertIn("192.168.1.0/24", err.getvalue())
+        self.assertIn("gateway did not match", handler.watch_note)
+        watcher.stop()
+
+    def test_a_subnet_mismatch_is_not_described_as_a_gateway_mismatch(self):
+        handler = type("H", (), {"db_path": self.db, "watch_problem": None, "watch_note": ""})
+        with mock.patch("lantern.discovery.local_ipv4_in", return_value="10.9.9.9"), \
+                mock.patch("lantern.discovery.default_gateways", return_value=["192.168.1.1"]), \
+                mock.patch("lantern.discovery.gateway_arp_table", return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}), \
+                mock.patch("lantern.webapp.start_scan_job", side_effect=AssertionError("scanned")):
+            watcher = webapp._make_watcher(handler, 3600, "192.168.1.0/24", "aa:bb:cc:dd:ee:01")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(watcher.run_once(), "away")
+        self.assertIn("not on 192.168.1.0/24", err.getvalue())
+        self.assertNotIn("gateway did not match", err.getvalue())
+        watcher.stop()
+
+    def test_scan_job_rechecks_the_gateway_before_probing(self):
+        import time
+
+        handler = type("H", (), {
+            "scan_job": webapp._ScanJob(), "db_path": self.db, "debug": False,
+            "switch_config": None, "fingerprint": True, "keep_days": None,
+            "scan_listeners": [],
+        })()
+        probed = []
+        with mock.patch("lantern.engine.scan_subnet", side_effect=lambda *a, **k: probed.append(1) or ([], {})):
+            self.assertTrue(webapp.start_scan_job(handler, "192.168.1.0/24", confirm=lambda: False))
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and webapp._scan_lock.locked():
+                time.sleep(0.01)
+        self.assertEqual(probed, [])
+        self.assertEqual(handler.scan_job.snapshot()["state"], "idle")
+        self.assertFalse(webapp._scan_lock.locked())
 
     def test_start_scan_job_reports_busy(self):
         handler = type("H", (), {"scan_job": webapp._ScanJob(), "db_path": self.db, "debug": False,

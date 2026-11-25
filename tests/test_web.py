@@ -1466,6 +1466,100 @@ class HostAllowlistTests(unittest.TestCase):
         self.assertEqual(data["scan_count"], 0)
 
 
+class LoginNonceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.token = "n" * 43
+        self.server = make_server(
+            Path(self.tmp.name) / "login.db", host="127.0.0.1", port=0,
+            strict_auth=True, api_token=self.token,
+        )
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.exchange = self.server.RequestHandlerClass.login_exchange
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.tmp.cleanup)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def post(self, nonce, *, origin=True, host=None):
+        headers = {"Content-Type": "application/json"}
+        if origin is True:
+            headers["Origin"] = self.base
+        elif origin:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        req = urllib.request.Request(
+            self.base + "/api/login",
+            data=json.dumps({"nonce": nonce}).encode(),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode()
+
+    def test_each_open_authenticates_and_the_token_is_never_in_the_url(self):
+        opener = webapp.DashboardOpen(self.base + "/", self.exchange)
+        first = opener.url()
+        second = opener.url()
+        self.assertNotIn(self.token, first)
+        self.assertNotIn(self.token, second)
+        self.assertNotIn("#token=", first + second)
+        status, body = self.post(first.split("#login=", 1)[1])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["token"], self.token)
+        status, body = self.post(second.split("#login=", 1)[1])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["token"], self.token)
+        page = urllib.request.urlopen(self.base + "/", timeout=REQUEST_TIMEOUT).read().decode()
+        self.assertNotIn(self.token, page)
+
+    def test_a_reused_nonce_fails_and_does_not_return_the_token(self):
+        nonce = self.exchange.mint()
+        self.assertNotIn(self.token, nonce)
+        status, body = self.post(nonce)
+        self.assertEqual(status, 200, body)
+        status, body = self.post(nonce)
+        self.assertEqual(status, 403, body)
+        self.assertNotIn(self.token, body)
+
+    def test_an_expired_nonce_fails(self):
+        clock = {"now": 1_000.0}
+        self.exchange._clock = lambda: clock["now"]
+        nonce = self.exchange.mint()
+        clock["now"] = 1_000.0 + webapp.LOGIN_NONCE_SECONDS
+        status, body = self.post(nonce)
+        self.assertEqual(status, 403, body)
+        self.assertNotIn(self.token, body)
+
+    def test_login_requires_an_allowed_origin_and_host(self):
+        nonce = self.exchange.mint()
+        status, body = self.post(nonce, origin=False)
+        self.assertEqual(status, 403, body)
+        self.assertNotIn(self.token, body)
+        nonce = self.exchange.mint()
+        status, body = self.post(nonce, origin="http://evil.example")
+        self.assertEqual(status, 403, body)
+        self.assertNotIn(self.token, body)
+        nonce = self.exchange.mint()
+        status, body = self.post(nonce, host="evil.example")
+        self.assertEqual(status, 403, body)
+        self.assertNotIn(self.token, body)
+
+    def test_the_page_posts_the_nonce_and_does_not_put_the_token_in_the_address(self):
+        script = (webapp.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        start = script.index("async function exchangeLoginNonce()")
+        body = script[start:script.index("// Devices this browser")]
+        self.assertIn('"/api/login"', body)
+        self.assertIn("sessionStorage.setItem(TOKEN_STORAGE, data.token)", body)
+        self.assertNotIn("location.hash =", body)
+        self.assertNotIn("#token=", body)
+
+
 class OpenBrowserTests(unittest.TestCase):
     def test_serve_opens_the_url_once_listening_and_never_prints_it(self):
         url = "http://127.0.0.1:9/#token=" + "t" * 43
@@ -1473,6 +1567,7 @@ class OpenBrowserTests(unittest.TestCase):
         fake.server_address = ("127.0.0.1", 9)
         fake.RequestHandlerClass = mock.MagicMock(
             lan_bound=False, strict_auth=True, allowed_hosts=frozenset({"127.0.0.1:9"}),
+            api_token="t" * 43,
         )
         fake.serve_forever.side_effect = KeyboardInterrupt
         out, err = io.StringIO(), io.StringIO()
@@ -1480,7 +1575,13 @@ class OpenBrowserTests(unittest.TestCase):
                 mock.patch("webbrowser.open", return_value=True) as opener, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             webapp.serve("x.db", port=9, strict_auth=True, api_token="t" * 43, open_url=url)
-        opener.assert_called_once_with(url, new=2)
+        opened = opener.call_args.args[0]
+        self.assertNotIn("t" * 43, opened)
+        self.assertNotIn("#token=", opened)
+        self.assertIn("#login=", opened)
+        nonce = opened.split("#login=", 1)[1]
+        self.assertEqual(fake.RequestHandlerClass.login_exchange.redeem(nonce), "t" * 43)
+        self.assertIsNone(fake.RequestHandlerClass.login_exchange.redeem(nonce))
         self.assertNotIn("t" * 43, out.getvalue() + err.getvalue())
         fake.server_close.assert_called_once()
 

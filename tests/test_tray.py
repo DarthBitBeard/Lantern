@@ -115,17 +115,34 @@ class ServeInTrayTests(unittest.TestCase):
 
             def run(self):
                 self.on_open()
+                self.on_open()
                 self.on_quit()
                 server.stopped.wait(2)
 
             def stop(self):
                 pass
 
+        token = "session-token-session-token-session"
+        exchange = webapp.LoginExchange(token)
+        server.RequestHandlerClass.strict_auth = True
+        server.RequestHandlerClass.api_token = token
+        server.RequestHandlerClass.login_exchange = exchange
+        server.RequestHandlerClass.watcher = None
+        server.RequestHandlerClass.watch_note = ""
+        server.RequestHandlerClass.subnet_guess = type("G", (), {"get": lambda self: None})()
         with mock.patch("lantern.tray.TrayIcon", FakeIcon), \
                 mock.patch.object(webapp, "_open_browser", side_effect=opened.append):
             webapp._serve_in_tray(server, "127.0.0.1", 18071, "http://127.0.0.1:18071/#token=abc")
         self.assertGreaterEqual(server.shutdown_calls, 1)
-        self.assertEqual(opened, ["http://127.0.0.1:18071/#token=abc"])
+        self.assertEqual(len(opened), 2)
+        self.assertNotIn(token, opened[0])
+        self.assertNotIn(token, opened[1])
+        self.assertNotIn("#token=", opened[0])
+        first = opened[0].split("#login=", 1)[1]
+        second = opened[1].split("#login=", 1)[1]
+        self.assertNotEqual(first, second)
+        self.assertEqual(exchange.redeem(first), token)
+        self.assertEqual(exchange.redeem(second), token)
 
     def test_a_server_that_stops_on_its_own_takes_the_icon_down(self):
         server = _FakeServer()
@@ -157,6 +174,41 @@ class TrayMenuTests(unittest.TestCase):
         items = icon.menu_items()
         self.assertEqual(items[0], (tray.MF_STRING | tray.MF_GRAYED, 0, "Last scan 5 min ago"))
         self.assertEqual([i[1] for i in items if i[1]], [tray.ID_OPEN, tray.ID_SCAN, tray.ID_QUIT])
+        self.assertIn("Scan now (manual)", [i[2] for i in items])
+
+    def test_manual_scan_is_refused_when_the_gateway_does_not_match(self):
+        import inspect
+        import ipaddress
+
+        network = ipaddress.ip_network("192.168.1.0/24")
+        handler = type("H", (), {
+            "watcher": type("W", (), {"network": network, "subnet": str(network)})(),
+            "watch_gateway_mac": "aa:bb:cc:dd:ee:01",
+            "watch_problem": None,
+        })()
+        with mock.patch("lantern.discovery.local_ipv4_in", return_value="10.1.1.5"), \
+                mock.patch("lantern.discovery.default_gateways", return_value=["192.168.1.1"]), \
+                mock.patch("lantern.discovery.gateway_arp_table",
+                           return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
+            allowed, message = webapp.tray_may_scan(handler)
+        self.assertFalse(allowed)
+        self.assertIn("not on the network", message)
+        self.assertIn("tray_may_scan", inspect.getsource(webapp._serve_in_tray))
+        bare = type("H", (), {"watcher": None})()
+        self.assertTrue(webapp.tray_may_scan(bare)[0])
+
+    def test_watch_menu_says_instead_when_the_saved_gateway_differs(self):
+        handler = type("H", (), {
+            "db_path": os.path.join(tempfile.mkdtemp(), "t.db"),
+            "subnet_guess": type("G", (), {"get": lambda self: "192.168.1.0/24"})(),
+        })()
+        from lantern import watch
+
+        watch.save_opt_in(handler.db_path, watch.NetworkIdentity("192.168.1.0/24", "aa:bb:cc:dd:ee:01"))
+        with mock.patch("lantern.watch.current_gateway_mac", return_value="11:22:33:44:55:66"):
+            self.assertEqual(webapp.watch_menu_label(handler), "Watch this network instead")
+        with mock.patch("lantern.watch.current_gateway_mac", return_value="aa:bb:cc:dd:ee:01"):
+            self.assertEqual(webapp.watch_menu_label(handler), "Watch this network")
 
     def test_menu_without_scan_or_status_and_with_a_failing_status(self):
         def broken():
@@ -172,11 +224,89 @@ class TrayMenuTests(unittest.TestCase):
     def test_second_launch_hands_off_and_exits_cleanly(self):
         err = io.StringIO()
         served = []
-        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err),                 mock.patch("lantern.tray.is_supported", return_value=True),                 mock.patch("lantern.tray.signal_running_instance", return_value=True),                 mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch("lantern.tray.is_supported", return_value=True), \
+                mock.patch("lantern.tray.classify_running_instance", return_value=tray.INSTANCE_OURS), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)):
             code = cli.main(["web", "--tray", "--db", os.path.join(folder, "t.db")])
         self.assertEqual(code, 0)
         self.assertEqual(served, [])
         self.assertIn("already running", err.getvalue())
+
+    def test_a_foreign_tray_window_does_not_count_as_ours(self):
+        install = Path("/Lantern")
+        self.assertFalse(tray.tray_image_is_ours(None, str(install / "lantern-tray.exe")))
+        self.assertFalse(tray.tray_image_is_ours(
+            str(Path("/other") / "lantern-tray.exe"), str(install / "lantern-tray.exe"),
+        ))
+        self.assertFalse(tray.tray_image_is_ours(
+            str(install / "notepad.exe"), str(install / "lantern-tray.exe"),
+        ))
+        self.assertTrue(tray.tray_image_is_ours(
+            str(install / "lantern-tray.exe"), str(install / "lantern.exe"),
+        ))
+        err = io.StringIO()
+        served = []
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch("lantern.tray.is_supported", return_value=True), \
+                mock.patch("lantern.tray.classify_running_instance", return_value=tray.INSTANCE_FOREIGN), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": "t" * 32}):
+            code = cli.main(["web", "--tray", "--db", os.path.join(folder, "t.db")])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(len(served), 1)
+        self.assertIn("not this Lantern", err.getvalue())
+        self.assertNotIn("already running", err.getvalue())
+
+    def test_stop_does_not_use_wm_close(self):
+        import inspect
+
+        self.assertNotEqual(tray.WM_CLOSE, tray.WM_TRAY_STOP)
+        self.assertIn("WM_TRAY_STOP", inspect.getsource(tray.TrayIcon.stop))
+        self.assertNotIn("WM_CLOSE", inspect.getsource(tray.TrayIcon.stop))
+
+    def test_later_dashboard_opens_authenticate(self):
+        from urllib.parse import unquote
+
+        token = "session-token-session-token-session"
+        exchange = webapp.LoginExchange(token)
+        opener = webapp.DashboardOpen("http://127.0.0.1:9/#token=secret", exchange)
+        first = opener.url()
+        second = opener.url()
+        self.assertNotIn(token, first)
+        self.assertNotIn(token, second)
+        self.assertNotIn("#token=", first)
+        self.assertNotIn("#token=", second)
+        self.assertNotEqual(first, second)
+        nonce_1 = unquote(first.split("#login=", 1)[1])
+        nonce_2 = unquote(second.split("#login=", 1)[1])
+        self.assertEqual(exchange.redeem(nonce_1), token)
+        self.assertEqual(exchange.redeem(nonce_2), token)
+        self.assertIsNone(exchange.redeem(nonce_1))
+        plain = webapp.DashboardOpen("http://127.0.0.1:9/", None)
+        self.assertEqual(plain.url(), "http://127.0.0.1:9/")
+        self.assertNotIn("token", plain.url())
+
+    def test_a_foreign_stop_message_is_ignored(self):
+        import inspect
+
+        icon = tray.TrayIcon("t", lambda: None, lambda: None)
+        other = tray.TrayIcon("t", lambda: None, lambda: None)
+        self.assertNotEqual(icon._stop_token, other._stop_token)
+        self.assertGreaterEqual(icon._stop_token.bit_length(), 1)
+        self.assertTrue(tray.accepts_stop(tray.WM_TRAY_STOP, icon._stop_token, icon._stop_token))
+        self.assertTrue(tray.accepts_stop(
+            tray.WM_TRAY_STOP, tray.signed_stop_lparam(icon._stop_token), icon._stop_token,
+        ))
+        self.assertFalse(tray.accepts_stop(tray.WM_TRAY_STOP, 0, icon._stop_token))
+        self.assertFalse(tray.accepts_stop(tray.WM_TRAY_STOP, other._stop_token, icon._stop_token))
+        self.assertFalse(tray.accepts_stop(tray.WM_CLOSE, icon._stop_token, icon._stop_token))
+        high = (1 << 63) + 7
+        self.assertTrue(tray.accepts_stop(tray.WM_TRAY_STOP, tray.signed_stop_lparam(high), high))
+        self.assertFalse(tray.accepts_stop(tray.WM_TRAY_STOP, high ^ 1, high))
+        source = inspect.getsource(tray.TrayIcon._run_windows)
+        self.assertIn("accepts_stop", source)
+        self.assertIn("self._stop_token", inspect.getsource(tray.TrayIcon.stop))
 
 
 class TrayStatusLineTests(unittest.TestCase):
@@ -201,9 +331,12 @@ class TrayStatusLineTests(unittest.TestCase):
             started = parse_started_at(self.store.list_scans(conn, limit=1)[0]["started_at"])
         finally:
             conn.close()
-        self.handler.watcher = type("W", (), {"next_scan_at": started + 3600})()
+        self.handler.watcher = type("W", (), {
+            "next_scan_at": started + 3600, "subnet": "10.0.0.0/24",
+        })()
+        self.handler.watch_note = "Watching 10.0.0.0/24."
         line = webapp.tray_status_line(self.handler, now=started + 12 * 60)
-        self.assertEqual(line, "Last scan 12 min ago · next in 48 min")
+        self.assertEqual(line, "Last scan 12 min ago · Watching 10.0.0.0/24 · next in 48 min")
 
 
 class LauncherTests(unittest.TestCase):

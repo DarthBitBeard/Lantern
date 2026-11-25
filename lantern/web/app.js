@@ -22,6 +22,7 @@ function storedToken() {
 function lanternToken() {
   // Default mode trusts the token embedded in the page. A stored value must
   // not override it, or a crafted #token= link would break later requests.
+  // The session token is valid until Lantern restarts. It is not single-use.
   if (needsStoredToken()) return storedToken() || pageToken();
   return pageToken() || storedToken();
 }
@@ -75,6 +76,58 @@ function showTokenPrompt() {
   if (!box) return;
   box.hidden = false;
   $("status").textContent = "Token required";
+}
+
+function loginNonce() {
+  // A #login= fragment is a single-use nonce, not the session token.
+  let hash = "";
+  try {
+    hash = window.location.hash || "";
+  } catch (err) {
+    return "";
+  }
+  const mark = "#login=";
+  if (hash.indexOf(mark) !== 0) return "";
+  let value = hash.slice(mark.length);
+  try {
+    value = decodeURIComponent(value);
+  } catch (err) {
+    value = hash.slice(mark.length);
+  }
+  return value.trim();
+}
+
+function stripHash() {
+  try {
+    const path = (window.location.pathname || "/") + (window.location.search || "");
+    history.replaceState(null, "", path);
+  } catch (err) { /* cannot rewrite this URL */ }
+}
+
+async function exchangeLoginNonce() {
+  // POST the nonce once. The response token goes into this tab only.
+  // The session token is never written back into the address.
+  const nonce = loginNonce();
+  if (!nonce) return false;
+  stripHash();
+  let res;
+  try {
+    res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nonce: nonce }),
+    });
+  } catch (err) {
+    return false;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || typeof data.token !== "string" || !data.token) return false;
+  try {
+    sessionStorage.setItem(TOKEN_STORAGE, data.token);
+  } catch (err) {
+    return false;
+  }
+  return true;
 }
 
 // Devices this browser had already seen before this page load, so cards can
@@ -149,7 +202,7 @@ function setMessage(text, isError) {
 
 function setBusy(busy) {
   document.body.setAttribute("aria-busy", busy ? "true" : "false");
-  for (const id of ["scan-btn", "demo-btn", "refresh-btn"]) $(id).disabled = busy;
+  for (const id of ["scan-btn", "watch-btn", "demo-btn", "refresh-btn"]) $(id).disabled = busy;
   $("history").disabled = busy;
 }
 
@@ -1025,6 +1078,8 @@ async function loadStatus() {
   const data = await api("/api/status");
   if (data.guessed_subnet && !$("subnet").value) $("subnet").value = data.guessed_subnet;
   if (data.version) $("version").textContent = `Lantern v${data.version}`;
+  const watch = $("watch-status");
+  if (watch) watch.textContent = data.watch_status || "";
   return data;
 }
 
@@ -1108,6 +1163,40 @@ $("scan-form").addEventListener("submit", async (event) => {
   }
   await watchScan();
 });
+
+async function saveWatch(adopt) {
+  const data = await postJson("/api/watch", {
+    subnet: $("subnet").value.trim() || undefined,
+    adopt: !!adopt,
+  });
+  if ($("watch-status") && data.watch_status) $("watch-status").textContent = data.watch_status;
+  setMessage(data.message || "Watching this network.");
+}
+
+const watchButton = $("watch-btn");
+if (watchButton && watchButton.addEventListener) {
+  watchButton.addEventListener("click", async () => {
+    setBusy(true);
+    try {
+      await saveWatch(false);
+    } catch (err) {
+      const text = String(err && err.message || "");
+      if (text.indexOf("different network") !== -1 && window.confirm(
+        "A different network is already saved. Replace it with this one?",
+      )) {
+        try {
+          await saveWatch(true);
+        } catch (err2) {
+          setMessage(err2.message, true);
+        }
+      } else {
+        setMessage(text, true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  });
+}
 
 $("demo-btn").addEventListener("click", async () => {
   setBusy(true);
@@ -1614,7 +1703,12 @@ if (needsStoredToken()) {
   } else if (note) {
     note.textContent = "Strict auth. Every API call needs the startup token. It is not in this page.";
   }
-  if (!storedToken()) showTokenPrompt();
+  if (loginNonce()) {
+    exchangeLoginNonce().then(() => {
+      if (!storedToken()) showTokenPrompt();
+      else startDashboard();
+    });
+  } else if (!storedToken()) showTokenPrompt();
   else startDashboard();
 } else {
   startDashboard();
