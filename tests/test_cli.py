@@ -708,10 +708,24 @@ class CliTests(unittest.TestCase):
         def extra(*_args):
             return []
 
-        nasty = "x\x1b]0;pwned\x07\u202e\u200b.toml"
+        # Control characters are not a legal Windows file name. The notice
+        # formatter is checked with a path that is never created.
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            cli._announce_disabled(
+                {"sample-check"}, [], Path("x\x1b]0;pwned\x07\u202e\u200b.toml"),
+            )
+        notice = captured.getvalue()
+        self.assertIn("Checks disabled by ", notice)
+        self.assertIn("sample-check", notice)
+        self.assertIn("x", notice)
+        self.assertIn(".toml", notice)
+        for char in ("\x1b", "\x07", "\u202e", "\u200b"):
+            self.assertNotIn(char, notice)
+
         path = self._write_scopes(
             '[scopes.lab]\nsubnet = "10.9.9.0/24"\n\n[checks]\ndisabled = ["sample-check"]\n',
-            name=nasty,
+            name="x\u202e\u200b.toml",
         )
         with mock.patch.dict("lantern.checks.REGISTRY", {"sample-check": extra}), \
                 mock.patch.object(cli, "scan_subnet", return_value=([], {})):
@@ -719,8 +733,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("Checks disabled by ", err)
         self.assertIn("sample-check", err)
-        for char in ("\x1b", "\x07", "\u202e", "\u200b"):
-            self.assertNotIn(char, err)
+        self.assertNotIn("\u202e", err)
+        self.assertNotIn("\u200b", err)
 
     def test_deeply_nested_toml_exits_2_without_a_traceback(self):
         text = "a = " + ("[" * 2000) + ("]" * 2000) + "\n"

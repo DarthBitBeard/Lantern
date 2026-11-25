@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from lantern import checks
-from lantern.scopes import load_disabled_checks, load_scopes, select_scope
+from lantern.scopes import _shown_config_path, load_disabled_checks, load_scopes, select_scope
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "lantern.toml"
@@ -226,9 +226,9 @@ class LoadScopesTests(unittest.TestCase):
         self.assertIn("not a regular file", str(ctx.exception))
 
     def test_error_messages_strip_control_bidi_and_zero_width_from_the_path(self):
-        nasty = "x\x1b]0;pwned\x07\u202a\u202e\u2066\u200b\u200c\u200d\ufeff.toml"
-        path = Path(self.tmp.name) / nasty
-        unsafe = ("\x1b", "\x07", "\u202a", "\u202e", "\u2066", "\u200b", "\u200c", "\u200d", "\ufeff")
+        controls = ("\x1b", "\x07")
+        marks = ("\u202a", "\u202e", "\u2066", "\u200b", "\u200c", "\u200d", "\ufeff")
+        unsafe = controls + marks
 
         def assert_safe(message, label):
             for char in unsafe:
@@ -236,11 +236,19 @@ class LoadScopesTests(unittest.TestCase):
             self.assertIn("x", message)
             self.assertIn(".toml", message)
 
+        # A missing path is never created, so control characters can be in
+        # the name on Windows, where those bytes are not a legal file name.
+        missing = Path(self.tmp.name) / ("x\x1b]0;pwned\x07" + "".join(marks) + ".toml")
+        shown = _shown_config_path(missing)
+        assert_safe(shown, "helper")
         with self.assertRaises(ValueError) as ctx:
-            load_scopes(path)
+            load_scopes(missing)
         self.assertIn("Cannot read", str(ctx.exception))
         assert_safe(str(ctx.exception), "missing")
 
+        # The other messages need a real file. These two marks are legal in a
+        # Windows name; the control characters above are not.
+        path = Path(self.tmp.name) / "x\u202e\u200b.toml"
         path.write_text("this is not toml\n", encoding="utf-8")
         with self.assertRaises(ValueError) as ctx:
             load_scopes(path)
