@@ -171,6 +171,35 @@ def run_checks(obs: Observation, dataset: object, disabled: frozenset[str]) -> l
     return [item.as_dict() for item in found]
 
 
+def build_scan_checks(disabled: frozenset[str], dataset: object) -> dict:
+    """The scans.checks object written for one new scan.
+
+    ``dataset_source`` is ``bundled`` in this version. An imported file is
+    a later change and does not add a migration.
+    """
+    disabled = frozenset(disabled)
+    enabled = [check_id for check_id in REGISTRY if check_id not in disabled]
+    status = "missing"
+    version = None
+    digest = None
+    if "vuln-match" not in enabled:
+        status = "disabled"
+    elif dataset is not None and dataset.status in {"ok", "missing", "invalid"}:
+        status = dataset.status
+        if dataset.status == "ok":
+            version = dataset.data_version
+            digest = dataset.sha256
+    return {
+        "engine": 1,
+        "enabled": enabled,
+        "dataset_version": version,
+        "dataset_sha256": digest,
+        "dataset_status": status,
+        "dataset_source": "bundled",
+        "fallback": None,
+    }
+
+
 def describe_checks(disabled: frozenset[str]) -> str:
     """Text for ``lantern checks``. One line per check, then the dataset.
 

@@ -1350,6 +1350,65 @@ class FingerprintStoreTests(unittest.TestCase):
         finally:
             again.close()
 
+    def test_schema_8_gains_checks_and_old_findings_still_load(self):
+        from lantern.checks import build_scan_checks
+        from lantern.store import CorruptScanError, _MIGRATIONS
+        from lantern.vulndata import missing_dataset
+
+        old = {version: fn for version, fn in _MIGRATIONS.items() if version <= 8}
+        raw = sqlite3.connect(self.path)
+        try:
+            apply_migrations(raw, migrations=old, target=8, db_path=self.path)
+            raw.execute(
+                "INSERT INTO scans (started_at, subnet, demo) VALUES (?, ?, ?)",
+                ("2026-11-01T00:00:00+00:00", "10.8.0.0/24", 0),
+            )
+            raw.execute(
+                "INSERT INTO devices (scan_id, ip, mac, hostname, label, open_ports, findings)"
+                " VALUES (1, ?, ?, ?, ?, ?, ?)",
+                ("10.8.0.2", None, None, None, "[]",
+                 '[{"port": 22, "service": "SSH", "severity": "low", "title": "SSH is open", "fix": "Keep it updated."}]'),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+        conn = connect(self.path)
+        try:
+            self.assertEqual(schema_version(conn), 9)
+            loaded = load_scan(conn, 1)
+            self.assertIsNone(loaded["checks"])
+            self.assertEqual(loaded["devices"][0]["findings"][0]["title"], "SSH is open")
+            record = build_scan_checks(frozenset(), missing_dataset())
+            new_id = save_scan(
+                conn, "10.8.0.0/24", [_dev("10.8.0.3")], checks=record,
+            )
+            again = load_scan(conn, new_id)
+            self.assertEqual(again["checks"]["dataset_status"], "missing")
+            self.assertEqual(again["checks"]["dataset_source"], "bundled")
+            self.assertEqual(again["checks"]["enabled"], ["port-rules", "vuln-match"])
+            self.assertIsNone(again["checks"]["fallback"])
+        finally:
+            conn.close()
+        backup = Path(str(self.path) + ".v8.bak")
+        self.assertTrue(backup.is_file())
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+
+        conn = connect(self.path)
+        try:
+            bad = save_scan(conn, "10.8.0.0/24", [_dev("10.8.0.4")])
+            with conn:
+                conn.execute(
+                    "UPDATE devices SET findings = ? WHERE scan_id = ?",
+                    ('[{"port": 22, "service": "SSH", "severity": "low", "title": "t", "fix": "f", "check_id": 1}]', bad),
+                )
+            with self.assertRaises(CorruptScanError):
+                load_scan(conn, bad)
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

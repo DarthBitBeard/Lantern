@@ -27,7 +27,7 @@ from .discovery import (
     merged_address_count,
     validate_subnet,
 )
-from .checks import describe_checks
+from .checks import build_scan_checks, describe_checks
 from .ports import DEFAULT_PORTS
 from .report import describe_change, diff_to_json, multi_scope_html, to_html, to_json
 from .scopes import (
@@ -1715,6 +1715,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                     info = engine.describe_network(network, devices, identities, local_ip)
                     scan_id = save_scan(
                         conn, subnet, devices, demo=False, scope_name=scope.name, network=info,
+                        checks=build_scan_checks(
+                            getattr(args, "disabled_checks", frozenset()), scan_dataset,
+                        ),
                     )
                     stored.append((scan_id, devices, info))
                     ran.append(scope.name)
@@ -1758,6 +1761,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             topo = demo.demo_topology(devices)
         scan_id = save_scan(
             conn, subnet, devices, demo=args.demo, scope_name=scope_name, network=info, topology=topo,
+            checks=build_scan_checks(
+                getattr(args, "disabled_checks", frozenset()), engine.current_scan_dataset(),
+            ),
         )
         scan, diff = _prepare_report(conn, *load_scan_with_diff(conn, scan_id, scope_name=scope_name))
         if args.format == "json":

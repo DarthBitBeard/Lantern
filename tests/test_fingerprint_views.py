@@ -90,8 +90,12 @@ class FingerprintViewTests(unittest.TestCase):
     def test_existing_findings_columns_are_unchanged(self):
         code, out, err = self.cli("export", "--what", "findings", "--format", "csv")
         self.assertEqual(code, 0, err)
-        self.assertEqual(next(csv.reader(io.StringIO(out))),
-                         ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"])
+        header = next(csv.reader(io.StringIO(out)))
+        self.assertEqual(
+            header[:8],
+            ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"],
+        )
+        self.assertEqual(header[8:], ["check_id", "id", "refs", "confidence"])
 
 
 if __name__ == "__main__":

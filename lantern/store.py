@@ -39,10 +39,11 @@ from pathlib import Path
 # the asset table, which is not tied to a scan id. Schema 4 adds an index on
 # the device table and changes no rows. Schema 5 adds the gateway and device
 # identities for the map; schema 6 adds scans.topology (the switch map).
-# Schema 7 adds service_fingerprints. Nothing in a scan writes that table
-# until a caller puts a fingerprint on a port. The package version stays put
-# until a release; the schema version moves only when the tables or indexes change.
-SCHEMA_VERSION = 8
+# Schema 7 adds service_fingerprints. Schema 8 adds device_seen. Schema 9
+# adds scans.checks, a record of which checks ran and which dataset they
+# used. Nothing rewrites older finding rows. The package version stays put
+# until a release; the schema version moves only when the tables change.
+SCHEMA_VERSION = 9
 
 # Owner read/write for files, owner-only for a directory Lantern creates.
 # Group and other bits stay off so umask cannot widen them.
@@ -703,6 +704,16 @@ def _migration_8_device_seen(conn: sqlite3.Connection) -> None:
     rebuild_sightings(conn)
 
 
+def _migration_9_scan_checks(conn: sqlite3.Connection) -> None:
+    """Schema 9: one JSON object per scan naming the checks and the dataset.
+
+    Older rows stay NULL. No finding row is rewritten.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+    if "checks" not in columns:
+        conn.execute("ALTER TABLE scans ADD COLUMN checks TEXT")
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1_v030_baseline,
     2: _migration_2_scope_name,
@@ -712,6 +723,7 @@ _MIGRATIONS: dict[int, Migration] = {
     6: _migration_6_topology,
     7: _migration_7_service_fingerprints,
     8: _migration_8_device_seen,
+    9: _migration_9_scan_checks,
 }
 _require_migration_keys(_MIGRATIONS, SCHEMA_VERSION)
 
@@ -856,6 +868,7 @@ def save_scan(
     scope_name: str | None = None,
     network: dict | None = None,
     topology: dict | None = None,
+    checks: dict | None = None,
 ) -> int:
     """Store one scan snapshot and return its id. All-or-nothing.
 
@@ -867,14 +880,20 @@ def save_scan(
     """
     network = network or {}
     started_at = _now()
+    if checks is not None:
+        try:
+            _require_checks(json.dumps(checks))
+        except CorruptScanError:
+            raise ValueError("A scan checks record is not allowed.") from None
     with conn:
         cur = conn.execute(
-            "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO scans (started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology, checks)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 started_at, subnet, 1 if demo else 0, scope_name,
                 network.get("gateway_ip"), network.get("gateway_mac"), network.get("local_ip"),
                 json.dumps(topology) if topology else None,
+                json.dumps(checks) if checks else None,
             ),
         )
         scan_id = cur.lastrowid
@@ -965,6 +984,105 @@ def _require_findings(value):
             if not isinstance(item.get(key), str):
                 raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
         _optional_text(item, "banner")
+        _optional_finding_fields(item)
+    return value
+
+
+_CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_FINDING_CONFIDENCE = frozenset({"port", "banner"})
+_REF_ID_RE = re.compile(
+    r"^(?:CVE-\d{4}-\d{4,7}|GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}"
+    r"|[A-Z][A-Z0-9]{1,15}-[A-Za-z0-9._:-]{1,40})$"
+)
+_CHECKS_KEYS = frozenset({
+    "engine", "enabled", "dataset_version", "dataset_sha256",
+    "dataset_status", "dataset_source", "fallback",
+})
+_CHECKS_STATUS = frozenset({"ok", "missing", "invalid", "disabled"})
+_CHECKS_SOURCE = frozenset({"bundled", "imported"})
+_CHECKS_FALLBACK = frozenset({"import_invalid", "import_older"})
+
+
+def _ascii_text(value: str, limit: int) -> bool:
+    return 1 <= len(value) <= limit and all(" " <= char <= "~" for char in value)
+
+
+def _optional_finding_fields(item: dict) -> None:
+    """Optional keys added with vulnerability checks. A bad value is unreadable."""
+    allowed = {
+        "port", "service", "severity", "title", "fix", "banner",
+        "check_id", "id", "refs", "confidence", "evidence", "note",
+    }
+    if set(item) - allowed:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "check_id" in item and (
+        not isinstance(item["check_id"], str) or _CHECK_ID_RE.fullmatch(item["check_id"]) is None
+    ):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "confidence" in item and item["confidence"] not in _FINDING_CONFIDENCE:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "id" in item and item["id"] is not None:
+        if not isinstance(item["id"], str) or not re.fullmatch(r"LV-[0-9]{1,8}", item["id"]):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "refs" in item:
+        refs = item["refs"]
+        if (
+            not isinstance(refs, list)
+            or len(refs) > 8
+            or any(not isinstance(ref, str) or _REF_ID_RE.fullmatch(ref) is None for ref in refs)
+        ):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "evidence" in item and item["evidence"] is not None:
+        if not isinstance(item["evidence"], str) or not _ascii_text(item["evidence"], 160):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if "note" in item and item["note"] is not None:
+        if not isinstance(item["note"], str) or not _ascii_text(item["note"], 200):
+            raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+
+
+def present_finding(item: dict) -> dict:
+    """A finding as readers show it. Missing keys mean the historical port rule."""
+    shown = dict(item)
+    shown.setdefault("check_id", "port-rules")
+    shown.setdefault("confidence", "port")
+    shown.setdefault("refs", [])
+    shown.setdefault("id", None)
+    return shown
+
+
+def _require_checks(raw: str | None) -> dict | None:
+    """The scans.checks object, or None when the scan predates the column value."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE) from exc
+    if not isinstance(value, dict) or set(value) != _CHECKS_KEYS:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if value["engine"] != 1 or isinstance(value["engine"], bool):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    enabled = value["enabled"]
+    if (
+        not isinstance(enabled, list)
+        or any(not isinstance(item, str) or _CHECK_ID_RE.fullmatch(item) is None for item in enabled)
+    ):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if value["dataset_status"] not in _CHECKS_STATUS:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    version = value["dataset_version"]
+    if version is not None and (
+        not isinstance(version, str)
+        or re.fullmatch(r"(0|[1-9][0-9]{0,7})(?:\.(0|[1-9][0-9]{0,7})){1,3}", version) is None
+    ):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    digest = value["dataset_sha256"]
+    if digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if value["dataset_source"] not in _CHECKS_SOURCE and value["dataset_source"] is not None:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
+    if value["fallback"] not in _CHECKS_FALLBACK and value["fallback"] is not None:
+        raise CorruptScanError(_CORRUPT_SCAN_MESSAGE)
     return value
 
 
@@ -992,7 +1110,7 @@ def _require_object(raw: str | None) -> dict | None:
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
     """Load one scan with its devices, or None if the id is unknown."""
     row = conn.execute(
-        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology"
+        "SELECT started_at, subnet, demo, scope_name, gateway_ip, gateway_mac, local_ip, topology, checks"
         " FROM scans WHERE id = ?",
         (scan_id,),
     ).fetchone()
@@ -1031,6 +1149,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> dict | None:
         "scope_name": row[3],
         "network": {"gateway_ip": row[4], "gateway_mac": row[5], "local_ip": row[6]},
         "topology": _require_object(row[7]),
+        "checks": _require_checks(row[8]),
         "devices": devices,
     }
 

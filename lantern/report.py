@@ -39,6 +39,7 @@ def scan_to_dict(scan: dict, diff: dict | None = None) -> dict:
         "scope_name": scan.get("scope_name"),
         "demo": scan["demo"],
         "device_count": len(devices),
+        "checks": scan.get("checks"),
         "devices": devices,
         "diff": _diff_for_report(diff),
         **_switch_map(scan),
@@ -125,12 +126,33 @@ def _device_diff_label(device: dict) -> str:
 def _finding_rows(device: dict) -> str:
     rows = ""
     for finding in device["findings"]:
+        extra = ""
+        note = finding.get("note") or ""
+        if note:
+            extra += f"<br><small>{html.escape(str(note))}</small>"
+        refs = finding.get("refs") if isinstance(finding.get("refs"), list) else []
+        if refs:
+            extra += "<br><small>Refs: " + html.escape(", ".join(str(ref) for ref in refs)) + "</small>"
+        evidence = finding.get("evidence") or ""
+        if evidence:
+            extra += f"<br><small>{html.escape(str(evidence))}</small>"
         rows += (
             f"<tr><td>{int(finding['port'])}</td><td>{html.escape(str(finding['service']))}</td>"
             f"<td><strong>{html.escape(str(finding['severity']))}</strong></td>"
-            f"<td>{html.escape(str(finding['title']))}<br><small>{html.escape(str(finding['fix']))}</small></td></tr>"
+            f"<td>{html.escape(str(finding['title']))}<br><small>{html.escape(str(finding['fix']))}</small>"
+            f"{extra}</td></tr>"
         )
     return rows or "<tr><td colspan='4'>No risky open ports found.</td></tr>"
+
+
+def _checks_line(scan: dict) -> str:
+    """Plain text for the dataset this scan recorded. Refs stay text, never links."""
+    checks = scan.get("checks")
+    if not checks:
+        return "Checks: port rules only (saved before check records)."
+    version = checks.get("dataset_version") or checks.get("dataset_status") or "missing"
+    source = checks.get("dataset_source") or "bundled"
+    return f"Vulnerability data: {version} ({source})."
 
 
 def scan_body(scan: dict, diff: dict | None = None) -> str:
@@ -184,6 +206,7 @@ def scan_body(scan: dict, diff: dict | None = None) -> str:
     return f"""<h1>Lantern scan report</h1>
 <p>Scan #{int(scan['id'])} | {html.escape(str(scan['started_at']))} | {html.escape(str(scan['subnet']))} | scope {_html_text(strip_for_text(scan.get('scope_name') or '') or '-')} | {len(scan['devices'])} devices
 {'| demo data' if scan['demo'] else ''}</p>
+<p>{html.escape(_checks_line(scan))}</p>
 {diff_html}
 {devices_html}
 <p><small>Lantern is defensive only. It scans your own private network, with your permission. It never guesses passwords or sends exploits.</small></p>"""
