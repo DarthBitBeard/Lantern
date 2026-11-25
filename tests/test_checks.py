@@ -111,8 +111,8 @@ class RegistryTests(unittest.TestCase):
             self.assertIsInstance(key, ast.Constant)
             self.assertIsInstance(key.value, str)
             keys.append(key.value)
-        self.assertEqual(keys, ["port-rules"])
-        self.assertEqual(tuple(REGISTRY), ("port-rules",))
+        self.assertEqual(keys, ["port-rules", "vuln-match"])
+        self.assertEqual(tuple(REGISTRY), ("port-rules", "vuln-match"))
 
     def test_port_rules_match_the_frozen_fixture(self):
         """Stored findings match a fixed fixture, not the live findings function."""
@@ -143,7 +143,7 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("'nope'", str(ctx.exception))
         self.assertEqual(
             unknown_check_message(["nope"]),
-            "Unknown check 'nope'. Valid checks: port-rules.",
+            "Unknown check 'nope'. Valid checks: port-rules, vuln-match.",
         )
         for bad in ("Port-Rules", "PORT-RULES", " port-rules", "port-rules ", "port-rules\t"):
             with self.assertRaises(ValueError, msg=bad) as ctx:
@@ -182,7 +182,9 @@ class RegistryTests(unittest.TestCase):
     def test_describe_lists_enabled_state_and_a_missing_dataset(self):
         text = describe_checks(frozenset())
         self.assertIn("port-rules  enabled", text)
+        self.assertIn("vuln-match  enabled", text)
         self.assertIn("dataset status: missing", text)
+        self.assertIn("dataset entries: 0", text)
         with self.assertRaises(ValueError) as ctx:
             describe_checks(frozenset({"port-rules"}))
         self.assertIn("cannot be disabled", str(ctx.exception))

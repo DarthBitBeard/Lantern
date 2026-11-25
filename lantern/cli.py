@@ -1678,6 +1678,9 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err(str(exc))
             ran: list[str] = []
             failed: list[tuple[str, str]] = []
+            from .vulndata import load_for_scan
+
+            scan_dataset = load_for_scan()
             saved: list[tuple[dict, dict | None]] = []
             stored: list[tuple[int, list[dict], dict]] = []
             seen_hosts: set[str] = set()
@@ -1701,6 +1704,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             for device in engine.scan_hosts(
                                 fresh, DEFAULT_PORTS, fingerprint=not args.no_fingerprint,
                                 disabled=getattr(args, "disabled_checks", frozenset()),
+                                dataset=scan_dataset,
                             ):
                                 found[device["ip"]] = device
                             identities = pending.result()

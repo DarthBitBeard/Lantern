@@ -35,6 +35,7 @@ class Finding:
     id: str | None = None
     refs: tuple[str, ...] = ()
     evidence: str | None = None
+    note: str | None = None
 
     def as_dict(self) -> dict:
         """The stored JSON object.
@@ -60,6 +61,8 @@ class Finding:
             item["refs"] = list(self.refs)
         if self.evidence:
             item["evidence"] = self.evidence
+        if self.note:
+            item["note"] = self.note
         return item
 
 
@@ -95,10 +98,18 @@ def _port_rules(obs: Observation, dataset: object) -> list[Finding]:
     return found
 
 
+def _vuln_match(obs: Observation, dataset: object) -> list[Finding]:
+    """Banner findings. A missing dataset produces nothing."""
+    from .vuln_match import vuln_match_findings
+
+    return vuln_match_findings(obs, dataset)
+
+
 # Fixed literal. Do not build this from entry points, directories, or imports
 # of anything the user can drop in beside the program.
 REGISTRY: dict[str, object] = {
     "port-rules": _port_rules,
+    "vuln-match": _vuln_match,
 }
 
 # These stay on until a scan records which checks ran. Other ids in the
@@ -163,8 +174,10 @@ def run_checks(obs: Observation, dataset: object, disabled: frozenset[str]) -> l
 def describe_checks(disabled: frozenset[str]) -> str:
     """Text for ``lantern checks``. One line per check, then the dataset.
 
-    There is no dataset in this version, so the status is ``missing``.
+    With no packaged file the status is ``missing`` and nothing is matched.
     """
+    from ..vulndata import format_dataset, load_packaged
+
     disabled = frozenset(disabled)
     validate_disabled(disabled)
     width = max(len(check_id) for check_id in REGISTRY)
@@ -172,5 +185,5 @@ def describe_checks(disabled: frozenset[str]) -> str:
     for check_id in REGISTRY:
         state = "disabled" if check_id in disabled else "enabled"
         lines.append(f"{check_id:<{width}}  {state}")
-    lines.append("dataset status: missing")
+    lines.extend(format_dataset(load_packaged()))
     return "\n".join(lines)

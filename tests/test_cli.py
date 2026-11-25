@@ -516,9 +516,15 @@ class CliTests(unittest.TestCase):
             code, out, err = self.run_cli("checks")
             self.assertEqual(code, 0, err)
             self.assertIn("port-rules  enabled", out)
+            self.assertIn("vuln-match  enabled", out)
             self.assertIn("dataset status: missing", out)
             self.assertNotIn("Traceback", err)
             self.assertFalse(Path(self.db).exists())
+
+            code, out, err = self.run_cli("checks", "--disable-check", "vuln-match")
+            self.assertEqual(code, 0, err)
+            self.assertIn("vuln-match  disabled", out)
+            self.assertIn("port-rules  enabled", out)
 
             code, out, err = self.run_cli("checks", "--disable-check", "port-rules")
             self.assertEqual(code, 2)
