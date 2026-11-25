@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from lantern.checks import (
+    LOCKED_CHECK_IDS,
     REGISTRY,
     Observation,
     describe_checks,
@@ -173,6 +174,54 @@ class RegistryTests(unittest.TestCase):
             self.assertIn("'port-rules'", str(ctx.exception))
             self.assertIn("cannot be disabled", str(ctx.exception))
 
+    def test_vuln_match_is_locked_on_the_engine_and_the_source_literal(self):
+        """Removing vuln-match from the lock is what would let a scan skip it."""
+        import lantern.checks as checks
+        from lantern.engine import scan_hosts, scan_subnet
+
+        self.assertEqual(LOCKED_CHECK_IDS, frozenset({"port-rules", "vuln-match"}))
+        source = (ROOT / "lantern" / "checks" / "__init__.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        literal = None
+        for node in tree.body:
+            value = None
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.target.id == "LOCKED_CHECK_IDS":
+                    value = node.value
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "LOCKED_CHECK_IDS"
+                for target in node.targets
+            ):
+                value = node.value
+            if value is not None:
+                literal = value
+                break
+        self.assertIsInstance(literal, ast.Call)
+        self.assertEqual(_call_name(literal.func), "frozenset")
+        constants = [
+            elt.value for elt in literal.args[0].elts if isinstance(elt, ast.Constant)
+        ]
+        self.assertIn("vuln-match", constants)
+
+        message = "Check 'vuln-match' cannot be disabled until a scan records which checks ran."
+        for call in (
+            lambda: validate_disabled(frozenset({"vuln-match"})),
+            lambda: run_checks(Observation(open_ports=(22,)), None, frozenset({"vuln-match"})),
+            lambda: scan_subnet("192.168.1.0/24", demo_mode=True, disabled=frozenset({"vuln-match"})),
+            lambda: scan_hosts([], disabled=frozenset({"vuln-match"})),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                call()
+            self.assertEqual(str(ctx.exception), message)
+
+        # A mutant that drops vuln-match from the lock no longer refuses it.
+        mutated = frozenset(name for name in LOCKED_CHECK_IDS if name != "vuln-match")
+        with mock.patch.object(checks, "LOCKED_CHECK_IDS", mutated):
+            validate_disabled(frozenset({"vuln-match"}))
+            found = run_checks(Observation(open_ports=(22,)), None, frozenset({"vuln-match"}))
+        self.assertTrue(found)
+        self.assertTrue(all(item.get("check_id") != "vuln-match" for item in found))
+
     def test_findings_sort_by_severity_and_keep_port_rule_order(self):
         ports = [443, 22, 3389, 6379, 23]
         via = run_checks(Observation(open_ports=tuple(ports)), None, frozenset())
@@ -188,6 +237,9 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             describe_checks(frozenset({"port-rules"}))
         self.assertIn("cannot be disabled", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            describe_checks(frozenset({"vuln-match"}))
+        self.assertIn("'vuln-match'", str(ctx.exception))
 
     def test_purity_ast_has_no_network_or_dynamic_code(self):
         errors = []

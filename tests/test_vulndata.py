@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 from lantern.checks import Observation, run_checks
 from lantern.checks.vuln_match import BANNER_SENTENCE
@@ -69,6 +70,11 @@ class ComparatorTests(unittest.TestCase):
         self.assertEqual(compare_versions("1.0", "1.0.0"), 0)
         self.assertEqual(compare_versions("1", "1.0.0"), 0)
         self.assertEqual(compare_versions("1.0", "1.0.1"), -1)
+
+    def test_a_non_ascii_digit_does_not_compare(self):
+        self.assertTrue("\u0661".isdigit())
+        self.assertIsNone(compare_versions("1.\u0661", "1.2"))
+        self.assertIsNone(compare_versions("\uff11.0", "1.0"))
 
     def test_unparseable_too_many_parts_and_too_long(self):
         self.assertIsNone(compare_versions("1.0", "not a version"))
@@ -260,13 +266,11 @@ class MatcherTests(unittest.TestCase):
             for item in run_checks(self._obs(status="unknown"), dataset, frozenset())
         ))
 
-    def test_disable_vuln_match_keeps_port_rules(self):
-        found = run_checks(self._obs(), self._dataset(), frozenset({"vuln-match"}))
-        self.assertFalse(any(item.get("check_id") == "vuln-match" for item in found))
-        self.assertEqual(
-            [item for item in found if "check_id" not in item],
-            findings_for_ports([22]),
-        )
+    def test_vuln_match_cannot_be_disabled(self):
+        with self.assertRaises(ValueError) as ctx:
+            run_checks(self._obs(), self._dataset(), frozenset({"vuln-match"}))
+        self.assertIn("'vuln-match'", str(ctx.exception))
+        self.assertIn("cannot be disabled", str(ctx.exception))
 
     def test_missing_dataset_matches_nothing(self):
         found = run_checks(self._obs(), load_packaged(), frozenset())
@@ -282,6 +286,38 @@ class MatcherTests(unittest.TestCase):
             item.get("check_id") == "vuln-match"
             for item in run_checks(self._obs(version="1.1.1"), dataset, frozenset())
         ))
+
+    def test_unicode_digit_in_a_range_refuses_the_file_and_the_scan_continues(self):
+        from lantern import vulndata
+        from lantern.engine import scan_subnet
+
+        for digit in ("\u0661", "\uff11", "\u0967"):
+            self.assertTrue(digit.isdigit(), digit)
+            blob = _blob(entries=[_entry(ranges=[{"introduced": "1." + digit, "fixed": "9.0"}])])
+            dataset = dataset_from_bytes(blob)
+            self.assertEqual(dataset.status, "invalid", digit)
+            self.assertIn("refused", dataset.message or "")
+            self.assertNotIn("Traceback", dataset.message or "")
+            self.assertNotIn(digit, dataset.message or "")
+            found = run_checks(Observation(open_ports=(22,)), dataset, frozenset())
+            self.assertEqual(found, findings_for_ports([22]), digit)
+
+        blob = _blob(entries=[_entry(ranges=[{"introduced": "1.\u0661", "fixed": "9.0"}])])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vulns.json"
+            path.write_bytes(blob)
+            stderr = io.StringIO()
+            with mock.patch.object(vulndata, "packaged_path", return_value=path), \
+                    redirect_stderr(stderr):
+                devices, _info = scan_subnet("192.168.1.0/24", demo_mode=True)
+        text = stderr.getvalue()
+        self.assertIn("refused", text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("\u0661", text)
+        self.assertTrue(devices)
+        for device in devices:
+            self.assertTrue(device["findings"])
+            self.assertFalse(any(item.get("check_id") == "vuln-match" for item in device["findings"]))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 """Static checks over what a scan already collected.
 
 The registry is a fixed literal. A config file can disable a check by
-id and cannot add one. ``port-rules`` cannot be disabled until a scan
-records which checks ran: with it off, every device would be stored with
-no findings and would look like a clean network. Nothing here loads
-plugins, discovers files, or runs user code, and nothing here touches
-the network.
+id and cannot add one. ``port-rules`` and ``vuln-match`` cannot be
+disabled until a scan records which checks ran. With ``port-rules`` off,
+every device would be stored with no findings and would look like a
+clean network. With ``vuln-match`` off, a later dataset would drop
+banner matches and leave no record that the check did not run. Nothing
+here loads plugins, discovers files, or runs user code, and nothing here
+touches the network.
 """
 
 from __future__ import annotations
@@ -113,9 +115,10 @@ REGISTRY: dict[str, object] = {
 }
 
 # These stay on until a scan records which checks ran. Other ids in the
-# registry can still be disabled. port-rules is the only entry today;
-# turning it off would store an empty findings list.
-LOCKED_CHECK_IDS = frozenset({_PORT_CHECK_ID})
+# registry can still be disabled. Turning port-rules off would store an
+# empty findings list. Turning vuln-match off would drop banner matches
+# and leave no record that the check did not run.
+LOCKED_CHECK_IDS = frozenset({_PORT_CHECK_ID, "vuln-match"})
 
 
 def known_check_ids() -> tuple[str, ...]:

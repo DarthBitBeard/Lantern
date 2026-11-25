@@ -86,6 +86,35 @@ class ReportEscapeTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertIn("lab", page)
 
+    def test_html_shows_the_banner_only_sentence_as_text(self):
+        from lantern.checks.vuln_match import BANNER_SENTENCE
+
+        scan = _scan()
+        scan["devices"][0]["findings"] = [{
+            "port": 22,
+            "service": "ssh",
+            "severity": "high",
+            "title": "Banner match <b>",
+            "fix": "Upgrade",
+            "note": BANNER_SENTENCE,
+        }]
+        page = to_html(scan)
+        self.assertIn(BANNER_SENTENCE, page)
+        self.assertIn("Banner match &lt;b&gt;", page)
+        self.assertNotIn("<b>", page)
+        hostile = _scan()
+        hostile["devices"][0]["findings"] = [{
+            "port": 22,
+            "service": "ssh",
+            "severity": "high",
+            "title": "t",
+            "fix": "f",
+            "note": _PAYLOAD,
+        }]
+        page = to_html(hostile)
+        self.assertNotIn("<script>", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+
     def test_html_strips_bidi_from_banners(self):
         marks = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
         scan = _scan()

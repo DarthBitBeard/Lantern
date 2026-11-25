@@ -116,6 +116,8 @@ def load_packaged() -> Dataset:
         return _invalid(str(exc))
     except OSError:
         return _invalid(_MSG_READ)
+    except Exception:
+        return _invalid(_MSG_SCHEMA)
     return dataset_from_bytes(blob)
 
 
@@ -139,6 +141,8 @@ def dataset_from_bytes(blob: bytes, *, source: str = "bundled") -> Dataset:
         parsed = validate(blob)
     except DatasetError as exc:
         return _invalid(str(exc), source=source)
+    except Exception:
+        return _invalid(_MSG_SCHEMA, source=source)
     return Dataset(
         status="ok",
         source=source,
@@ -199,7 +203,12 @@ def validate(blob: bytes) -> dict:
         raise DatasetError(_MSG_DEPTH) from exc
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
         raise DatasetError(_message_from_parse(exc)) from exc
-    _check_document(data)
+    try:
+        _check_document(data)
+    except DatasetError:
+        raise
+    except (ValueError, OverflowError, TypeError) as exc:
+        raise DatasetError(_MSG_SCHEMA) from exc
     return data
 
 
@@ -302,31 +311,44 @@ def _parse_version(text: object) -> tuple | None:
     buf: list[str] = []
     kind: str | None = None
 
-    def flush() -> None:
+    def flush() -> bool:
         nonlocal buf, kind
         if not buf:
-            return
+            return True
         token = "".join(buf)
-        parts.append(int(token) if kind == "d" else token)
+        if kind == "d":
+            try:
+                parts.append(int(token))
+            except (ValueError, OverflowError):
+                return False
+        else:
+            parts.append(token)
         buf = []
         kind = None
+        return True
 
     for char in text:
-        if char.isdigit():
+        # ASCII digits only. str.isdigit() is true for U+0661 and other
+        # non-ASCII digits, and int() then raises ValueError.
+        if "0" <= char <= "9":
             if kind not in (None, "d"):
-                flush()
+                if not flush():
+                    return None
             kind = "d"
             buf.append(char)
         elif char.isalpha():
             if kind not in (None, "a"):
-                flush()
+                if not flush():
+                    return None
             kind = "a"
             buf.append(char)
         elif char in _SEPARATORS:
-            flush()
+            if not flush():
+                return None
         else:
             return None
-    flush()
+    if not flush():
+        return None
     if not parts or len(parts) > MAX_VERSION_PARTS:
         return None
     return tuple(parts)

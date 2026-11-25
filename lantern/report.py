@@ -125,10 +125,17 @@ def _device_diff_label(device: dict) -> str:
 def _finding_rows(device: dict) -> str:
     rows = ""
     for finding in device["findings"]:
+        note = finding.get("note")
+        note_html = ""
+        if isinstance(note, str) and note.strip():
+            shown = strip_for_text(note)
+            if shown:
+                note_html = f"<br><small>{html.escape(shown)}</small>"
         rows += (
             f"<tr><td>{int(finding['port'])}</td><td>{html.escape(str(finding['service']))}</td>"
             f"<td><strong>{html.escape(str(finding['severity']))}</strong></td>"
-            f"<td>{html.escape(str(finding['title']))}<br><small>{html.escape(str(finding['fix']))}</small></td></tr>"
+            f"<td>{html.escape(str(finding['title']))}<br><small>{html.escape(str(finding['fix']))}</small>"
+            f"{note_html}</td></tr>"
         )
     return rows or "<tr><td colspan='4'>No risky open ports found.</td></tr>"
 

@@ -2860,7 +2860,7 @@ const card = context.renderDevice({
   notes: payload + "notes",
   trusted: false,
   open_ports: [{ port: 80, banner: payload + "banner" }],
-  findings: [{ port: 23, service: "telnet", severity: payload + "severity", title: payload + "title", fix: payload + "fix" }],
+  findings: [{ port: 23, service: "telnet", severity: payload + "severity", title: payload + "title", fix: payload + "fix", note: payload + "note" }],
 });
 const classes = [];
 walk(card, (item) => {
@@ -2870,11 +2870,20 @@ walk(card, (item) => {
 const shown = texts(card);
 if (shown.includes("&lt;script&gt;")) process.exit(2);
 for (const field of ["hostname", "label", "owner", "tag", "notes", "banner", "location",
-  "criticality", "reason", "name", "model", "maker", "switch", "port", "title", "fix"]) {
+  "criticality", "reason", "name", "model", "maker", "switch", "port", "title", "fix", "note"]) {
   if (!shown.includes(payload + field)) {
     console.error("missing " + field);
     process.exit(3);
   }
+}
+const sentence = "Based on the service banner only; coverage is limited and distro backports may already fix this.";
+const bannerCard = context.renderDevice({
+  ip: "192.168.50.12", mac: "aa:bb:cc:dd:ee:12", trusted: false, open_ports: [],
+  findings: [{ port: 22, service: "ssh", severity: "high", title: "t", fix: "f", note: sentence }],
+});
+if (!texts(bannerCard).includes(sentence)) {
+  console.error("banner sentence missing");
+  process.exit(3);
 }
 for (const cls of classes) {
   for (const token of cls.split(/\s+/)) {
