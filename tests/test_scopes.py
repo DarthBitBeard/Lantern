@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lantern.scopes import load_scopes, select_scope
+from lantern.scopes import load_disabled_checks, load_scopes, select_scope
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "lantern.toml"
@@ -66,6 +66,37 @@ class LoadScopesTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             load_scopes(self.path)
         self.assertIn("note", str(ctx.exception))
+
+    def test_checks_table_accepts_only_known_ids(self):
+        self.write(
+            '[scopes.home]\nsubnet = "10.0.0.0/24"\n\n'
+            '[checks]\ndisabled = ["port-rules"]\n'
+        )
+        self.assertEqual(load_disabled_checks(self.path), frozenset({"port-rules"}))
+        self.assertEqual(load_scopes(self.path)["home"].subnet, "10.0.0.0/24")
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\nplugins = true\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("plugins", str(ctx.exception))
+        self.assertIn("disabled", str(ctx.exception))
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\ndisabled = ["nope"]\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_disabled_checks(self.path)
+        self.assertIn("port-rules", str(ctx.exception))
+        self.assertIn("nope", str(ctx.exception))
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\ndisabled = "port-rules"\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("list of check ids", str(ctx.exception))
+
+        self.write("[checks]\ndisabled = []\n")
+        self.assertEqual(load_disabled_checks(self.path), frozenset())
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("no [scopes]", str(ctx.exception))
 
     def test_rejects_subnets_array_and_bad_types(self):
         self.write('[scopes.home]\nsubnets = ["10.0.0.0/24", "10.0.1.0/24"]\n')

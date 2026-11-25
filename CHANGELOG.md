@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Built-in checks. `lantern scan` and `lantern web` run a fixed list of checks over what a scan already collected. The only check is `port-rules`, and its findings are unchanged. `--disable-check ID` (repeatable) turns a check off, and so does `[checks] disabled` in the scope file when that file is already being read (`scan --config`, `--scope`, or `--all`, and `web --config`). An unknown id exits 2 and names the ids that exist. `lantern checks` lists each check and whether it is on. It does not scan. The dashboard and the API have no control that changes this. There is no vulnerability dataset in this version, so `lantern checks` reports the dataset as missing.
+
 ## 1.6.1 - 2026-11-23
 
 Quieter scans from the tray, and a dashboard that puts what matters first.

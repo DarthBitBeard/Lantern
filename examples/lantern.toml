@@ -14,6 +14,13 @@
 # is rejected, so this file cannot turn on excludes, extra CIDRs, or a
 # different port list.
 #
+# The only other root table is [checks], and its only key is "disabled":
+# a list of check ids to turn off (see `lantern checks`). An unknown id
+# is refused. The dashboard and the API cannot change this.
+#
+# [checks]
+# disabled = ["port-rules"]
+#
 #   python3 -m lantern scopes --config lantern.toml
 #   python3 -m lantern scan --config lantern.toml --scope home
 #   python3 -m lantern scan --config lantern.toml --scope home --scope lab

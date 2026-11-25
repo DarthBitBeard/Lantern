@@ -11,7 +11,7 @@ class EngineProgressTests(unittest.TestCase):
         seen = []
         hosts = [f"10.0.0.{i}" for i in range(1, 11)]
 
-        def scan_one(ip, macs, ports, *, fingerprint=True):
+        def scan_one(ip, macs, ports, *, fingerprint=True, **_extra):
             return {"ip": ip, "mac": None, "hostname": None, "open_ports": [], "findings": [], "label": None}
 
         with mock.patch.object(engine, "arp_table", return_value={}), \

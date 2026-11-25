@@ -509,6 +509,80 @@ class CliTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def test_checks_command_lists_ids_and_does_not_create_a_database(self):
+        previous = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            code, out, err = self.run_cli("checks")
+            self.assertEqual(code, 0, err)
+            self.assertIn("port-rules  enabled", out)
+            self.assertIn("dataset status: missing", out)
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(Path(self.db).exists())
+
+            code, out, err = self.run_cli("checks", "--disable-check", "port-rules")
+            self.assertEqual(code, 0, err)
+            self.assertIn("port-rules  disabled", out)
+
+            code, _, err = self.run_cli("checks", "--disable-check", "nope")
+            self.assertEqual(code, 2)
+            self.assertIn("port-rules", err)
+            self.assertIn("'nope'", err)
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(Path(self.db).exists())
+        finally:
+            os.chdir(previous)
+
+    def test_disable_check_leaves_demo_findings_empty_and_default_is_unchanged(self):
+        from lantern.ports import findings_for_ports
+
+        code, out, err = self.run_cli("scan", "--demo", "--format", "json")
+        self.assertEqual(code, 0, err)
+        scan = json.loads(out)
+        self.assertTrue(scan["devices"])
+        for device in scan["devices"]:
+            ports = [item["port"] for item in device["open_ports"]]
+            self.assertEqual(device["findings"], findings_for_ports(ports))
+
+        code, out, err = self.run_cli(
+            "scan", "--demo", "--disable-check", "port-rules", "--format", "json",
+        )
+        self.assertEqual(code, 0, err)
+        disabled = json.loads(out)
+        self.assertTrue(disabled["devices"])
+        for device in disabled["devices"]:
+            self.assertEqual(device["findings"], [])
+            self.assertTrue(device["open_ports"])
+
+    def test_config_disabled_checks_reach_the_scan_and_unknown_ids_exit_2(self):
+        bad = self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.9.9.0/24"\n\n[checks]\ndisabled = ["nope"]\n',
+            name="bad.toml",
+        )
+        code, _, err = self.run_cli("scan", "--config", str(bad))
+        self.assertEqual(code, 2)
+        self.assertIn("port-rules", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(Path(self.db).exists())
+
+        code, _, err = self.run_cli("web", "--disable-check", "nope")
+        self.assertEqual(code, 2)
+        self.assertIn("Valid checks", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(Path(self.db).exists())
+
+        path = self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.9.9.8/24"\n\n[checks]\ndisabled = ["port-rules"]\n'
+        )
+        with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
+            code, _, err = self.run_cli("scan", "--config", str(path), "--format", "json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run_scan.call_args.kwargs["disabled"], frozenset({"port-rules"}))
+
+        code, out, err = self.run_cli("checks", "--config", str(path))
+        self.assertEqual(code, 0, err)
+        self.assertIn("port-rules  disabled", out)
+
     def test_scopes_command_lists_without_creating_a_database_or_scanning(self):
         path = self._write_scopes(
             '[scopes.home]\nsubnet = "192.168.1.50/24"\ndescription = "House"\n'
