@@ -287,7 +287,11 @@ function renderSummary(scan, diff) {
   mount(el, cards);
   const which = viewingId === null ? "Latest" : `Scan #${scan.id}`;
   const scopeText = scan.scope_name ? ` | ${scan.scope_name}` : "";
-  $("status").textContent = `${which} | ${scan.subnet}${scopeText} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}`;
+  const recorded = scan.checks;
+  const checksText = !recorded
+    ? " | checks: port rules only (saved before check records)"
+    : ` | vulnerability data ${recorded.dataset_version || recorded.dataset_status || "missing"}`;
+  $("status").textContent = `${which} | ${scan.subnet}${scopeText} | ${formatTime(scan.started_at)}${scan.demo ? " | demo" : ""}${checksText}`;
 }
 
 function labeledLine(label, value) {
@@ -735,12 +739,20 @@ function renderDevice(device) {
     .map((p) => [p.port, serviceLabel(p.fingerprint)])
     .filter(([, label]) => label)
     .map(([port, label]) => `${port} ${label}`);
-  const findings = (device.findings || []).map((f) => node("li", {}, [
-    badge(f.severity, BADGE_CLASS),
-    node("strong", { text: ` ${f.port} ${f.service || ""}:` }),
-    ` ${f.title || ""}`,
-    node("small", { text: f.fix || "" }),
-  ]));
+  const findings = (device.findings || []).map((f) => {
+    const bits = [
+      badge(f.severity, BADGE_CLASS),
+      node("strong", { text: ` ${f.port} ${f.service || ""}:` }),
+      ` ${f.title || ""}`,
+      node("small", { text: f.fix || "" }),
+    ];
+    if (f.evidence) bits.push(node("small", { text: ` ${f.evidence}` }));
+    if (Array.isArray(f.refs) && f.refs.length) {
+      bits.push(node("small", { text: ` Refs: ${f.refs.join(", ")}` }));
+    }
+    if (f.note) bits.push(node("small", { text: ` ${f.note}` }));
+    return node("li", {}, bits);
+  });
   const trust = device.trusted
     ? node("span", { className: "badge trusted", text: "trusted" })
     : node("span", { className: "badge unknown", text: "unknown" });

@@ -105,7 +105,10 @@ _DEVICE_COLUMNS = (
     # Added in 1.3.0.
     "vendor", "private_mac",
 )
-_FINDING_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "severity", "title", "fix")
+_FINDING_COLUMNS = (
+    "scan_id", "ip", "mac", "port", "service", "severity", "title", "fix",
+    "check_id", "id", "refs", "confidence",
+)
 _HISTORY_COLUMNS = ("id", "started_at", "subnet", "scope_name", "demo", "device_count")
 _SERVICE_COLUMNS = ("scan_id", "ip", "mac", "port", "service", "product", "version", "parse_status")
 
@@ -560,6 +563,15 @@ def _criticality(query: dict) -> str | None:
     if value is None:
         return None
     if value not in CRITICALITIES:
+        raise V1Error(400, "bad_request")
+    return value
+
+
+def _check_filter(query: dict) -> str | None:
+    value = _one(query, "check")
+    if value is None:
+        return None
+    if value not in {"port-rules", "vuln-match"}:
         raise V1Error(400, "bad_request")
     return value
 
@@ -1190,9 +1202,23 @@ def one_scan_document(conn, scan_id: int) -> dict:
     return body
 
 
+def _public_finding_fields(finding: dict) -> dict:
+    """Additive finding fields. A row saved before checks existed reads as port-rules."""
+    refs = finding.get("refs") if isinstance(finding.get("refs"), list) else []
+    return {
+        "check_id": finding.get("check_id") or "port-rules",
+        "id": finding.get("id"),
+        "refs": [str(ref) for ref in refs],
+        "confidence": finding.get("confidence") or "port",
+        "evidence": finding.get("evidence") or "",
+        "note": finding.get("note") or "",
+    }
+
+
 def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
     scan, devices = device_rows(conn, query, private=False)
     severity = _severity(query)
+    check = _check_filter(query)
     rows = []
     raw_by_ip: dict = {}
     for item in scan["devices"]:
@@ -1201,6 +1227,9 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
         raw = raw_by_ip[device["ip"]]
         for finding in raw.get("findings") or []:
             if severity is not None and finding.get("severity") != severity:
+                continue
+            extra = _public_finding_fields(finding)
+            if check is not None and extra["check_id"] != check:
                 continue
             rows.append({
                 "scan_id": scan["id"],
@@ -1211,6 +1240,7 @@ def findings_rows(conn, query: dict) -> tuple[dict, list[dict]]:
                 "severity": finding.get("severity") or "",
                 "title": finding.get("title") or "",
                 "fix": finding.get("fix") or "",
+                **extra,
             })
     _too_many(len(rows))
     rows.sort(key=lambda row: (
@@ -1319,8 +1349,19 @@ def scopes_document(conn) -> dict:
     }
 
 
-def status_document() -> dict:
-    return {"api_version": API_VERSION, "version": __version__, "role": "admin"}
+def status_document(conn=None) -> dict:
+    body = {"api_version": API_VERSION, "version": __version__, "role": "admin"}
+    if conn is not None:
+        from .vulndata import load_packaged
+
+        dataset = load_packaged()
+        body["checks"] = {
+            "dataset_source": "bundled",
+            "dataset_version": dataset.data_version,
+            "dataset_sha256": dataset.sha256,
+            "dataset_status": dataset.status,
+        }
+    return body
 
 
 def _cell(value) -> str:
@@ -1328,6 +1369,8 @@ def _cell(value) -> str:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return ";".join(str(item) for item in value)
     return str(value)
 
 

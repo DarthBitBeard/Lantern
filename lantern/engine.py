@@ -9,6 +9,7 @@ names in this module (`ping_host`, `tcp_alive`, `arp_table`, `scan_host`,
 
 from __future__ import annotations
 
+import contextvars
 import ipaddress
 import logging
 import threading
@@ -32,6 +33,17 @@ from .ports import DEFAULT_PORTS
 from .scanner import scan_host
 
 log = logging.getLogger(__name__)
+_scan_dataset: contextvars.ContextVar = contextvars.ContextVar("lantern_scan_dataset", default=None)
+
+
+def _remember_dataset(dataset) -> None:
+    """Keep the snapshot this scan used, so the save can record it."""
+    _scan_dataset.set(dataset)
+
+
+def current_scan_dataset():
+    """The dataset chosen for the scan that just ran in this context."""
+    return _scan_dataset.get()
 
 PING_WORKERS = 50
 TCP_DISCOVERY_WORKERS = 64
@@ -226,6 +238,7 @@ def scan_subnet(
     if demo_mode:
         devices, info = demo.demo_scan_1(), dict(demo.DEMO_NETWORK)
         _apply_checks(devices, dataset, disabled)
+        _remember_dataset(dataset)
         return devices, info
     network = validate_subnet(subnet_text)
     hosts = [str(ip) for ip in network.hosts()]
@@ -247,6 +260,7 @@ def scan_subnet(
             # SSDP/mDNS is optional enrichment; never lose the port scan over it.
             log.warning("device identity discovery failed (%s)", type(exc).__name__)
             found = {}
+    _remember_dataset(dataset)
     return devices, describe_network(network, devices, found, local_ip)
 
 

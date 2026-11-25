@@ -960,9 +960,10 @@ class CliExportTests(unittest.TestCase):
         self.assertNotIn("Traceback", out)
         parsed = list(csv.reader(io.StringIO(out, newline="")))
         self.assertEqual(
-            parsed[0],
+            parsed[0][:8],
             ["scan_id", "ip", "mac", "port", "service", "severity", "title", "fix"],
         )
+        self.assertEqual(parsed[0][8:], ["check_id", "id", "refs", "confidence"])
         self.assertEqual(len(parsed[1]), len(parsed[0]))
         row = dict(zip(parsed[0], parsed[1]))
         self.assertEqual(row["scan_id"], str(scan_id))
@@ -1629,5 +1630,59 @@ class FilteredBlobCapTests(unittest.TestCase):
                 [item["ip"] for item in shown],
                 ["10.2.0.41", "10.2.0.42"],
             )
+        finally:
+            conn.close()
+
+
+class FindingChecksTests(unittest.TestCase):
+    def test_old_findings_default_and_check_filter_and_csv_defuse(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        conn = connect(Path(folder.name) / "checks.db")
+        try:
+            hostile = [{
+                "port": 22,
+                "service": "ssh",
+                "severity": "high",
+                "title": "=cmd|'/c calc'!A0",
+                "fix": "Turn it off.",
+                "check_id": "vuln-match",
+                "id": "LV-9",
+                "refs": ["CVE-2024-1000"],
+                "confidence": "banner",
+                "evidence": "<script>alert(1)</script>",
+                "note": "Based on the service banner only; coverage is limited and distro backports may already fix this.",
+            }]
+            plain = [{
+                "port": 80,
+                "service": "HTTP",
+                "severity": "low",
+                "title": "Web service is open",
+                "fix": "Prefer HTTPS.",
+            }]
+            scan_id = save_scan(conn, "10.9.0.0/24", [
+                _device("10.9.0.2", findings=hostile),
+                _device("10.9.0.3", findings=plain),
+            ])
+            _scan, rows = v1.findings_rows(conn, {"scan_id": [str(scan_id)]})
+            by_port = {row["port"]: row for row in rows}
+            self.assertEqual(by_port[80]["check_id"], "port-rules")
+            self.assertEqual(by_port[80]["confidence"], "port")
+            self.assertEqual(by_port[80]["refs"], [])
+            self.assertIsNone(by_port[80]["id"])
+            self.assertEqual(by_port[22]["check_id"], "vuln-match")
+            self.assertEqual(by_port[22]["refs"], ["CVE-2024-1000"])
+            filtered = v1.findings_rows(conn, {"scan_id": [str(scan_id)], "check": ["vuln-match"]})[1]
+            self.assertEqual([row["port"] for row in filtered], [22])
+            with self.assertRaises(v1.V1Error):
+                v1.findings_rows(conn, {"scan_id": [str(scan_id)], "check": ["nope"]})
+            body, _content_type, _scan_id, _what, _chosen = v1.render_export(
+                conn, {"what": ["findings"], "format": ["csv"], "scan_id": [str(scan_id)]},
+                private=False,
+            )
+            text = body.decode("utf-8")
+            self.assertIn("check_id", text.splitlines()[0])
+            self.assertIn("'=cmd|", text)
+            self.assertIn("CVE-2024-1000", text)
         finally:
             conn.close()

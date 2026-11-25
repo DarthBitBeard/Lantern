@@ -254,7 +254,12 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
             topo = topology.map_switches(ips, community, devices, network.get("gateway_mac"))
         conn = connect(db_path)
         try:
-            scan_id = save_scan(conn, subnet, devices, demo=False, network=network, topology=topo)
+            from .checks import build_scan_checks
+
+            scan_id = save_scan(
+                conn, subnet, devices, demo=False, network=network, topology=topo,
+                checks=build_scan_checks(disabled, engine.current_scan_dataset()),
+            )
             if keep_days:
                 doomed = [i for i in scans_to_prune(conn, older_than_days=keep_days) if i != scan_id]
                 delete_scans(conn, doomed)
@@ -1343,7 +1348,7 @@ class LanternHandler(BaseHTTPRequestHandler):
             if path in ("/api/v1", "/api/v1/"):
                 raise V1Error(404, "not_found")
             if path == "/api/v1/status":
-                body = _finish(status_document())
+                body = _finish(status_document(conn))
                 self._send_bytes(200, body, content_type("json"))
                 return
             if path == "/api/v1/scopes":
@@ -1430,6 +1435,8 @@ class LanternHandler(BaseHTTPRequestHandler):
         conn = self._db()
         try:
             if path == "/api/status":
+                from .v1 import status_document
+
                 newest = list_scans(conn, limit=1)
                 self._send_json(200, {
                     "version": __version__,
@@ -1439,6 +1446,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                     "scan_running": _scan_lock.locked(),
                     "watch": self.watcher.status() if self.watcher else None,
                     "keep_days": self.keep_days,
+                    "checks": status_document(conn).get("checks"),
                 })
                 return
             if path == "/api/scan":

@@ -40,6 +40,32 @@ class ReportEscapeTests(unittest.TestCase):
         for field in ("scope", "hostname", "label", "owner", "location", "tag", "criticality", "notes", "banner"):
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;" + field, page)
 
+    def test_vulnerability_text_is_escaped_and_refs_are_not_links(self):
+        scan = _scan()
+        scan["checks"] = {
+            "dataset_version": "2026.1.0",
+            "dataset_status": "ok",
+            "dataset_source": "bundled",
+        }
+        scan["devices"][0]["findings"] = [{
+            "port": 22,
+            "service": "ssh",
+            "severity": "high",
+            "title": _PAYLOAD,
+            "fix": _PAYLOAD + "fix",
+            "note": "Based on the service banner only; coverage is limited and distro backports may already fix this.",
+            "evidence": _PAYLOAD + "evidence",
+            "refs": ["CVE-2024-1000"],
+        }]
+        page = to_html(scan)
+        self.assertNotIn("<script>", page)
+        self.assertIn("&lt;script&gt;", page)
+        self.assertIn("Based on the service banner only", page)
+        self.assertIn("CVE-2024-1000", page)
+        self.assertNotIn("href=", page)
+        self.assertIn("Vulnerability data: 2026.1.0 (bundled).", page)
+        self.assertIn("port rules only", to_html(_scan()))
+
     def test_json_round_trips_the_same_fields(self):
         scan = _scan()
         text = to_json(scan)

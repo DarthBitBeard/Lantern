@@ -67,7 +67,7 @@ class DeviceSeenTests(unittest.TestCase):
         raw = sqlite3.connect(self.path)
         raw.execute("DROP TABLE device_seen")
         raw.execute("DROP INDEX scans_scope_id")
-        raw.execute("DELETE FROM schema_version WHERE version = 8")
+        raw.execute("DELETE FROM schema_version WHERE version >= 8")
         raw.commit()
         raw.close()
         self.conn = store.connect(self.path)
