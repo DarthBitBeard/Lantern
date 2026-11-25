@@ -1,0 +1,774 @@
+{
+  "note": "Frozen port-rules findings. Compare scans to this file. Do not regenerate it from findings_for_ports.",
+  "together_ports": [
+    21,
+    22,
+    23,
+    25,
+    53,
+    80,
+    110,
+    135,
+    139,
+    143,
+    443,
+    445,
+    1433,
+    3306,
+    3389,
+    5432,
+    5900,
+    6379,
+    8080,
+    8443,
+    8888,
+    9000,
+    9090,
+    554,
+    1883,
+    2375,
+    9100,
+    9200,
+    11211,
+    27017,
+    32400,
+    8096,
+    111,
+    389,
+    873,
+    2049,
+    5984,
+    5985,
+    5986,
+    6443,
+    10250,
+    8123,
+    1,
+    9999,
+    65535
+  ],
+  "together": [
+    {
+      "port": 23,
+      "service": "Telnet",
+      "severity": "critical",
+      "title": "Telnet is open",
+      "fix": "Telnet sends everything, including passwords, in plain text. Turn Telnet off and use SSH instead."
+    },
+    {
+      "port": 6379,
+      "service": "Redis",
+      "severity": "critical",
+      "title": "Redis is open",
+      "fix": "Redis has no login by default. Bind it to localhost only, or set a strong password."
+    },
+    {
+      "port": 2375,
+      "service": "Docker API",
+      "severity": "critical",
+      "title": "Docker API is open without a login",
+      "fix": "Anyone who can reach this port controls the whole machine. Turn off the plain TCP Docker API, or protect it with TLS."
+    },
+    {
+      "port": 21,
+      "service": "FTP",
+      "severity": "high",
+      "title": "FTP is open",
+      "fix": "FTP sends passwords in plain text. Turn FTP off, or switch to SFTP."
+    },
+    {
+      "port": 445,
+      "service": "SMB",
+      "severity": "high",
+      "title": "Windows file sharing (SMB) is open",
+      "fix": "Fine inside your home if you use file sharing. Never expose it to the internet, and turn off SMBv1."
+    },
+    {
+      "port": 1433,
+      "service": "MSSQL",
+      "severity": "high",
+      "title": "SQL Server is open",
+      "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+    },
+    {
+      "port": 3306,
+      "service": "MySQL",
+      "severity": "high",
+      "title": "MySQL is open",
+      "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+    },
+    {
+      "port": 3389,
+      "service": "RDP",
+      "severity": "high",
+      "title": "Remote Desktop is open",
+      "fix": "RDP is a common break-in target. Turn it off when not in use, or reach it only over a VPN like Tailscale."
+    },
+    {
+      "port": 5432,
+      "service": "PostgreSQL",
+      "severity": "high",
+      "title": "PostgreSQL is open",
+      "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+    },
+    {
+      "port": 5900,
+      "service": "VNC",
+      "severity": "high",
+      "title": "VNC remote screen is open",
+      "fix": "VNC is often weakly protected. Turn it off, or use it only over a VPN."
+    },
+    {
+      "port": 9200,
+      "service": "Elasticsearch",
+      "severity": "high",
+      "title": "Elasticsearch is open",
+      "fix": "Elasticsearch has no login by default and exposes its data. Bind it to localhost, or turn on security."
+    },
+    {
+      "port": 11211,
+      "service": "Memcached",
+      "severity": "high",
+      "title": "Memcached is open",
+      "fix": "Memcached has no login and can leak its data. Bind it to localhost only."
+    },
+    {
+      "port": 27017,
+      "service": "MongoDB",
+      "severity": "high",
+      "title": "MongoDB is open",
+      "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+    },
+    {
+      "port": 2049,
+      "service": "NFS",
+      "severity": "high",
+      "title": "NFS file sharing is open",
+      "fix": "NFS trusts the network by default. Limit exports to named machines, and keep it off the internet."
+    },
+    {
+      "port": 5984,
+      "service": "CouchDB",
+      "severity": "high",
+      "title": "CouchDB is open",
+      "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+    },
+    {
+      "port": 5985,
+      "service": "WinRM",
+      "severity": "high",
+      "title": "Windows remote management (WinRM) is open",
+      "fix": "WinRM gives remote command access. Turn it off when not in use, or reach it only over a VPN."
+    },
+    {
+      "port": 10250,
+      "service": "kubelet",
+      "severity": "high",
+      "title": "Kubernetes kubelet is open",
+      "fix": "An open kubelet can run commands in containers. Turn off anonymous access and limit who can reach it."
+    },
+    {
+      "port": 25,
+      "service": "SMTP",
+      "severity": "medium",
+      "title": "Mail service is open",
+      "fix": "Only expected on a mail server. Otherwise turn it off."
+    },
+    {
+      "port": 110,
+      "service": "POP3",
+      "severity": "medium",
+      "title": "POP3 mail is open",
+      "fix": "Old mail protocol. Turn it off unless you know you need it."
+    },
+    {
+      "port": 135,
+      "service": "RPC",
+      "severity": "medium",
+      "title": "Windows RPC is open",
+      "fix": "Normal on Windows, but it should never be reachable from the internet."
+    },
+    {
+      "port": 139,
+      "service": "NetBIOS",
+      "severity": "medium",
+      "title": "NetBIOS is open",
+      "fix": "Old Windows sharing. Turn it off if you do not use old file sharing."
+    },
+    {
+      "port": 143,
+      "service": "IMAP",
+      "severity": "medium",
+      "title": "IMAP mail is open",
+      "fix": "Only expected on a mail server. Otherwise turn it off."
+    },
+    {
+      "port": 554,
+      "service": "RTSP",
+      "severity": "medium",
+      "title": "Camera video stream (RTSP) is open",
+      "fix": "Many cameras stream with no login here. Set a camera password and keep it off the internet."
+    },
+    {
+      "port": 1883,
+      "service": "MQTT",
+      "severity": "medium",
+      "title": "MQTT is open",
+      "fix": "MQTT brokers often allow anyone to read and send messages. Turn on a login, or bind it to the devices that need it."
+    },
+    {
+      "port": 111,
+      "service": "rpcbind",
+      "severity": "medium",
+      "title": "rpcbind (portmapper) is open",
+      "fix": "It lists the network services on this machine. Turn it off unless you use NFS."
+    },
+    {
+      "port": 389,
+      "service": "LDAP",
+      "severity": "medium",
+      "title": "LDAP directory is open",
+      "fix": "Plain LDAP sends logins unencrypted. Use LDAPS, and limit who can reach it."
+    },
+    {
+      "port": 873,
+      "service": "rsync",
+      "severity": "medium",
+      "title": "rsync is open",
+      "fix": "rsync shares often need no login. Require a password, or limit it to the machines that sync."
+    },
+    {
+      "port": 5986,
+      "service": "WinRM-TLS",
+      "severity": "medium",
+      "title": "Windows remote management over TLS is open",
+      "fix": "WinRM gives remote command access. Turn it off when not in use, or reach it only over a VPN."
+    },
+    {
+      "port": 6443,
+      "service": "Kubernetes API",
+      "severity": "medium",
+      "title": "Kubernetes API is open",
+      "fix": "Make sure anonymous access is off and only admins can reach it."
+    },
+    {
+      "port": 22,
+      "service": "SSH",
+      "severity": "low",
+      "title": "SSH is open",
+      "fix": "OK if you use it. Use key login, turn off password login, and keep it off the internet."
+    },
+    {
+      "port": 53,
+      "service": "DNS",
+      "severity": "low",
+      "title": "DNS is open",
+      "fix": "Expected on a router or Pi-hole/AdGuard. Make sure it is not open to the internet."
+    },
+    {
+      "port": 80,
+      "service": "HTTP",
+      "severity": "low",
+      "title": "Web service is open",
+      "fix": "Plain HTTP is not encrypted, so anything sent to it can be read on the network. Make sure it asks for a login, and prefer HTTPS."
+    },
+    {
+      "port": 8080,
+      "service": "HTTP-alt",
+      "severity": "low",
+      "title": "Web service is open on 8080",
+      "fix": "Check what app this is, and make sure it asks for a login."
+    },
+    {
+      "port": 8888,
+      "service": "HTTP-alt",
+      "severity": "low",
+      "title": "Web service is open on 8888",
+      "fix": "Check what app this is, and make sure it asks for a login."
+    },
+    {
+      "port": 9000,
+      "service": "HTTP-alt",
+      "severity": "low",
+      "title": "Web service is open on 9000",
+      "fix": "Check what app this is, and make sure it asks for a login."
+    },
+    {
+      "port": 9090,
+      "service": "HTTP-alt",
+      "severity": "low",
+      "title": "Web service is open on 9090",
+      "fix": "Check what app this is, and make sure it asks for a login."
+    },
+    {
+      "port": 9100,
+      "service": "Printer",
+      "severity": "low",
+      "title": "Printer port is open",
+      "fix": "Normal for a network printer. Keep its firmware updated and off the internet."
+    },
+    {
+      "port": 1,
+      "service": "unknown",
+      "severity": "low",
+      "title": "Unknown service on port 1",
+      "fix": "Find what app opened this port, and close it if you do not need it."
+    },
+    {
+      "port": 9999,
+      "service": "unknown",
+      "severity": "low",
+      "title": "Unknown service on port 9999",
+      "fix": "Find what app opened this port, and close it if you do not need it."
+    },
+    {
+      "port": 65535,
+      "service": "unknown",
+      "severity": "low",
+      "title": "Unknown service on port 65535",
+      "fix": "Find what app opened this port, and close it if you do not need it."
+    },
+    {
+      "port": 443,
+      "service": "HTTPS",
+      "severity": "info",
+      "title": "Secure web service is open",
+      "fix": "Normal for routers, cameras, and servers. Make sure it asks for a login."
+    },
+    {
+      "port": 8443,
+      "service": "HTTPS-alt",
+      "severity": "info",
+      "title": "Secure web service is open on 8443",
+      "fix": "Normal for routers and servers. Make sure it asks for a login."
+    },
+    {
+      "port": 32400,
+      "service": "Plex",
+      "severity": "info",
+      "title": "Plex is open",
+      "fix": "Normal for a Plex server. Keep Plex updated."
+    },
+    {
+      "port": 8096,
+      "service": "Jellyfin",
+      "severity": "info",
+      "title": "Jellyfin is open",
+      "fix": "Normal for a Jellyfin server. Make sure it asks for a login, and prefer HTTPS or VPN access remotely."
+    },
+    {
+      "port": 8123,
+      "service": "Home Assistant",
+      "severity": "info",
+      "title": "Home Assistant is open",
+      "fix": "Normal for Home Assistant. Make sure it asks for a login, and keep it updated."
+    }
+  ],
+  "one": {
+    "21": [
+      {
+        "port": 21,
+        "service": "FTP",
+        "severity": "high",
+        "title": "FTP is open",
+        "fix": "FTP sends passwords in plain text. Turn FTP off, or switch to SFTP."
+      }
+    ],
+    "22": [
+      {
+        "port": 22,
+        "service": "SSH",
+        "severity": "low",
+        "title": "SSH is open",
+        "fix": "OK if you use it. Use key login, turn off password login, and keep it off the internet."
+      }
+    ],
+    "23": [
+      {
+        "port": 23,
+        "service": "Telnet",
+        "severity": "critical",
+        "title": "Telnet is open",
+        "fix": "Telnet sends everything, including passwords, in plain text. Turn Telnet off and use SSH instead."
+      }
+    ],
+    "25": [
+      {
+        "port": 25,
+        "service": "SMTP",
+        "severity": "medium",
+        "title": "Mail service is open",
+        "fix": "Only expected on a mail server. Otherwise turn it off."
+      }
+    ],
+    "53": [
+      {
+        "port": 53,
+        "service": "DNS",
+        "severity": "low",
+        "title": "DNS is open",
+        "fix": "Expected on a router or Pi-hole/AdGuard. Make sure it is not open to the internet."
+      }
+    ],
+    "80": [
+      {
+        "port": 80,
+        "service": "HTTP",
+        "severity": "low",
+        "title": "Web service is open",
+        "fix": "Plain HTTP is not encrypted, so anything sent to it can be read on the network. Make sure it asks for a login, and prefer HTTPS."
+      }
+    ],
+    "110": [
+      {
+        "port": 110,
+        "service": "POP3",
+        "severity": "medium",
+        "title": "POP3 mail is open",
+        "fix": "Old mail protocol. Turn it off unless you know you need it."
+      }
+    ],
+    "135": [
+      {
+        "port": 135,
+        "service": "RPC",
+        "severity": "medium",
+        "title": "Windows RPC is open",
+        "fix": "Normal on Windows, but it should never be reachable from the internet."
+      }
+    ],
+    "139": [
+      {
+        "port": 139,
+        "service": "NetBIOS",
+        "severity": "medium",
+        "title": "NetBIOS is open",
+        "fix": "Old Windows sharing. Turn it off if you do not use old file sharing."
+      }
+    ],
+    "143": [
+      {
+        "port": 143,
+        "service": "IMAP",
+        "severity": "medium",
+        "title": "IMAP mail is open",
+        "fix": "Only expected on a mail server. Otherwise turn it off."
+      }
+    ],
+    "443": [
+      {
+        "port": 443,
+        "service": "HTTPS",
+        "severity": "info",
+        "title": "Secure web service is open",
+        "fix": "Normal for routers, cameras, and servers. Make sure it asks for a login."
+      }
+    ],
+    "445": [
+      {
+        "port": 445,
+        "service": "SMB",
+        "severity": "high",
+        "title": "Windows file sharing (SMB) is open",
+        "fix": "Fine inside your home if you use file sharing. Never expose it to the internet, and turn off SMBv1."
+      }
+    ],
+    "1433": [
+      {
+        "port": 1433,
+        "service": "MSSQL",
+        "severity": "high",
+        "title": "SQL Server is open",
+        "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+      }
+    ],
+    "3306": [
+      {
+        "port": 3306,
+        "service": "MySQL",
+        "severity": "high",
+        "title": "MySQL is open",
+        "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+      }
+    ],
+    "3389": [
+      {
+        "port": 3389,
+        "service": "RDP",
+        "severity": "high",
+        "title": "Remote Desktop is open",
+        "fix": "RDP is a common break-in target. Turn it off when not in use, or reach it only over a VPN like Tailscale."
+      }
+    ],
+    "5432": [
+      {
+        "port": 5432,
+        "service": "PostgreSQL",
+        "severity": "high",
+        "title": "PostgreSQL is open",
+        "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+      }
+    ],
+    "5900": [
+      {
+        "port": 5900,
+        "service": "VNC",
+        "severity": "high",
+        "title": "VNC remote screen is open",
+        "fix": "VNC is often weakly protected. Turn it off, or use it only over a VPN."
+      }
+    ],
+    "6379": [
+      {
+        "port": 6379,
+        "service": "Redis",
+        "severity": "critical",
+        "title": "Redis is open",
+        "fix": "Redis has no login by default. Bind it to localhost only, or set a strong password."
+      }
+    ],
+    "8080": [
+      {
+        "port": 8080,
+        "service": "HTTP-alt",
+        "severity": "low",
+        "title": "Web service is open on 8080",
+        "fix": "Check what app this is, and make sure it asks for a login."
+      }
+    ],
+    "8443": [
+      {
+        "port": 8443,
+        "service": "HTTPS-alt",
+        "severity": "info",
+        "title": "Secure web service is open on 8443",
+        "fix": "Normal for routers and servers. Make sure it asks for a login."
+      }
+    ],
+    "8888": [
+      {
+        "port": 8888,
+        "service": "HTTP-alt",
+        "severity": "low",
+        "title": "Web service is open on 8888",
+        "fix": "Check what app this is, and make sure it asks for a login."
+      }
+    ],
+    "9000": [
+      {
+        "port": 9000,
+        "service": "HTTP-alt",
+        "severity": "low",
+        "title": "Web service is open on 9000",
+        "fix": "Check what app this is, and make sure it asks for a login."
+      }
+    ],
+    "9090": [
+      {
+        "port": 9090,
+        "service": "HTTP-alt",
+        "severity": "low",
+        "title": "Web service is open on 9090",
+        "fix": "Check what app this is, and make sure it asks for a login."
+      }
+    ],
+    "554": [
+      {
+        "port": 554,
+        "service": "RTSP",
+        "severity": "medium",
+        "title": "Camera video stream (RTSP) is open",
+        "fix": "Many cameras stream with no login here. Set a camera password and keep it off the internet."
+      }
+    ],
+    "1883": [
+      {
+        "port": 1883,
+        "service": "MQTT",
+        "severity": "medium",
+        "title": "MQTT is open",
+        "fix": "MQTT brokers often allow anyone to read and send messages. Turn on a login, or bind it to the devices that need it."
+      }
+    ],
+    "2375": [
+      {
+        "port": 2375,
+        "service": "Docker API",
+        "severity": "critical",
+        "title": "Docker API is open without a login",
+        "fix": "Anyone who can reach this port controls the whole machine. Turn off the plain TCP Docker API, or protect it with TLS."
+      }
+    ],
+    "9100": [
+      {
+        "port": 9100,
+        "service": "Printer",
+        "severity": "low",
+        "title": "Printer port is open",
+        "fix": "Normal for a network printer. Keep its firmware updated and off the internet."
+      }
+    ],
+    "9200": [
+      {
+        "port": 9200,
+        "service": "Elasticsearch",
+        "severity": "high",
+        "title": "Elasticsearch is open",
+        "fix": "Elasticsearch has no login by default and exposes its data. Bind it to localhost, or turn on security."
+      }
+    ],
+    "11211": [
+      {
+        "port": 11211,
+        "service": "Memcached",
+        "severity": "high",
+        "title": "Memcached is open",
+        "fix": "Memcached has no login and can leak its data. Bind it to localhost only."
+      }
+    ],
+    "27017": [
+      {
+        "port": 27017,
+        "service": "MongoDB",
+        "severity": "high",
+        "title": "MongoDB is open",
+        "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+      }
+    ],
+    "32400": [
+      {
+        "port": 32400,
+        "service": "Plex",
+        "severity": "info",
+        "title": "Plex is open",
+        "fix": "Normal for a Plex server. Keep Plex updated."
+      }
+    ],
+    "8096": [
+      {
+        "port": 8096,
+        "service": "Jellyfin",
+        "severity": "info",
+        "title": "Jellyfin is open",
+        "fix": "Normal for a Jellyfin server. Make sure it asks for a login, and prefer HTTPS or VPN access remotely."
+      }
+    ],
+    "111": [
+      {
+        "port": 111,
+        "service": "rpcbind",
+        "severity": "medium",
+        "title": "rpcbind (portmapper) is open",
+        "fix": "It lists the network services on this machine. Turn it off unless you use NFS."
+      }
+    ],
+    "389": [
+      {
+        "port": 389,
+        "service": "LDAP",
+        "severity": "medium",
+        "title": "LDAP directory is open",
+        "fix": "Plain LDAP sends logins unencrypted. Use LDAPS, and limit who can reach it."
+      }
+    ],
+    "873": [
+      {
+        "port": 873,
+        "service": "rsync",
+        "severity": "medium",
+        "title": "rsync is open",
+        "fix": "rsync shares often need no login. Require a password, or limit it to the machines that sync."
+      }
+    ],
+    "2049": [
+      {
+        "port": 2049,
+        "service": "NFS",
+        "severity": "high",
+        "title": "NFS file sharing is open",
+        "fix": "NFS trusts the network by default. Limit exports to named machines, and keep it off the internet."
+      }
+    ],
+    "5984": [
+      {
+        "port": 5984,
+        "service": "CouchDB",
+        "severity": "high",
+        "title": "CouchDB is open",
+        "fix": "Database ports should only be reachable by the apps that need them, never by the whole network."
+      }
+    ],
+    "5985": [
+      {
+        "port": 5985,
+        "service": "WinRM",
+        "severity": "high",
+        "title": "Windows remote management (WinRM) is open",
+        "fix": "WinRM gives remote command access. Turn it off when not in use, or reach it only over a VPN."
+      }
+    ],
+    "5986": [
+      {
+        "port": 5986,
+        "service": "WinRM-TLS",
+        "severity": "medium",
+        "title": "Windows remote management over TLS is open",
+        "fix": "WinRM gives remote command access. Turn it off when not in use, or reach it only over a VPN."
+      }
+    ],
+    "6443": [
+      {
+        "port": 6443,
+        "service": "Kubernetes API",
+        "severity": "medium",
+        "title": "Kubernetes API is open",
+        "fix": "Make sure anonymous access is off and only admins can reach it."
+      }
+    ],
+    "10250": [
+      {
+        "port": 10250,
+        "service": "kubelet",
+        "severity": "high",
+        "title": "Kubernetes kubelet is open",
+        "fix": "An open kubelet can run commands in containers. Turn off anonymous access and limit who can reach it."
+      }
+    ],
+    "8123": [
+      {
+        "port": 8123,
+        "service": "Home Assistant",
+        "severity": "info",
+        "title": "Home Assistant is open",
+        "fix": "Normal for Home Assistant. Make sure it asks for a login, and keep it updated."
+      }
+    ],
+    "0": [
+      {
+        "port": 0,
+        "service": "unknown",
+        "severity": "low",
+        "title": "Unknown service on port 0",
+        "fix": "Find what app opened this port, and close it if you do not need it."
+      }
+    ],
+    "1": [
+      {
+        "port": 1,
+        "service": "unknown",
+        "severity": "low",
+        "title": "Unknown service on port 1",
+        "fix": "Find what app opened this port, and close it if you do not need it."
+      }
+    ],
+    "65535": [
+      {
+        "port": 65535,
+        "service": "unknown",
+        "severity": "low",
+        "title": "Unknown service on port 65535",
+        "fix": "Find what app opened this port, and close it if you do not need it."
+      }
+    ]
+  }
+}

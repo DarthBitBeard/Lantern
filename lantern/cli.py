@@ -223,7 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p = sub.add_parser("scan", help="Scan your private subnet.")
     _add_db_arg(scan_p)
     scan_p.add_argument("--subnet", help="e.g. 192.168.1.0/24. Auto-detected if omitted.")
-    scan_p.add_argument("--config", help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml.")
+    scan_p.add_argument(
+        "--config",
+        help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml. "
+             "[checks] is read only when --config is set.",
+    )
     scan_p.add_argument(
         "--scope", action="append",
         help="Scope name in --config. Repeat to scan several, in the order given. "
@@ -261,7 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     checks_p.add_argument(
         "--config",
         help="TOML file whose [checks] disabled list is shown. "
-             "Default ./lantern.toml when that file exists.",
+             "Without --config, [checks] is not read.",
     )
     _add_disable_check_arg(checks_p)
 
@@ -375,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument(
         "--config",
         help="TOML file. When set, [checks] disabled applies to every dashboard scan. "
-             "Without --config the file is not read.",
+             "port-rules cannot be turned off. Without --config the file is not read.",
     )
     _add_disable_check_arg(web_p)
     web_p.add_argument(
@@ -470,6 +474,7 @@ def _add_disable_check_arg(parser: argparse.ArgumentParser) -> None:
         metavar="ID",
         help="Turn off this check. Repeat to turn off more than one. "
              "`lantern checks` lists the ids. An unknown id exits 2 and names the valid ones. "
+             "port-rules cannot be turned off until a scan records which checks ran. "
              "The dashboard and the API cannot change this.",
     )
 
@@ -1043,41 +1048,53 @@ def _scope_config_path(args) -> Path:
 
 
 def _checks_config_path(args) -> Path | None:
-    """The TOML file whose ``[checks]`` table applies, or None when no file is in use.
+    """The TOML file whose ``[checks]`` table applies, or None.
 
-    ``scan`` reads it when ``--config``, ``--scope``, or ``--all`` already
-    loads a scope file. ``web`` reads it only with ``--config``. ``checks``
-    reads ``--config``, or ``./lantern.toml`` when that file exists.
+    ``[checks]`` is read only from an explicit ``--config``. A
+    ``./lantern.toml`` in the working directory is not consulted, including
+    for ``scan --scope``, ``scan --all``, and ``lantern checks``.
     """
     explicit = getattr(args, "config", None)
     if explicit:
         return Path(explicit)
-    if args.command == "scan" and (getattr(args, "all", False) or _scope_names(args)):
-        return Path(DEFAULT_CONFIG_NAME)
-    if args.command == "checks":
-        default = Path(DEFAULT_CONFIG_NAME)
-        if default.is_file():
-            return default
     return None
 
 
-def _resolve_disabled(args) -> frozenset[str]:
-    """Check ids turned off by the flag and, when a config is in use, the file.
+def _announce_disabled(from_file: set[str], from_flag: list[str], path: Path | None) -> None:
+    """Name every check that was turned off. The file line includes the path."""
+    if from_file and path is not None:
+        names = ", ".join(sorted(from_file))
+        shown = assetlib.strip_for_text(str(path)) or "(config)"
+        print(f"Checks disabled by {shown}: {names}", file=sys.stderr)
+    flagged = sorted({name for name in from_flag if name not in from_file})
+    if flagged:
+        print("Checks disabled: " + ", ".join(flagged), file=sys.stderr)
 
-    An unknown id raises ValueError and names the valid ids. The scan does
-    not start.
+
+def _resolve_disabled(args) -> frozenset[str]:
+    """Check ids turned off by ``--disable-check`` and, only with ``--config``, the file.
+
+    An unknown id raises ValueError and names the valid ids. ``port-rules``
+    cannot be disabled until a scan records which checks ran. The scan does
+    not start. A check that is turned off is named on stderr.
     """
-    from .checks import REGISTRY, unknown_check_message
+    from .checks import LOCKED_CHECK_IDS, REGISTRY, locked_check_message, unknown_check_message
 
     disabled: set[str] = set()
+    from_file: set[str] = set()
     path = _checks_config_path(args)
     if path is not None:
-        disabled.update(load_disabled_checks(path))
+        from_file = set(load_disabled_checks(path))
+        disabled.update(from_file)
     names = list(getattr(args, "disable_check", None) or [])
     unknown = [name for name in names if name not in REGISTRY]
     if unknown:
         raise ValueError(unknown_check_message(unknown))
+    locked = sorted({name for name in names if name in LOCKED_CHECK_IDS})
+    if locked:
+        raise ValueError(locked_check_message(locked))
     disabled.update(names)
+    _announce_disabled(from_file, names, path)
     return frozenset(disabled)
 
 

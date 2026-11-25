@@ -1,8 +1,11 @@
 """Static checks over what a scan already collected.
 
 The registry is a fixed literal. A config file can disable a check by
-id and cannot add one. Nothing here loads plugins, discovers files, or
-runs user code, and nothing here touches the network.
+id and cannot add one. ``port-rules`` cannot be disabled until a scan
+records which checks ran: with it off, every device would be stored with
+no findings and would look like a clean network. Nothing here loads
+plugins, discovers files, or runs user code, and nothing here touches
+the network.
 """
 
 from __future__ import annotations
@@ -98,6 +101,11 @@ REGISTRY: dict[str, object] = {
     "port-rules": _port_rules,
 }
 
+# These stay on until a scan records which checks ran. Other ids in the
+# registry can still be disabled. port-rules is the only entry today;
+# turning it off would store an empty findings list.
+LOCKED_CHECK_IDS = frozenset({_PORT_CHECK_ID})
+
 
 def known_check_ids() -> tuple[str, ...]:
     """Check ids in registry order."""
@@ -112,11 +120,26 @@ def unknown_check_message(names: list[str]) -> str:
     return f"Unknown {noun} {shown}. Valid checks: {valid}."
 
 
+def locked_check_message(names: list[str]) -> str:
+    """Why these ids stay on until a scan records which checks ran."""
+    shown = ", ".join(repr(name) for name in names)
+    noun = "Check" if len(names) == 1 else "Checks"
+    return f"{noun} {shown} cannot be disabled until a scan records which checks ran."
+
+
 def validate_disabled(disabled: frozenset[str]) -> None:
-    """Reject an id that is not in the registry. The scan does not start."""
+    """Reject an unknown id, and an id that cannot be turned off yet.
+
+    The scan does not start. Ids must match the registry exactly: case and
+    surrounding whitespace are not folded.
+    """
+    disabled = frozenset(disabled)
     unknown = [name for name in disabled if name not in REGISTRY]
     if unknown:
         raise ValueError(unknown_check_message(sorted(unknown)))
+    locked = sorted(name for name in disabled if name in LOCKED_CHECK_IDS)
+    if locked:
+        raise ValueError(locked_check_message(locked))
 
 
 def run_checks(obs: Observation, dataset: object, disabled: frozenset[str]) -> list[dict]:

@@ -521,8 +521,12 @@ class CliTests(unittest.TestCase):
             self.assertFalse(Path(self.db).exists())
 
             code, out, err = self.run_cli("checks", "--disable-check", "port-rules")
-            self.assertEqual(code, 0, err)
-            self.assertIn("port-rules  disabled", out)
+            self.assertEqual(code, 2)
+            self.assertIn("cannot be disabled", err)
+            self.assertIn("'port-rules'", err)
+            self.assertNotIn("port-rules  disabled", out)
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(Path(self.db).exists())
 
             code, _, err = self.run_cli("checks", "--disable-check", "nope")
             self.assertEqual(code, 2)
@@ -533,8 +537,26 @@ class CliTests(unittest.TestCase):
         finally:
             os.chdir(previous)
 
-    def test_disable_check_leaves_demo_findings_empty_and_default_is_unchanged(self):
+    def test_port_rules_cannot_be_disabled_and_the_default_scan_is_unchanged(self):
         from lantern.ports import findings_for_ports
+
+        code, out, err = self.run_cli(
+            "scan", "--demo", "--disable-check", "port-rules", "--format", "json",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "Check 'port-rules' cannot be disabled until a scan records which checks ran.",
+            err,
+        )
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(out, "")
+        self.assertFalse(Path(self.db).exists())
+
+        code, _, err = self.run_cli("web", "--disable-check", "port-rules")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be disabled", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(Path(self.db).exists())
 
         code, out, err = self.run_cli("scan", "--demo", "--format", "json")
         self.assertEqual(code, 0, err)
@@ -543,16 +565,7 @@ class CliTests(unittest.TestCase):
         for device in scan["devices"]:
             ports = [item["port"] for item in device["open_ports"]]
             self.assertEqual(device["findings"], findings_for_ports(ports))
-
-        code, out, err = self.run_cli(
-            "scan", "--demo", "--disable-check", "port-rules", "--format", "json",
-        )
-        self.assertEqual(code, 0, err)
-        disabled = json.loads(out)
-        self.assertTrue(disabled["devices"])
-        for device in disabled["devices"]:
-            self.assertEqual(device["findings"], [])
-            self.assertTrue(device["open_ports"])
+        self.assertNotIn("Checks disabled", err)
 
     def test_config_disabled_checks_reach_the_scan_and_unknown_ids_exit_2(self):
         bad = self._write_scopes(
@@ -574,14 +587,157 @@ class CliTests(unittest.TestCase):
         path = self._write_scopes(
             '[scopes.lab]\nsubnet = "10.9.9.8/24"\n\n[checks]\ndisabled = ["port-rules"]\n'
         )
-        with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
+        with mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("scanned")):
             code, _, err = self.run_cli("scan", "--config", str(path), "--format", "json")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(run_scan.call_args.kwargs["disabled"], frozenset({"port-rules"}))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be disabled", err)
+        self.assertIn("'port-rules'", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("Checks disabled", err)
+        self.assertFalse(Path(self.db).exists())
 
         code, out, err = self.run_cli("checks", "--config", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be disabled", err)
+        self.assertNotIn("port-rules  disabled", out)
+
+    def test_other_checks_can_be_disabled_and_are_named_on_stderr(self):
+        from lantern.ports import findings_for_ports
+
+        def extra(*_args):
+            return []
+
+        path = self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.9.9.8/24"\n\n'
+            '[checks]\ndisabled = ["sample-check"]\n',
+            name="sample.toml",
+        )
+        with mock.patch.dict("lantern.checks.REGISTRY", {"sample-check": extra, "other-check": extra}):
+            code, out, err = self.run_cli(
+                "scan", "--demo", "--disable-check", "other-check", "--format", "json",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Checks disabled: other-check", err)
+            self.assertNotIn("Checks disabled by", err)
+            for device in json.loads(out)["devices"]:
+                ports = [item["port"] for item in device["open_ports"]]
+                self.assertEqual(device["findings"], findings_for_ports(ports))
+
+            with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
+                code, _, err = self.run_cli(
+                    "scan", "--config", str(path), "--disable-check", "other-check",
+                    "--format", "json",
+                )
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"Checks disabled by {path}: sample-check", err)
+            self.assertIn("Checks disabled: other-check", err)
+            self.assertEqual(
+                run_scan.call_args.kwargs["disabled"],
+                frozenset({"sample-check", "other-check"}),
+            )
+
+            code, out, err = self.run_cli(
+                "checks", "--disable-check", "sample-check", "--disable-check", "sample-check",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("Checks disabled: sample-check", err)
+            self.assertEqual(err.count("sample-check"), 1)
+            self.assertIn("sample-check  disabled", out)
+            self.assertIn("port-rules", out)
+            self.assertIn("enabled", out)
+
+    def test_check_ids_reject_case_and_whitespace(self):
+        for bad in ("Port-Rules", "PORT-RULES", " port-rules", "port-rules ", "port-rules\t", "port-rules\n"):
+            code, _, err = self.run_cli("checks", "--disable-check", bad)
+            self.assertEqual(code, 2, bad)
+            self.assertIn(repr(bad), err)
+            self.assertIn("Valid checks", err)
+            self.assertNotIn("cannot be disabled", err)
+            self.assertNotIn("Traceback", err)
+
+        for bad in ("Port-Rules", " port-rules", "port-rules "):
+            path = self._write_scopes(
+                "[checks]\ndisabled = " + json.dumps([bad]) + "\n",
+                name="case.toml",
+            )
+            code, _, err = self.run_cli("checks", "--config", str(path))
+            self.assertEqual(code, 2, bad)
+            self.assertIn(repr(bad), err)
+            self.assertIn("Valid checks", err)
+            self.assertNotIn("cannot be disabled", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_implicit_lantern_toml_does_not_disable_checks(self):
+        self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.8.8.0/24"\n\n'
+            '[checks]\ndisabled = ["port-rules"]\n'
+        )
+        previous = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            with mock.patch.object(cli, "scan_subnet", return_value=([], {})) as run_scan:
+                code, out, err = self.run_cli("scan", "--scope", "lab", "--format", "json")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["subnet"], "10.8.8.0/24")
+            self.assertEqual(run_scan.call_args.kwargs["disabled"], frozenset())
+            self.assertNotIn("Checks disabled", err)
+            self.assertNotIn("cannot be disabled", err)
+
+            with mock.patch.object(engine, "scan_hosts", return_value=[]) as scan_hosts:
+                code, _, err = self.run_cli("scan", "--all", "--format", "json")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(scan_hosts.call_args.kwargs["disabled"], frozenset())
+            self.assertNotIn("Checks disabled", err)
+
+            code, out, err = self.run_cli("checks")
+            self.assertEqual(code, 0, err)
+            self.assertIn("port-rules  enabled", out)
+            self.assertNotIn("cannot be disabled", err)
+            self.assertNotIn("Checks disabled", err)
+        finally:
+            os.chdir(previous)
+
+        path = Path(self.tmp.name) / "lantern.toml"
+        with mock.patch.object(cli, "scan_subnet", side_effect=AssertionError("scanned")):
+            code, _, err = self.run_cli("scan", "--config", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be disabled", err)
+        self.assertIn("'port-rules'", err)
+
+    def test_config_path_in_the_disabled_notice_is_stripped(self):
+        def extra(*_args):
+            return []
+
+        nasty = "x\x1b]0;pwned\x07\u202e\u200b.toml"
+        path = self._write_scopes(
+            '[scopes.lab]\nsubnet = "10.9.9.0/24"\n\n[checks]\ndisabled = ["sample-check"]\n',
+            name=nasty,
+        )
+        with mock.patch.dict("lantern.checks.REGISTRY", {"sample-check": extra}), \
+                mock.patch.object(cli, "scan_subnet", return_value=([], {})):
+            code, _, err = self.run_cli("scan", "--config", str(path), "--format", "json")
         self.assertEqual(code, 0, err)
-        self.assertIn("port-rules  disabled", out)
+        self.assertIn("Checks disabled by ", err)
+        self.assertIn("sample-check", err)
+        for char in ("\x1b", "\x07", "\u202e", "\u200b"):
+            self.assertNotIn(char, err)
+
+    def test_deeply_nested_toml_exits_2_without_a_traceback(self):
+        text = "a = " + ("[" * 2000) + ("]" * 2000) + "\n"
+        self.assertLess(len(text.encode()), 64 * 1024)
+        path = self._write_scopes(text, name="deep.toml")
+        for args in (
+            ("checks", "--config", str(path)),
+            ("scopes", "--config", str(path)),
+            ("scan", "--config", str(path)),
+        ):
+            code, out, err = self.run_cli(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("nested too deeply", err)
+            self.assertNotIn("Traceback", err)
+            self.assertNotIn("Traceback", out)
+            self.assertNotIn("maximum recursion", err)
+        self.assertFalse(Path(self.db).exists())
 
     def test_scopes_command_lists_without_creating_a_database_or_scanning(self):
         path = self._write_scopes(

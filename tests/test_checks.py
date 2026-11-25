@@ -11,6 +11,7 @@ from lantern.checks import (
     REGISTRY,
     Observation,
     describe_checks,
+    locked_check_message,
     run_checks,
     unknown_check_message,
     validate_disabled,
@@ -73,7 +74,11 @@ class _PurityVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _call_name(node.func)
-        if name in _BANNED_CALLS:
+        # getattr(builtins, "ev" + "al") never names eval, so matching the
+        # called function's name would miss it. Any getattr here is refused.
+        if name == "getattr":
+            self.errors.append(f"{self.path.name}: calls getattr")
+        elif name in _BANNED_CALLS:
             allowed = (
                 name == "open"
                 and self.path.name == "vulndata.py"
@@ -109,20 +114,29 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(keys, ["port-rules"])
         self.assertEqual(tuple(REGISTRY), ("port-rules",))
 
-    def test_port_rules_are_byte_identical_to_findings_for_ports(self):
-        ports = list(PORT_RULES) + [1, 9999, 65535]
-        direct = findings_for_ports(ports)
-        via = run_checks(Observation(open_ports=tuple(ports)), None, frozenset())
-        self.assertEqual(via, direct)
-        self.assertEqual(json.dumps(via), json.dumps(direct))
-        # One port at a time, including every rule and an unknown port.
-        for port in list(PORT_RULES) + [0, 1, 65535]:
-            one = run_checks(Observation(open_ports=(port,)), None, frozenset())
-            self.assertEqual(json.dumps(one), json.dumps(findings_for_ports([port])))
+    def test_port_rules_match_the_frozen_fixture(self):
+        """Stored findings match a fixed fixture, not the live findings function."""
+        fixture = json.loads(
+            (ROOT / "tests" / "fixtures" / "port_rules_golden.json").read_text(encoding="utf-8")
+        )
+        via = run_checks(
+            Observation(open_ports=tuple(fixture["together_ports"])), None, frozenset(),
+        )
+        self.assertEqual(via, fixture["together"])
+        self.assertEqual(json.dumps(via), json.dumps(fixture["together"]))
+        self.assertGreaterEqual(len(fixture["one"]), len(PORT_RULES))
+        for port_text, expected in fixture["one"].items():
+            one = run_checks(Observation(open_ports=(int(port_text),)), None, frozenset())
+            self.assertEqual(json.dumps(one), json.dumps(expected), port_text)
 
     def test_disabled_check_is_skipped_and_unknown_id_is_refused(self):
         obs = Observation(open_ports=(23, 80))
-        self.assertEqual(run_checks(obs, None, frozenset({"port-rules"})), [])
+        with self.assertRaises(ValueError) as ctx:
+            run_checks(obs, None, frozenset({"port-rules"}))
+        self.assertEqual(
+            str(ctx.exception),
+            locked_check_message(["port-rules"]),
+        )
         with self.assertRaises(ValueError) as ctx:
             validate_disabled(frozenset({"nope"}))
         self.assertIn("port-rules", str(ctx.exception))
@@ -131,6 +145,33 @@ class RegistryTests(unittest.TestCase):
             unknown_check_message(["nope"]),
             "Unknown check 'nope'. Valid checks: port-rules.",
         )
+        for bad in ("Port-Rules", "PORT-RULES", " port-rules", "port-rules ", "port-rules\t"):
+            with self.assertRaises(ValueError, msg=bad) as ctx:
+                validate_disabled(frozenset({bad}))
+            self.assertIn(repr(bad), str(ctx.exception))
+            self.assertNotIn("cannot be disabled", str(ctx.exception))
+
+    def test_a_check_other_than_port_rules_can_be_disabled(self):
+        called = []
+
+        def extra(obs, dataset):
+            called.append(obs)
+            return []
+
+        obs = Observation(open_ports=(23,))
+        with mock.patch.dict(REGISTRY, {"sample-check": extra}):
+            found = run_checks(obs, None, frozenset({"sample-check"}))
+            self.assertEqual(called, [])
+            self.assertTrue(any(item["port"] == 23 for item in found))
+            text = describe_checks(frozenset({"sample-check"}))
+            self.assertIn("sample-check  disabled", text)
+            self.assertIn("port-rules", text)
+            self.assertIn("enabled", text)
+            validate_disabled(frozenset({"sample-check"}))
+            with self.assertRaises(ValueError) as ctx:
+                validate_disabled(frozenset({"port-rules", "sample-check"}))
+            self.assertIn("'port-rules'", str(ctx.exception))
+            self.assertIn("cannot be disabled", str(ctx.exception))
 
     def test_findings_sort_by_severity_and_keep_port_rule_order(self):
         ports = [443, 22, 3389, 6379, 23]
@@ -142,8 +183,9 @@ class RegistryTests(unittest.TestCase):
         text = describe_checks(frozenset())
         self.assertIn("port-rules  enabled", text)
         self.assertIn("dataset status: missing", text)
-        disabled = describe_checks(frozenset({"port-rules"}))
-        self.assertIn("port-rules  disabled", disabled)
+        with self.assertRaises(ValueError) as ctx:
+            describe_checks(frozenset({"port-rules"}))
+        self.assertIn("cannot be disabled", str(ctx.exception))
 
     def test_purity_ast_has_no_network_or_dynamic_code(self):
         errors = []
@@ -154,6 +196,18 @@ class RegistryTests(unittest.TestCase):
             visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
             errors.extend(visitor.errors)
         self.assertEqual(errors, [])
+
+    def test_purity_ast_rejects_getattr_access(self):
+        source = "\n".join((
+            "import builtins",
+            "getattr(builtins, 'ev' + 'al')",
+            "builtins.getattr(builtins, 'exec')",
+        ))
+        visitor = _PurityVisitor(Path("snippet.py"))
+        visitor.visit(ast.parse(source))
+        self.assertGreaterEqual(len(visitor.errors), 2)
+        self.assertTrue(all("getattr" in error for error in visitor.errors))
+        self.assertFalse(any("imports" in error for error in visitor.errors))
 
     def test_run_checks_does_not_open_a_socket(self):
         def boom(*_args, **_kwargs):
