@@ -26,7 +26,8 @@ from .discovery import (
     validate_subnet,
 )
 from .identify import discover_identities
-from .ports import DEFAULT_PORTS, findings_for_ports
+from .checks import Observation, run_checks, validate_disabled
+from .ports import DEFAULT_PORTS
 from .scanner import scan_host
 
 log = logging.getLogger(__name__)
@@ -36,14 +37,40 @@ TCP_DISCOVERY_WORKERS = 64
 HOST_WORKERS = 8  # hosts port-scanned at once; each uses up to MAX_PORT_WORKERS sockets
 
 
-def scan_one(ip: str, macs: dict[str, str], ports, *, fingerprint: bool = True) -> dict:
+def _observation(open_ports: list) -> Observation:
+    """Ports and any banner fingerprints the probe already recorded."""
+    numbers = []
+    fingerprints = []
+    for item in open_ports:
+        if not isinstance(item, dict) or not isinstance(item.get("port"), int):
+            continue
+        numbers.append(item["port"])
+        parsed = item.get("fingerprint")
+        if isinstance(parsed, dict):
+            fingerprints.append({**parsed, "port": item["port"]})
+    return Observation(open_ports=tuple(numbers), fingerprints=tuple(fingerprints))
+
+
+def _checked(open_ports: list, dataset, disabled: frozenset[str]) -> list:
+    return run_checks(_observation(open_ports), dataset, disabled)
+
+
+def scan_one(
+    ip: str,
+    macs: dict[str, str],
+    ports,
+    *,
+    fingerprint: bool = True,
+    disabled: frozenset[str] = frozenset(),
+    dataset: object = None,
+) -> dict:
     open_ports = scan_host(ip, ports, fingerprint=fingerprint)
     return {
         "ip": ip,
         "mac": macs.get(ip),
         "hostname": reverse_hostname(ip),
         "open_ports": open_ports,
-        "findings": findings_for_ports([p["port"] for p in open_ports]),
+        "findings": _checked(open_ports, dataset, disabled),
         "label": None,
     }
 
@@ -69,13 +96,16 @@ def _counting(fn, report):
 
 
 def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = True,
-               progress=None) -> list[dict]:
+               progress=None, disabled: frozenset[str] = frozenset(),
+               dataset: object = None) -> list[dict]:
     """Ping and port-scan these addresses. An empty list does not touch the network.
 
     ``progress(phase, done, total)``, when given, is called as work finishes:
     phase "discover" counts addresses checked, then "ports" counts live
     hosts whose ports were checked. It runs on worker threads.
     """
+    disabled = frozenset(disabled)
+    validate_disabled(disabled)
     if not hosts:
         return []
     report = progress or (lambda phase, done, total: None)
@@ -111,7 +141,9 @@ def scan_hosts(hosts: list[str], ports=DEFAULT_PORTS, *, fingerprint: bool = Tru
     def safe_scan_one(ip: str) -> dict | None:
         # One misbehaving host must not discard every other host's results.
         try:
-            return scan_one(ip, macs, ports, fingerprint=fingerprint)
+            return scan_one(
+                ip, macs, ports, fingerprint=fingerprint, disabled=disabled, dataset=dataset,
+            )
         except Exception as exc:
             log.warning("skipping %s: scan failed (%s)", ip, type(exc).__name__)
             return None
@@ -159,6 +191,17 @@ def describe_network(network, devices: list[dict], identities: dict | None = Non
     }
 
 
+def _apply_checks(devices: list[dict], dataset, disabled: frozenset[str]) -> None:
+    """Replace each device's findings with the registry result.
+
+    Demo devices are built with the same port rules. Running the registry
+    again keeps that output when nothing is disabled, and honours a
+    disabled set without a second copy of the rules.
+    """
+    for device in devices:
+        device["findings"] = _checked(device.get("open_ports") or [], dataset, disabled)
+
+
 def scan_subnet(
     subnet_text: str,
     ports=DEFAULT_PORTS,
@@ -166,6 +209,8 @@ def scan_subnet(
     *,
     fingerprint: bool = True,
     progress=None,
+    disabled: frozenset[str] = frozenset(),
+    dataset: object = None,
 ) -> tuple[list[dict], dict]:
     """Scan one private subnet. Returns (devices, network info for `save_scan`).
 
@@ -173,17 +218,26 @@ def scan_subnet(
     or no time. Raises ValueError for an invalid or unsafe subnet. Never
     touches the network in demo mode.
     """
+    disabled = frozenset(disabled)
+    validate_disabled(disabled)
     if demo_mode:
-        return demo.demo_scan_1(), dict(demo.DEMO_NETWORK)
+        devices, info = demo.demo_scan_1(), dict(demo.DEMO_NETWORK)
+        _apply_checks(devices, dataset, disabled)
+        return devices, info
     network = validate_subnet(subnet_text)
     hosts = [str(ip) for ip in network.hosts()]
     local_ip = local_ipv4_in(network)
     with ThreadPoolExecutor(max_workers=1) as pool:
         identities = pool.submit(discover_identities, network, local_ip)
         if progress is None:
-            devices = scan_hosts(hosts, ports, fingerprint=fingerprint)
+            devices = scan_hosts(
+                hosts, ports, fingerprint=fingerprint, disabled=disabled, dataset=dataset,
+            )
         else:
-            devices = scan_hosts(hosts, ports, fingerprint=fingerprint, progress=progress)
+            devices = scan_hosts(
+                hosts, ports, fingerprint=fingerprint, progress=progress,
+                disabled=disabled, dataset=dataset,
+            )
         try:
             found = identities.result()
         except Exception as exc:
@@ -199,6 +253,8 @@ def run_scan(
     demo_mode: bool = False,
     *,
     fingerprint: bool = True,
+    disabled: frozenset[str] = frozenset(),
+    dataset: object = None,
 ) -> list[dict]:
     """Discover live hosts on one private subnet and port-scan each.
 
@@ -206,4 +262,7 @@ def run_scan(
     machine's address. Raises ValueError for an invalid or unsafe subnet.
     Never touches the network in demo mode.
     """
-    return scan_subnet(subnet_text, ports, demo_mode, fingerprint=fingerprint)[0]
+    return scan_subnet(
+        subnet_text, ports, demo_mode, fingerprint=fingerprint,
+        disabled=disabled, dataset=dataset,
+    )[0]

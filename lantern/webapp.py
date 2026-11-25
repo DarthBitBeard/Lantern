@@ -232,7 +232,8 @@ class _SubnetGuess:
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
                   switches: tuple | None = None, fingerprint: bool = True,
                   keep_days: float | None = None,
-                  listeners: tuple = ()) -> None:
+                  listeners: tuple = (),
+                  disabled: frozenset[str] = frozenset()) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock.
 
     ``switches`` is (switch addresses, SNMP community) from `lantern web
@@ -245,6 +246,7 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
     try:
         devices, network = engine.scan_subnet(
             subnet, DEFAULT_PORTS, fingerprint=fingerprint, progress=job.report,
+            disabled=disabled,
         )
         topo = None
         if switches:
@@ -301,6 +303,7 @@ def start_scan_job(handler, subnet: str) -> bool:
                 handler.scan_job, handler.db_path, subnet, bool(handler.debug),
                 handler.switch_config, bool(handler.fingerprint),
                 handler.keep_days, tuple(handler.scan_listeners),
+                frozenset(getattr(handler, "disabled_checks", ())),
             ),
             name="lantern-scan",
             daemon=True,
@@ -1790,6 +1793,7 @@ def make_server(
     switches: tuple | None = None,
     fingerprint: bool = True,
     keep_days: float | None = None,
+    disabled_checks: frozenset[str] | None = None,
 ) -> ThreadingHTTPServer:
     """Build the dashboard server without starting it. Used by serve() and tests.
 
@@ -1858,6 +1862,7 @@ def make_server(
             "switch_config": tuple(switches) if switches else None,
             "fingerprint": bool(fingerprint),
             "keep_days": keep_days,
+            "disabled_checks": frozenset(disabled_checks or ()),
             "scan_listeners": [],
             "watcher": None,
             "subnet_guess": _SubnetGuess(),
@@ -2051,6 +2056,7 @@ def serve(
     open_url: str | None = None,
     switches: tuple | None = None,
     fingerprint: bool = True,
+    disabled_checks: frozenset[str] | None = None,
     tray: bool = False,
     tray_url: str | None = None,
     watch_seconds: int | None = None,
@@ -2069,6 +2075,7 @@ def serve(
         switches=switches,
         fingerprint=fingerprint,
         keep_days=keep_days,
+        disabled_checks=disabled_checks,
     )
     bound_host, bound_port = server.server_address[:2]
     handler = server.RequestHandlerClass

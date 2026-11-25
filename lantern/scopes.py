@@ -6,8 +6,10 @@ the rules used by `lantern scan --subnet`: RFC1918 only, at most 1024
 addresses, no loopback, no link-local, no IPv6.
 
 The file may only contain `[scopes.<name>]` tables with `subnet` and an
-optional `description`. Other keys are rejected so a config cannot quietly
-add excludes, extra CIDRs, or a different port list.
+optional `description`, plus an optional root `[checks]` table whose only
+key is `disabled` (a list of check ids). Other keys are rejected so a
+config cannot quietly add excludes, extra CIDRs, a different port list,
+or a check the program does not ship.
 
 A file larger than 64 KiB is refused before it is parsed. A scope file is
 a short list of names and subnets; the limit keeps a huge file from being
@@ -22,11 +24,15 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .assets import strip_for_text
+from .checks import LOCKED_CHECK_IDS, REGISTRY, locked_check_message, unknown_check_message
 from .discovery import validate_subnet
 
 DEFAULT_CONFIG_NAME = "lantern.toml"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SCOPE_KEYS = frozenset({"subnet", "description"})
+_ROOT_KEYS = frozenset({"scopes", "checks"})
+_CHECK_KEYS = frozenset({"disabled"})
 _MAX_DESCRIPTION = 200
 # 64 KiB is the same cap the dashboard uses for a POST body. A scope file
 # is a handful of names and subnets, so anything larger is refused outright.
@@ -38,6 +44,18 @@ class Scope:
     name: str
     subnet: str
     description: str | None = None
+
+
+@dataclass(frozen=True)
+class LoadedConfig:
+    """Named scopes, and the check ids the file turns off.
+
+    ``scopes`` is empty when the file has no ``[scopes]`` table.
+    ``disabled`` is empty when the file has no ``[checks]`` table.
+    """
+
+    scopes: dict[str, Scope]
+    disabled: frozenset[str]
 
 
 class ScopeConfigError(ValueError):
@@ -53,9 +71,15 @@ class UnknownScopeError(ValueError):
     """The name is not in a scope file that loaded."""
 
 
+def _shown_config_path(path: Path) -> str:
+    """Path text for an error. Control, bidi, and zero-width characters are removed."""
+    shown = strip_for_text(str(path))
+    return shown or "(path omitted)"
+
+
 def _scope_too_large(path: Path) -> ScopeConfigError:
     return ScopeConfigError(
-        f"Scope config {path} is too large. "
+        f"Scope config {_shown_config_path(path)} is too large. "
         "Lantern refuses scope files larger than 64 KiB."
     )
 
@@ -70,22 +94,63 @@ def _read_scope_text(path: Path) -> str:
     try:
         info = path.stat()
     except OSError as exc:
-        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(
+            f"Cannot read scope config {_shown_config_path(path)}: {strip_for_text(str(exc))}"
+        ) from exc
     if not stat.S_ISREG(info.st_mode):
-        raise ScopeConfigError(f"Cannot read scope config {path}: not a regular file.")
+        raise ScopeConfigError(
+            f"Cannot read scope config {_shown_config_path(path)}: not a regular file."
+        )
     if info.st_size > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         with path.open("rb") as handle:
             blob = handle.read(MAX_SCOPE_CONFIG_BYTES + 1)
     except OSError as exc:
-        raise ScopeConfigError(f"Cannot read scope config {path}: {exc}") from exc
+        raise ScopeConfigError(
+            f"Cannot read scope config {_shown_config_path(path)}: {strip_for_text(str(exc))}"
+        ) from exc
     if len(blob) > MAX_SCOPE_CONFIG_BYTES:
         raise _scope_too_large(path)
     try:
         return blob.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ScopeConfigError(f"Scope config {path} is not UTF-8.") from exc
+        raise ScopeConfigError(f"Scope config {_shown_config_path(path)} is not UTF-8.") from exc
+
+
+def load_config(path: str | Path) -> LoadedConfig:
+    """Read scopes and the optional ``[checks]`` table.
+
+    A file with neither table is refused. A file may contain checks and
+    no scopes; ``load_scopes`` still requires the scopes table.
+    """
+    path = Path(path)
+    shown = _shown_config_path(path)
+    text = _read_scope_text(path)
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ScopeConfigError(f"Invalid TOML in {shown}: {exc}") from exc
+    except RecursionError as exc:
+        raise ScopeConfigError(
+            f"Invalid TOML in {shown}: the file is nested too deeply."
+        ) from exc
+    if not isinstance(data, dict):
+        raise ScopeConfigError(f"{shown} is not a TOML table.")
+
+    extra_root = sorted(set(data) - _ROOT_KEYS)
+    if extra_root:
+        listed = ", ".join(extra_root)
+        raise ScopeConfigError(
+            f"Unsupported setting(s) in {shown}: {listed}. "
+            "The file may only contain [scopes.<name>] tables and an optional [checks] table."
+        )
+    if "scopes" not in data and "checks" not in data:
+        raise ScopeConfigError(f"{shown} has no [scopes] table.")
+
+    disabled = _parse_checks(data["checks"]) if "checks" in data else frozenset()
+    scopes = _parse_scopes(path, data["scopes"]) if "scopes" in data else {}
+    return LoadedConfig(scopes=scopes, disabled=disabled)
 
 
 def load_scopes(path: str | Path) -> dict[str, Scope]:
@@ -94,33 +159,55 @@ def load_scopes(path: str | Path) -> dict[str, Scope]:
     The returned dict keeps the file order. `subnet` is the normalized
     network (`192.168.1.5/24` becomes `192.168.1.0/24`). A file larger than
     64 KiB is refused before it is parsed; the error does not include the
-    file contents.
+    file contents. An optional ``[checks]`` table is checked and ignored
+    here; use ``load_disabled_checks`` for the ids it turns off.
     """
-    path = Path(path)
-    text = _read_scope_text(path)
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ScopeConfigError(f"Invalid TOML in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ScopeConfigError(f"{path} is not a TOML table.")
+    loaded = load_config(path)
+    if not loaded.scopes:
+        raise ScopeConfigError(f"{_shown_config_path(Path(path))} has no [scopes] table.")
+    return loaded.scopes
 
-    extra_root = sorted(set(data) - {"scopes"})
-    if extra_root:
-        listed = ", ".join(extra_root)
+
+def load_disabled_checks(path: str | Path) -> frozenset[str]:
+    """Check ids turned off by ``[checks] disabled``. Empty when that table is absent.
+
+    The rest of the file is validated too, including the scope tables when
+    they are present. An unknown check id is an error and names the valid ids.
+    ``port-rules`` is refused until a scan records which checks ran. Callers
+    that only need scopes use ``load_scopes``, which does not apply this list.
+    """
+    disabled = load_config(path).disabled
+    locked = sorted(name for name in disabled if name in LOCKED_CHECK_IDS)
+    if locked:
+        raise ScopeConfigError(locked_check_message(locked))
+    return disabled
+
+
+def _parse_checks(body: object) -> frozenset[str]:
+    if not isinstance(body, dict):
+        raise ScopeConfigError("[checks] must be a table.")
+    extra = sorted(set(body) - _CHECK_KEYS)
+    if extra:
+        listed = ", ".join(extra)
         raise ScopeConfigError(
-            f"Unsupported setting(s) in {path}: {listed}. "
-            "The file may only contain [scopes.<name>] tables."
+            f"Unsupported setting(s) in [checks]: {listed}. Only 'disabled' is allowed."
         )
-    if "scopes" not in data:
-        raise ScopeConfigError(f"{path} has no [scopes] table.")
-    raw_scopes = data["scopes"]
+    raw = body.get("disabled", [])
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ScopeConfigError("[checks] disabled must be a list of check ids.")
+    unknown = [item for item in raw if item not in REGISTRY]
+    if unknown:
+        raise ScopeConfigError(unknown_check_message(unknown))
+    return frozenset(raw)
+
+
+def _parse_scopes(path: Path, raw_scopes: object) -> dict[str, Scope]:
     if not isinstance(raw_scopes, dict):
         raise ScopeConfigError(
-            f"{path}: 'scopes' must be a table of named scopes, like [scopes.home]."
+            f"{_shown_config_path(path)}: 'scopes' must be a table of named scopes, like [scopes.home]."
         )
     if not raw_scopes:
-        raise ScopeConfigError(f"{path} does not define any scopes.")
+        raise ScopeConfigError(f"{_shown_config_path(path)} does not define any scopes.")
 
     scopes: dict[str, Scope] = {}
     folded: dict[str, str] = {}

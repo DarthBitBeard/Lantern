@@ -1,10 +1,13 @@
 """TOML scope files. Parsing only: nothing is scanned."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from lantern.scopes import load_scopes, select_scope
+from lantern import checks
+from lantern.scopes import _shown_config_path, load_disabled_checks, load_scopes, select_scope
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "lantern.toml"
@@ -66,6 +69,53 @@ class LoadScopesTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             load_scopes(self.path)
         self.assertIn("note", str(ctx.exception))
+
+    def test_checks_table_accepts_only_known_ids(self):
+        self.write(
+            '[scopes.home]\nsubnet = "10.0.0.0/24"\n\n'
+            '[checks]\ndisabled = ["port-rules"]\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            load_disabled_checks(self.path)
+        self.assertIn("cannot be disabled", str(ctx.exception))
+        self.assertIn("'port-rules'", str(ctx.exception))
+        self.assertEqual(load_scopes(self.path)["home"].subnet, "10.0.0.0/24")
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\nplugins = true\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("plugins", str(ctx.exception))
+        self.assertIn("disabled", str(ctx.exception))
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\ndisabled = ["nope"]\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_disabled_checks(self.path)
+        self.assertIn("port-rules", str(ctx.exception))
+        self.assertIn("nope", str(ctx.exception))
+
+        self.write('[scopes.home]\nsubnet = "10.0.0.0/24"\n\n[checks]\ndisabled = "port-rules"\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("list of check ids", str(ctx.exception))
+
+        self.write("[checks]\ndisabled = []\n")
+        self.assertEqual(load_disabled_checks(self.path), frozenset())
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(self.path)
+        self.assertIn("no [scopes]", str(ctx.exception))
+
+        def extra(*_args):
+            return []
+
+        with mock.patch.dict(checks.REGISTRY, {"sample-check": extra}):
+            self.write('[checks]\ndisabled = ["sample-check"]\n')
+            self.assertEqual(load_disabled_checks(self.path), frozenset({"sample-check"}))
+            for bad in ("Sample-Check", " sample-check", "sample-check "):
+                self.write("[checks]\ndisabled = " + json.dumps([bad]) + "\n")
+                with self.assertRaises(ValueError, msg=bad) as ctx:
+                    load_disabled_checks(self.path)
+                self.assertIn(repr(bad), str(ctx.exception))
+                self.assertNotIn("cannot be disabled", str(ctx.exception))
 
     def test_rejects_subnets_array_and_bad_types(self):
         self.write('[scopes.home]\nsubnets = ["10.0.0.0/24", "10.0.1.0/24"]\n')
@@ -174,6 +224,62 @@ class LoadScopesTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             load_scopes(self.tmp.name)
         self.assertIn("not a regular file", str(ctx.exception))
+
+    def test_error_messages_strip_control_bidi_and_zero_width_from_the_path(self):
+        controls = ("\x1b", "\x07")
+        marks = ("\u202a", "\u202e", "\u2066", "\u200b", "\u200c", "\u200d", "\ufeff")
+        unsafe = controls + marks
+
+        def assert_safe(message, label):
+            for char in unsafe:
+                self.assertNotIn(char, message, label)
+            self.assertIn("x", message)
+            self.assertIn(".toml", message)
+
+        # A missing path is never created, so control characters can be in
+        # the name on Windows, where those bytes are not a legal file name.
+        missing = Path(self.tmp.name) / ("x\x1b]0;pwned\x07" + "".join(marks) + ".toml")
+        shown = _shown_config_path(missing)
+        assert_safe(shown, "helper")
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(missing)
+        self.assertIn("Cannot read", str(ctx.exception))
+        assert_safe(str(ctx.exception), "missing")
+
+        # The other messages need a real file. These two marks are legal in a
+        # Windows name; the control characters above are not.
+        path = Path(self.tmp.name) / "x\u202e\u200b.toml"
+        path.write_text("this is not toml\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(path)
+        self.assertIn("Invalid TOML", str(ctx.exception))
+        assert_safe(str(ctx.exception), "toml")
+
+        path.write_text("\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(path)
+        self.assertIn("no [scopes]", str(ctx.exception))
+        assert_safe(str(ctx.exception), "empty")
+
+        path.write_bytes(b"y" * (64 * 1024 + 1))
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(path)
+        self.assertIn("too large", str(ctx.exception))
+        assert_safe(str(ctx.exception), "size")
+
+    def test_deeply_nested_toml_raises_without_a_recursion_message(self):
+        text = "a = " + ("[" * 2000) + ("]" * 2000) + "\n"
+        self.assertLess(len(text.encode()), 64 * 1024)
+        path = Path(self.tmp.name) / "deep\u202e\u200b.toml"
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            load_scopes(path)
+        message = str(ctx.exception)
+        self.assertIn("nested too deeply", message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("maximum recursion", message)
+        self.assertNotIn("\u202e", message)
+        self.assertNotIn("\u200b", message)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""CLI: scan, demo, diff, report, history, web. Local only, private subnets only."""
+"""CLI: scan, demo, diff, report, history, checks, web. Local only, private subnets only."""
 
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ from .discovery import (
     merged_address_count,
     validate_subnet,
 )
+from .checks import describe_checks
 from .ports import DEFAULT_PORTS
 from .report import describe_change, diff_to_json, multi_scope_html, to_html, to_json
 from .scopes import (
     DEFAULT_CONFIG_NAME,
     ScopeConfigError,
     UnknownScopeError,
+    load_disabled_checks,
     load_scopes,
     select_scope,
     validate_scope_name,
@@ -221,7 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p = sub.add_parser("scan", help="Scan your private subnet.")
     _add_db_arg(scan_p)
     scan_p.add_argument("--subnet", help="e.g. 192.168.1.0/24. Auto-detected if omitted.")
-    scan_p.add_argument("--config", help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml.")
+    scan_p.add_argument(
+        "--config",
+        help="TOML file of named scopes. With --scope or --all, default is ./lantern.toml. "
+             "[checks] is read only when --config is set.",
+    )
     scan_p.add_argument(
         "--scope", action="append",
         help="Scope name in --config. Repeat to scan several, in the order given. "
@@ -240,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
              "A fingerprint is what the service says about itself. It can be wrong or spoofed.",
     )
     scan_p.add_argument("--format", choices=["text", "json", "html"], default="text")
+    _add_disable_check_arg(scan_p)
     _add_switch_args(scan_p)
 
     topo_p = sub.add_parser(
@@ -250,6 +257,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_switch_args(topo_p)
     topo_p.add_argument("--scan-id", type=int, help="Scan to attach the map to. Default: the latest scan.")
     topo_p.add_argument("--format", choices=["text", "json"], default="text")
+
+    checks_p = sub.add_parser(
+        "checks",
+        help="List built-in checks and whether each is enabled. Does not scan.",
+    )
+    checks_p.add_argument(
+        "--config",
+        help="TOML file whose [checks] disabled list is shown. "
+             "Without --config, [checks] is not read.",
+    )
+    _add_disable_check_arg(checks_p)
 
     scopes_p = sub.add_parser("scopes", help="List named scan scopes from a TOML file. Does not scan.")
     scopes_p.add_argument("--config", help="TOML file, default ./lantern.toml.")
@@ -359,6 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     web_p.add_argument("--debug", action="store_true", help="Log each HTTP request to stderr.")
     web_p.add_argument(
+        "--config",
+        help="TOML file. When set, [checks] disabled applies to every dashboard scan. "
+             "port-rules cannot be turned off. Without --config the file is not read.",
+    )
+    _add_disable_check_arg(web_p)
+    web_p.add_argument(
         "--no-fingerprint",
         action="store_true",
         help="Dashboard scans read each banner once and do not parse it. "
@@ -442,6 +466,18 @@ _EXPORT_FORMAT_MISMATCH = (
     "The --output suffix does not match --format. "
     "Use .csv with csv, or .json with json."
 )
+
+def _add_disable_check_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--disable-check",
+        action="append",
+        metavar="ID",
+        help="Turn off this check. Repeat to turn off more than one. "
+             "`lantern checks` lists the ids. An unknown id exits 2 and names the valid ones. "
+             "port-rules cannot be turned off until a scan records which checks ran. "
+             "The dashboard and the API cannot change this.",
+    )
+
 
 def _err(message: str) -> int:
     print(f"lantern: {message}", file=sys.stderr)
@@ -1011,6 +1047,57 @@ def _scope_config_path(args) -> Path:
     return Path(DEFAULT_CONFIG_NAME)
 
 
+def _checks_config_path(args) -> Path | None:
+    """The TOML file whose ``[checks]`` table applies, or None.
+
+    ``[checks]`` is read only from an explicit ``--config``. A
+    ``./lantern.toml`` in the working directory is not consulted, including
+    for ``scan --scope``, ``scan --all``, and ``lantern checks``.
+    """
+    explicit = getattr(args, "config", None)
+    if explicit:
+        return Path(explicit)
+    return None
+
+
+def _announce_disabled(from_file: set[str], from_flag: list[str], path: Path | None) -> None:
+    """Name every check that was turned off. The file line includes the path."""
+    if from_file and path is not None:
+        names = ", ".join(sorted(from_file))
+        shown = assetlib.strip_for_text(str(path)) or "(config)"
+        print(f"Checks disabled by {shown}: {names}", file=sys.stderr)
+    flagged = sorted({name for name in from_flag if name not in from_file})
+    if flagged:
+        print("Checks disabled: " + ", ".join(flagged), file=sys.stderr)
+
+
+def _resolve_disabled(args) -> frozenset[str]:
+    """Check ids turned off by ``--disable-check`` and, only with ``--config``, the file.
+
+    An unknown id raises ValueError and names the valid ids. ``port-rules``
+    cannot be disabled until a scan records which checks ran. The scan does
+    not start. A check that is turned off is named on stderr.
+    """
+    from .checks import LOCKED_CHECK_IDS, REGISTRY, locked_check_message, unknown_check_message
+
+    disabled: set[str] = set()
+    from_file: set[str] = set()
+    path = _checks_config_path(args)
+    if path is not None:
+        from_file = set(load_disabled_checks(path))
+        disabled.update(from_file)
+    names = list(getattr(args, "disable_check", None) or [])
+    unknown = [name for name in names if name not in REGISTRY]
+    if unknown:
+        raise ValueError(unknown_check_message(unknown))
+    locked = sorted({name for name in names if name in LOCKED_CHECK_IDS})
+    if locked:
+        raise ValueError(locked_check_message(locked))
+    disabled.update(names)
+    _announce_disabled(from_file, names, path)
+    return frozenset(disabled)
+
+
 def _scope_names(args) -> list[str]:
     names = getattr(args, "scope", None) or []
     if isinstance(names, str):
@@ -1200,6 +1287,16 @@ def _print_scope_summary(
         print("Scopes failed: (none)")
 
 
+def _cmd_checks(args) -> int:
+    """Print each check and the dataset status. Does not scan or open the database."""
+    try:
+        disabled = _resolve_disabled(args)
+    except ValueError as exc:
+        return _err(str(exc))
+    print(describe_checks(disabled))
+    return 0
+
+
 def _cmd_scopes(args) -> int:
     try:
         scopes = list(load_scopes(_scope_config_path(args)).values())
@@ -1316,7 +1413,16 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "scopes":
         return _cmd_scopes(args)
+    if args.command == "checks":
+        return _cmd_checks(args)
     db_path = Path(getattr(args, "db", str(DEFAULT_DB)))
+    if args.command in {"scan", "web"}:
+        # A bad check id or a bad [checks] table exits before the database
+        # is created and before a scan or a socket starts.
+        try:
+            args.disabled_checks = _resolve_disabled(args)
+        except ValueError as exc:
+            return _err(str(exc))
 
     web_bind = None
     if args.command == "web":
@@ -1515,6 +1621,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
                   file=sys.stderr, flush=True)
         kwargs["fingerprint"] = not args.no_fingerprint
+        kwargs["disabled_checks"] = getattr(args, "disabled_checks", frozenset())
         if getattr(args, "watch_seconds", None):
             kwargs["watch_seconds"] = args.watch_seconds
             kwargs["watch_subnet"] = args.watch_subnet
@@ -1593,6 +1700,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                             pending = pool.submit(engine.discover_identities, network, local_ip)
                             for device in engine.scan_hosts(
                                 fresh, DEFAULT_PORTS, fingerprint=not args.no_fingerprint,
+                                disabled=getattr(args, "disabled_checks", frozenset()),
                             ):
                                 found[device["ip"]] = device
                             identities = pending.result()
@@ -1632,6 +1740,7 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 print(f"Scanning {subnet} ({network.num_addresses} addresses)...", file=sys.stderr)
             devices, info = scan_subnet(
                 subnet, DEFAULT_PORTS, demo_mode=args.demo, fingerprint=not args.no_fingerprint,
+                disabled=getattr(args, "disabled_checks", frozenset()),
             )
         except ValueError as exc:
             return _err(str(exc))

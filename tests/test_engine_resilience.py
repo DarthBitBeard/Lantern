@@ -7,14 +7,14 @@ from unittest import mock
 from lantern import engine
 
 
-def _fake_device(ip, macs, ports, *, fingerprint=True):
+def _fake_device(ip, macs, ports, *, fingerprint=True, **_extra):
     return {"ip": ip, "mac": None, "hostname": None, "open_ports": [],
             "findings": [], "label": None}
 
 
 class ScanResilienceTests(unittest.TestCase):
     def test_one_failing_host_keeps_the_others(self):
-        def flaky(ip, macs, ports, *, fingerprint=True):
+        def flaky(ip, macs, ports, *, fingerprint=True, **_extra):
             if ip == "192.168.1.2":
                 raise RuntimeError("boom")
             return _fake_device(ip, macs, ports)
