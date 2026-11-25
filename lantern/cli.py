@@ -376,14 +376,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--watch",
         metavar="EVERY",
         help="Scan again on a schedule while the dashboard runs: 30m, 2h, or 1d "
-             "(5m to 7d). The subnet is fixed at start (--watch-subnet, else the "
-             "detected one), and a scheduled scan is skipped while this machine "
-             "is on another network.",
+             "(5m to 7d). The subnet and the gateway's MAC address are saved "
+             "when this starts (--watch-subnet, else the detected subnet). "
+             "A scheduled scan is skipped when that gateway is not the current one.",
     )
     web_p.add_argument(
         "--watch-subnet",
         metavar="CIDR",
-        help="Private subnet for --watch, such as 192.168.1.0/24. Default: the detected subnet.",
+        help="Private subnet to opt into with --watch, such as 192.168.1.0/24. "
+             "Default: the detected subnet. The gateway on that subnet is saved with it.",
+    )
+    web_p.add_argument(
+        "--watch-saved",
+        action="store_true",
+        help="With --watch, reuse the network saved by an earlier --watch. "
+             "Does not detect a network and does not replace the saved one. "
+             "If none was saved, the dashboard starts and nothing is scheduled.",
     )
     web_p.add_argument(
         "--keep-days",
@@ -630,34 +638,84 @@ DEFAULT_WATCH_KEEP_DAYS = 90
 def _resolve_watch(args) -> str | None:
     """Check --watch, --watch-subnet and --keep-days, and fill the resolved values on ``args``.
 
-    Returns an error message, or None. Runs before the database is opened.
+    Returns an error message, or None. An explicit ``--watch`` records the
+    subnet and the current gateway MAC. ``--watch-saved`` does not detect a
+    network; the saved opt-in is read later, beside the database.
     """
-    from .watch import parse_interval
+    from .watch import current_gateway_mac, parse_interval
 
     args.watch_seconds = None
+    args.watch_gateway_mac = None
+    args.watch_opt_in_save = False
     args.keep_days_resolved = None
     watch = getattr(args, "watch", None)
     watch_subnet = getattr(args, "watch_subnet", None)
+    watch_saved = bool(getattr(args, "watch_saved", False))
     keep_days = getattr(args, "keep_days", None)
     if keep_days is not None and not 0 <= keep_days <= 36500:
         return "--keep-days must be between 0 and 36500."
     if watch_subnet and not watch:
         return "--watch-subnet needs --watch."
+    if watch_saved and not watch:
+        return "--watch-saved needs --watch."
+    if watch_saved and watch_subnet:
+        return "--watch-saved cannot be combined with --watch-subnet."
     if watch:
         try:
             args.watch_seconds = parse_interval(watch)
         except ValueError as exc:
             return str(exc)
-        subnet = watch_subnet or guess_subnet()
-        if not subnet:
-            return "Could not detect your subnet for --watch. Pass --watch-subnet 192.168.1.0/24."
-        try:
-            args.watch_subnet = str(validate_subnet(subnet))
-        except ValueError as exc:
-            return str(exc)
+        if watch_saved:
+            # The subnet comes from the saved file, after the database path is known.
+            args.watch_subnet = None
+        else:
+            subnet = watch_subnet or guess_subnet()
+            if not subnet:
+                return "Could not detect your subnet for --watch. Pass --watch-subnet 192.168.1.0/24."
+            try:
+                args.watch_subnet = str(validate_subnet(subnet))
+            except ValueError as exc:
+                return str(exc)
+            mac = current_gateway_mac(args.watch_subnet)
+            if not mac:
+                return (
+                    "Could not confirm the gateway for this network, so --watch will not start. "
+                    "Lantern only watches a network after it has seen that network's gateway."
+                )
+            args.watch_gateway_mac = mac
+            args.watch_opt_in_save = True
         if keep_days is None:
             keep_days = DEFAULT_WATCH_KEEP_DAYS
     args.keep_days_resolved = keep_days or None
+    return None
+
+
+def _apply_saved_watch(args, db_path: Path) -> str | None:
+    """Save a new opt-in, or load the saved one for ``--watch-saved``.
+
+    Returns an error message, or None. ``--watch-saved`` with no file does
+    not guess a subnet and does not start the schedule.
+    """
+    from .watch import NetworkIdentity, load_opt_in, no_opt_in_message, save_opt_in
+
+    if not getattr(args, "watch_seconds", None):
+        return None
+    if getattr(args, "watch_saved", False):
+        identity = load_opt_in(db_path)
+        if identity is None:
+            print(no_opt_in_message(), file=sys.stderr, flush=True)
+            args.watch_seconds = None
+            args.watch_subnet = None
+            args.watch_gateway_mac = None
+            return None
+        args.watch_subnet = identity.subnet
+        args.watch_gateway_mac = identity.gateway_mac
+        return None
+    if getattr(args, "watch_opt_in_save", False):
+        try:
+            save_opt_in(db_path, NetworkIdentity(args.watch_subnet, args.watch_gateway_mac))
+        except OSError:
+            return "Could not save the network chosen for --watch."
     return None
 
 
@@ -1461,10 +1519,16 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
                 return _err("--tray is available on Windows only.")
             if web_bind.lan_bound:
                 return _err("--tray works only with a loopback bind (the default 127.0.0.1).")
-            if tray_module.signal_running_instance():
+            found = tray_module.classify_running_instance()
+            if found == tray_module.INSTANCE_OURS:
                 print("Lantern is already running in the tray. Asked it to open the dashboard.",
                       file=sys.stderr, flush=True)
                 return 0
+            if found == tray_module.INSTANCE_FOREIGN:
+                print(
+                    "lantern: a tray window is open, but it is not this Lantern. Not handing off.",
+                    file=sys.stderr, flush=True,
+                )
         try:
             switches = resolve_switches(args, os.environ, suffix="Refusing to start.")
         except ValueError as exc:
@@ -1515,9 +1579,13 @@ def _dispatch(args, conn, db_path: Path, web_bind: WebBind | None = None) -> int
             print(f"Dashboard scans also read {len(switches[0])} switch(es) over SNMP.",
                   file=sys.stderr, flush=True)
         kwargs["fingerprint"] = not args.no_fingerprint
+        saved_watch_error = _apply_saved_watch(args, db_path)
+        if saved_watch_error:
+            return _err(saved_watch_error)
         if getattr(args, "watch_seconds", None):
             kwargs["watch_seconds"] = args.watch_seconds
             kwargs["watch_subnet"] = args.watch_subnet
+            kwargs["watch_gateway_mac"] = args.watch_gateway_mac
         if getattr(args, "keep_days_resolved", None):
             kwargs["keep_days"] = args.keep_days_resolved
         try:

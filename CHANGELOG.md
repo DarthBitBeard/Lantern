@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Watch mode stays on the network you opted into. `lantern web --watch` saves that subnet and the gateway's MAC address beside the database. A scheduled scan is skipped, with one line on stderr, when the current gateway is not that one. The same private address range on another gateway is not treated as your network. `--watch-saved` reuses the saved network and does not detect one; if nothing was saved, the dashboard starts and nothing is scheduled. The installer's watch shortcut uses `--watch-saved`, so signing in on another network does not choose that network for you.
+- The tray's "already running" hand-off only talks to a window whose process is this install's `lantern-tray.exe` or `lantern.exe`. Another program that registers the same window class does not make a new launch exit quietly. Quit from outside via `WM_CLOSE` is ignored; the menu and the tray's own stop still quit.
+- Opening the dashboard from the tray sends the token in the link at most once per run. Later opens use the plain address. `--open` at startup still counts as that one time.
+
 ## 1.6.1 - 2026-11-23
 
 Quieter scans from the tray, and a dashboard that puts what matters first.

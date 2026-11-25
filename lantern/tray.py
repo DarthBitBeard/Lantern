@@ -23,8 +23,13 @@ WM_USER = 0x0400
 WM_TRAY = WM_USER + 1
 WM_APP = 0x8000
 WM_SHOW_PENDING = WM_APP + 2  # posted by notify() from another thread
-WM_OPEN_DASHBOARD = WM_APP + 3  # posted by a second launch (see signal_running_instance)
+WM_OPEN_DASHBOARD = WM_APP + 3  # posted by a verified second launch
+WM_TRAY_STOP = WM_APP + 4  # posted by TrayIcon.stop(); external WM_CLOSE is ignored
 WINDOW_CLASS = "LanternTrayWindow"  # fixed, so a second launch can find the first
+INSTANCE_NONE = "none"
+INSTANCE_OURS = "ours"
+INSTANCE_FOREIGN = "foreign"
+_TRAY_IMAGE_NAMES = frozenset({"lantern-tray.exe", "lantern.exe"})
 NIN_BALLOONUSERCLICK = WM_USER + 5
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
@@ -59,22 +64,101 @@ def is_supported() -> bool:
     return _IS_WINDOWS
 
 
-def signal_running_instance() -> bool:
-    """Ask a Lantern tray already running for this user to open its dashboard.
+def tray_image_is_ours(image: str | None, our_executable: str | None) -> bool:
+    """True when ``image`` is this install's lantern-tray.exe or lantern.exe.
 
-    True when one was found and asked; the caller can then exit instead of
-    failing to bind the same port. Always False off Windows.
+    The comparison is the executable's file name and its directory. A window
+    of the tray class that belongs to some other program is not ours.
+    """
+    if not image or not our_executable:
+        return False
+    try:
+        image_path = os.path.abspath(image)
+        our_path = os.path.abspath(our_executable)
+    except (OSError, ValueError):
+        return False
+    if os.path.basename(image_path).lower() not in _TRAY_IMAGE_NAMES:
+        return False
+    return os.path.normcase(os.path.dirname(image_path)) == os.path.normcase(os.path.dirname(our_path))
+
+
+def classify_running_instance() -> str:
+    """``ours`` when a verified tray was asked to open, ``foreign`` or ``none``.
+
+    A window of the tray class is trusted only when its process image is
+    this install's tray program. Off Windows this is always ``none``.
     """
     if not _IS_WINDOWS:
-        return False
+        return INSTANCE_NONE
+    found = _windows_tray_target()
+    if found is None:
+        return INSTANCE_NONE
+    hwnd, image = found
+    if not tray_image_is_ours(image, sys.executable):
+        return INSTANCE_FOREIGN
+    if not _post_tray_message(hwnd, WM_OPEN_DASHBOARD):
+        return INSTANCE_FOREIGN
+    return INSTANCE_OURS
+
+
+def signal_running_instance() -> bool:
+    """Ask a verified Lantern tray to open its dashboard.
+
+    True only when that tray was found and asked. A window that is not this
+    install's tray does not count, so a second launch does not exit as if
+    it had handed off. Always False off Windows.
+    """
+    return classify_running_instance() == INSTANCE_OURS
+
+
+def _post_tray_message(hwnd, message: int) -> bool:
     import ctypes
 
     user32 = ctypes.WinDLL("user32")
-    user32.FindWindowW.restype = ctypes.c_void_p
-    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
     user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    user32.PostMessageW.restype = ctypes.c_int
+    return bool(user32.PostMessageW(hwnd, message, 0, 0))
+
+
+def _windows_tray_target():
+    """``(hwnd, image path)`` for the tray window, or None when there is no window.
+
+    The image path is None when the process cannot be queried. Callers must
+    treat that as not ours.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32")
+    kernel32 = ctypes.WinDLL("kernel32")
+    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    user32.FindWindowW.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_wchar_p, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     hwnd = user32.FindWindowW(WINDOW_CLASS, None)
-    return bool(hwnd) and bool(user32.PostMessageW(hwnd, WM_OPEN_DASHBOARD, 0, 0))
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    # PROCESS_QUERY_LIMITED_INFORMATION. Enough to read the image path.
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)
+    if not handle:
+        return (hwnd, None)
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return (hwnd, None)
+        return (hwnd, buf.value)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def clip_tooltip(text: str) -> str:
@@ -124,9 +208,7 @@ class TrayIcon:
         hwnd = self._hwnd
         if not _IS_WINDOWS or not hwnd:
             return
-        import ctypes
-
-        ctypes.WinDLL("user32").PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        _post_tray_message(hwnd, WM_TRAY_STOP)
 
     def notify(self, title: str, text: str) -> bool:
         """Show a notification from the icon. Safe from any thread.
@@ -340,8 +422,12 @@ class TrayIcon:
                 if taskbar_created and message == taskbar_created:
                     add_icon()  # Explorer restarted: put the icon back
                     return 0
-                if message == WM_CLOSE:
+                if message == WM_TRAY_STOP:
                     self._quit(user32, hwnd)
+                    return 0
+                if message == WM_CLOSE:
+                    # An outside process can post WM_CLOSE. Quit only from the
+                    # menu or from stop(), which posts WM_TRAY_STOP.
                     return 0
                 if message == WM_DESTROY:
                     shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))

@@ -219,18 +219,18 @@ Scans saved before 1.1.0 still draw. They have no stored router or names, so the
 `lantern web --watch 1h` scans again every hour while the dashboard runs (any of `30m`, `2h`, `1d`; 5 minutes to 7 days). Scheduled scans use the same job as the dashboard's Scan button, so two scans never overlap.
 
 ```bash
-python3 -m lantern web --watch 1h                 # the detected subnet, fixed at start
+python3 -m lantern web --watch 1h                 # detect this network and remember its gateway
 python3 -m lantern web --watch 2h --watch-subnet 192.168.1.0/24
 python3 -m lantern web --watch 1h --keep-days 30  # default 90 with --watch; 0 keeps everything
 ```
 
-- **It only scans the network it started on.** The subnet is fixed when the dashboard starts, and a scheduled scan is skipped while this machine has no address in it. A laptop taken to another network does not scan that network on its own.
+- **It only scans the network you opted into.** Starting `--watch` saves that subnet and the gateway's MAC address. A scheduled scan runs only while this machine still has that gateway. The same address range with a different gateway is not your network, and the scan is skipped. The installer's watch shortcut reuses that saved choice and never picks a network by itself.
 - **Old scans are removed.** With `--watch`, scans older than 90 days are deleted after each dashboard scan (`--keep-days` changes that). The newest scan of each scope is always kept. `--keep-days` also works without `--watch`.
 - **Alerts.** After each dashboard scan the new scan is compared with the previous one. A new device that is not trusted or labelled, a high or critical risk port that opened, or a service that reports a different product or version raises an alert. In the tray it is a Windows notification (click it to open the dashboard). In a terminal it is one line. Moved addresses and closed ports stay in the diff and are not alerts.
 - **New since your last visit.** The dashboard remembers which devices this browser has seen (MAC or IP only, in the browser's local storage) and marks the ones that are new to you.
 - `GET /api/status` reports the schedule under `watch` (interval, subnet, next scan) and `keep_days`.
 
-In the tray, right-click the icon for the last and next scan time, **Scan now**, **Open dashboard**, and **Quit Lantern**. Starting the tray a second time opens the running one's dashboard instead of failing. The Windows installer has an unchecked option that adds `--watch 1h` to the tray shortcuts.
+In the tray, right-click the icon for the last and next scan time, **Scan now**, **Open dashboard**, and **Quit Lantern**. Starting the tray a second time opens the running one's dashboard instead of failing, and only when that window is this install's tray program. The Windows installer has an unchecked option that adds `--watch 1h --watch-saved` to the tray shortcuts. Opening the dashboard from the tray puts the token in the address once; later opens do not.
 
 ## Export and `/api/v1`
 

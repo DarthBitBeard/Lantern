@@ -172,11 +172,56 @@ class TrayMenuTests(unittest.TestCase):
     def test_second_launch_hands_off_and_exits_cleanly(self):
         err = io.StringIO()
         served = []
-        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err),                 mock.patch("lantern.tray.is_supported", return_value=True),                 mock.patch("lantern.tray.signal_running_instance", return_value=True),                 mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch("lantern.tray.is_supported", return_value=True), \
+                mock.patch("lantern.tray.classify_running_instance", return_value=tray.INSTANCE_OURS), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)):
             code = cli.main(["web", "--tray", "--db", os.path.join(folder, "t.db")])
         self.assertEqual(code, 0)
         self.assertEqual(served, [])
         self.assertIn("already running", err.getvalue())
+
+    def test_a_foreign_tray_window_does_not_count_as_ours(self):
+        install = Path("/Lantern")
+        self.assertFalse(tray.tray_image_is_ours(None, str(install / "lantern-tray.exe")))
+        self.assertFalse(tray.tray_image_is_ours(
+            str(Path("/other") / "lantern-tray.exe"), str(install / "lantern-tray.exe"),
+        ))
+        self.assertFalse(tray.tray_image_is_ours(
+            str(install / "notepad.exe"), str(install / "lantern-tray.exe"),
+        ))
+        self.assertTrue(tray.tray_image_is_ours(
+            str(install / "lantern-tray.exe"), str(install / "lantern.exe"),
+        ))
+        err = io.StringIO()
+        served = []
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stderr(err), \
+                mock.patch("lantern.tray.is_supported", return_value=True), \
+                mock.patch("lantern.tray.classify_running_instance", return_value=tray.INSTANCE_FOREIGN), \
+                mock.patch.object(cli, "_load_serve", return_value=lambda db, **kw: served.append(kw)), \
+                mock.patch.dict(os.environ, {"LANTERN_API_TOKEN": "t" * 32}):
+            code = cli.main(["web", "--tray", "--db", os.path.join(folder, "t.db")])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(len(served), 1)
+        self.assertIn("not this Lantern", err.getvalue())
+        self.assertNotIn("already running", err.getvalue())
+
+    def test_stop_does_not_use_wm_close(self):
+        import inspect
+
+        self.assertNotEqual(tray.WM_CLOSE, tray.WM_TRAY_STOP)
+        self.assertIn("WM_TRAY_STOP", inspect.getsource(tray.TrayIcon.stop))
+        self.assertNotIn("WM_CLOSE", inspect.getsource(tray.TrayIcon.stop))
+
+    def test_later_dashboard_opens_omit_the_token(self):
+        from lantern.webapp import DashboardOpen
+
+        opener = DashboardOpen("http://127.0.0.1:9/", "http://127.0.0.1:9/#token=secret")
+        self.assertEqual(opener.url(), "http://127.0.0.1:9/#token=secret")
+        self.assertEqual(opener.url(), "http://127.0.0.1:9/")
+        self.assertEqual(opener.url(), "http://127.0.0.1:9/")
+        already = DashboardOpen("http://127.0.0.1:9/", None)
+        self.assertNotIn("token", already.url())
 
 
 class TrayStatusLineTests(unittest.TestCase):

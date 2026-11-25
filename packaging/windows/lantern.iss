@@ -112,8 +112,10 @@ const
 function WatchArgs(Param: String): String;
 begin
   // Watch mode is opt-in: only the "watch" task adds a schedule.
+  // Reuse the network the user already opted into. Never detect one here:
+  // a sign-in on another network must not start scanning that network.
   if WizardIsTaskSelected('watch') then
-    Result := '--watch 1h '
+    Result := '--watch 1h --watch-saved '
   else
     Result := '';
 end;

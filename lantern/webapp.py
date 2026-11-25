@@ -1916,12 +1916,24 @@ def _print_alert(alert) -> None:
     print(f"{alert.title}. {alert.text}", flush=True)
 
 
-def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None):
-    """The schedule for `--watch`, pinned to one validated subnet."""
-    from .discovery import local_ipv4_in
-    from .watch import Watcher, parse_started_at
+def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None,
+                  gateway_mac: str | None = None):
+    """The schedule for `--watch`, pinned to the opted-in subnet and gateway MAC."""
+    from .discovery import arp_table, default_gateways, local_ipv4_in
+    from .watch import Watcher, identity_matches, parse_started_at, skip_message
 
     subnet = str(validate_subnet(watch_subnet))
+
+    def on_network(network) -> bool:
+        if not gateway_mac:
+            return False
+        return identity_matches(
+            network, gateway_mac, local_ipv4_in(network), default_gateways(), arp_table(),
+        )
+
+    def on_skip(skipped: str) -> None:
+        print(skip_message(skipped), file=sys.stderr, flush=True)
+
     conn = connect(handler.db_path)
     try:
         newest = list_scans(conn, limit=1)
@@ -1931,7 +1943,8 @@ def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None):
         watch_seconds,
         subnet,
         lambda target: start_scan_job(handler, target),
-        on_network=lambda network: local_ipv4_in(network) is not None,
+        on_network=on_network,
+        on_skip=on_skip,
         last_scan_at=parse_started_at(newest[0]["started_at"]) if newest else None,
     )
     handler.watcher = watcher
@@ -1975,7 +1988,30 @@ def tray_status_line(handler, now: float | None = None) -> str:
     return " · ".join(parts)
 
 
-def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
+class DashboardOpen:
+    """Which URL a tray open uses. The token fragment is sent at most once.
+
+    Later opens use the bare dashboard URL. The page keeps the token in
+    sessionStorage after the first visit, so the address is not put on the
+    browser command line again.
+    """
+
+    def __init__(self, bare: str, first: str | None = None) -> None:
+        self.bare = bare.split("#", 1)[0]
+        pending = (first or "").split("#", 1)
+        self._pending = first if len(pending) == 2 and pending[1] else None
+        if self._pending == self.bare:
+            self._pending = None
+
+    def url(self) -> str:
+        if self._pending:
+            chosen, self._pending = self._pending, None
+            return chosen
+        return self.bare
+
+
+def _serve_in_tray(server, host: str, port: int, url: str | None,
+                   *, token_already_sent: bool = False) -> None:
     """Run the server on a background thread and a tray icon on this one.
 
     Returns when the user chooses Quit or the server stops by itself.
@@ -1983,7 +2019,8 @@ def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     from .tray import TrayIcon
 
     handler = server.RequestHandlerClass
-    browser_url = url or f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
+    bare = f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
+    opener = DashboardOpen(bare, None if token_already_sent else url)
     requested = threading.Event()  # a Scan now from the tray waits for its result
 
     def scan_now() -> None:
@@ -2005,7 +2042,7 @@ def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
 
     icon = TrayIcon(
         f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost") else f"Lantern dashboard ({host}:{port})",
-        on_open=lambda: _open_browser(browser_url),
+        on_open=lambda: _open_browser(opener.url()),
         on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
         on_scan=scan_now,
         status=lambda: tray_status_line(handler),
@@ -2055,6 +2092,7 @@ def serve(
     tray_url: str | None = None,
     watch_seconds: int | None = None,
     watch_subnet: str | None = None,
+    watch_gateway_mac: str | None = None,
     keep_days: float | None = None,
 ) -> None:
     server = make_server(
@@ -2075,7 +2113,10 @@ def serve(
     if not tray:
         # In the tray, alerts are notifications instead (see _serve_in_tray).
         handler.scan_listeners.append(alert_listener(handler.db_path, _print_alert))
-    watcher = _make_watcher(handler, watch_seconds, watch_subnet) if watch_seconds else None
+    watcher = (
+        _make_watcher(handler, watch_seconds, watch_subnet, watch_gateway_mac)
+        if watch_seconds and watch_gateway_mac else None
+    )
     # Install the SIGTERM handler before announcing the address: anything
     # that stops Lantern right after it reads the startup line must get a
     # clean shutdown, not the default kill. shutdown() before serve_forever
@@ -2112,7 +2153,8 @@ def serve(
         if watcher is not None:
             kept = f"; keeping {keep_days:g} days of scans" if keep_days else ""
             print(f"Watching {watcher.subnet} every {watcher.status()['interval']}{kept}. "
-                  "Scheduled scans are skipped while this machine is on another network.", flush=True)
+                  "Scheduled scans run only while this gateway is still the one you opted in to.",
+                  flush=True)
             watcher.start()
         elif keep_days:
             print(f"Keeping {keep_days:g} days of scans.", flush=True)
@@ -2122,7 +2164,10 @@ def serve(
             # waits in the backlog until serve_forever starts.
             _open_browser(open_url)
         if tray:
-            _serve_in_tray(server, str(bound_host), int(bound_port), tray_url)
+            _serve_in_tray(
+                server, str(bound_host), int(bound_port), tray_url,
+                token_already_sent=bool(open_url and "#token=" in str(open_url)),
+            )
         else:
             server.serve_forever()
     except KeyboardInterrupt:
