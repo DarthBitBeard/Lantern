@@ -99,6 +99,25 @@ class ParseNeighborsTests(unittest.TestCase):
         )
         self.assertEqual(parse_neighbors(text), {"192.168.1.9": "11:22:33:44:55:66"})
 
+    def test_stale_and_incomplete_entries_are_dropped_for_the_gateway_check(self):
+        from lantern.discovery import merge_neighbor_tables
+
+        stale = "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:01 STALE\n"
+        proc = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:01     *        eth0\n"
+        )
+        self.assertEqual(merge_neighbor_tables(stale, proc, ""), {})
+        reachable = "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:01 REACHABLE\n"
+        self.assertEqual(
+            merge_neighbor_tables(reachable, "", ""),
+            {"192.168.1.1": "aa:bb:cc:dd:ee:01"},
+        )
+        incomplete = "? (192.168.1.4) at (incomplete) on en0\n"
+        self.assertEqual(merge_neighbor_tables("", "", incomplete), {})
+        invalid = "  192.168.1.8           00-11-22-33-44-55     invalid\n"
+        self.assertEqual(merge_neighbor_tables("", "", invalid), {})
+
     def test_arp_table_never_raises(self):
         with mock.patch.object(discovery.subprocess, "run", side_effect=OSError("no arp")):
             with mock.patch.object(discovery.Path, "is_file", return_value=False):

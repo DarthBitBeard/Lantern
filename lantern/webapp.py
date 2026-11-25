@@ -23,7 +23,9 @@ Local-tool hygiene, enforced here:
   the page. Static files other than that rule stay unauthenticated.
 - A POST that includes Origin must use http or https, and that origin's
   host:port must be on the same allowlist. A missing Origin is accepted
-  only together with a valid token.
+  only together with a valid token. POST /api/login has no token yet, so
+  its Origin must be present and on the allowlist. The body is a single-use
+  nonce; the response is the session token, which is valid until restart.
 - Request targets must be origin-form (a path). An absolute-form URL is
   rejected with 400.
 - POST bodies must be JSON (Content-Type application/json) and at most
@@ -56,7 +58,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 from . import __version__, assets as assetlib, demo, engine, topology
 from .classify import annotate_scan
@@ -112,6 +114,10 @@ MAX_CONNECTIONS_PER_IP = 8
 # A presented token that does not match waits this long. Guessing a
 # 128-bit token is not practical; the delay only slows a tight loop.
 TOKEN_FAILURE_DELAY_SECONDS = 0.05
+# A tray or launcher open puts this nonce in the fragment. It is not the
+# session token. One POST spends it, and it dies after this many seconds.
+LOGIN_NONCE_SECONDS = 60.0
+_LOGIN_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
 # style-src keeps 'unsafe-inline' because the saved HTML report carries its own
 # <style> block. base-uri, form-action, and object-src close the ways a stray
 # injected tag could redirect a form or a relative URL.
@@ -194,6 +200,14 @@ class _ScanJob:
         with self._lock:
             self._state = {**self._state, "state": "error", "error": SCAN_FAILED_MESSAGE}
 
+    def abandon(self) -> None:
+        """The scan was refused before it probed. Leave the job idle."""
+        with self._lock:
+            self._state = {
+                "state": "idle", "subnet": None, "scan_id": None, "error": None,
+                "progress": None,
+            }
+
     def snapshot(self) -> dict:
         with self._lock:
             state = dict(self._state)
@@ -232,7 +246,8 @@ class _SubnetGuess:
 def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
                   switches: tuple | None = None, fingerprint: bool = True,
                   keep_days: float | None = None,
-                  listeners: tuple = ()) -> None:
+                  listeners: tuple = (),
+                  confirm=None, on_refused=None) -> None:
     """Scan and save on a background thread, record the outcome, free the scan lock.
 
     ``switches`` is (switch addresses, SNMP community) from `lantern web
@@ -240,9 +255,27 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
     ``keep_days``, scans older than that are deleted after the save (the new
     scan is never one of them). Each of ``listeners`` is called with the new
     scan id after the save; a listener that fails does not fail the scan.
+
+    ``confirm``, when set, is called immediately before any probe. A false
+    result abandons the job. A scheduled scan uses it to read the gateway
+    again after sleep, when the earlier check is no longer fresh. It only
+    reads the route table and the ARP cache.
     """
     scan_id = None
     try:
+        if confirm is not None:
+            try:
+                allowed = bool(confirm())
+            except Exception:
+                allowed = False
+            if not allowed:
+                if on_refused is not None:
+                    try:
+                        on_refused()
+                    except Exception:
+                        pass
+                job.abandon()
+                return
         devices, network = engine.scan_subnet(
             subnet, DEFAULT_PORTS, fingerprint=fingerprint, progress=job.report,
         )
@@ -285,11 +318,12 @@ def _run_scan_job(job: _ScanJob, db_path: str, subnet: str, debug: bool,
                 pass
 
 
-def start_scan_job(handler, subnet: str) -> bool:
+def start_scan_job(handler, subnet: str, *, confirm=None, on_refused=None) -> bool:
     """Start a background scan of ``subnet`` for this server. False if one is running.
 
     Used by `POST /api/scan`, the watch schedule, and the tray's Scan now.
-    ``subnet`` must already be validated.
+    ``subnet`` must already be validated. ``confirm`` runs on the scan thread
+    immediately before the probe. See `_run_scan_job`.
     """
     if not _scan_lock.acquire(blocking=False):
         return False
@@ -302,6 +336,7 @@ def start_scan_job(handler, subnet: str) -> bool:
                 handler.switch_config, bool(handler.fingerprint),
                 handler.keep_days, tuple(handler.scan_listeners),
             ),
+            kwargs={"confirm": confirm, "on_refused": on_refused},
             name="lantern-scan",
             daemon=True,
         ).start()
@@ -1001,6 +1036,17 @@ class LanternHandler(BaseHTTPRequestHandler):
         key = origin_allowlist_key(values[0])
         return key is not None and key in self.allowed_hosts
 
+    def _origin_present_and_allowed(self) -> bool:
+        """True when one Origin is present and its host:port is on the allowlist.
+
+        POST /api/login has no session token yet, so a missing Origin is refused.
+        """
+        values = self.headers.get_all("Origin")
+        if not values or len(values) != 1:
+            return False
+        key = origin_allowlist_key(values[0])
+        return key is not None and key in self.allowed_hosts
+
     def _forbid(self, *, unread_body: bool) -> None:
         if unread_body:
             self.close_connection = True
@@ -1435,6 +1481,7 @@ class LanternHandler(BaseHTTPRequestHandler):
                     "latest_scan_id": newest[0]["id"] if newest else None,
                     "scan_running": _scan_lock.locked(),
                     "watch": self.watcher.status() if self.watcher else None,
+                    "watch_status": watch_status_text(self),
                     "keep_days": self.keep_days,
                 })
                 return
@@ -1511,6 +1558,11 @@ class LanternHandler(BaseHTTPRequestHandler):
             self.close_connection = True  # body left unread
             self._send_json(404, {"error": "Not found."})
             return
+        if parsed.path == "/api/login":
+            # No session token yet. Host was checked above. Origin must be
+            # present and on the allowlist, then the nonce is spent.
+            self._handle_login()
+            return
         # Token first, then Origin. A missing Origin is allowed only because
         # the token matched. A present Origin must itself be on the allowlist.
         if not self._token_ok() or not self._origin_ok():
@@ -1541,6 +1593,8 @@ class LanternHandler(BaseHTTPRequestHandler):
                 self._handle_scan(body)
             elif parsed.path == "/api/trust":
                 self._handle_trust(body)
+            elif parsed.path == "/api/watch":
+                self._handle_watch(body)
             else:
                 self._send_json(404, {"error": "Unknown API route."})
         except (CorruptScanError, NewerSchemaError) as exc:
@@ -1615,6 +1669,59 @@ class LanternHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json(200, {"mac": mac, "label": label or None, "trusted": trusted})
+
+    def _handle_login(self) -> None:
+        """Spend a single-use nonce and return the session token.
+
+        The nonce comes from a tray or launcher open. It is not the session
+        token, and the token is not written into the URL. A second use, an
+        expired nonce, or a missing Origin is refused. The token itself stays
+        valid until this process restarts.
+        """
+        if not self._origin_present_and_allowed():
+            self._forbid(unread_body=True)
+            return
+        try:
+            body = self._read_json()
+        except RequestTooLarge as exc:
+            self._send_json(413, {"error": str(exc)})
+            self.close_connection = True
+            return
+        except UnsupportedMediaType as exc:
+            self._send_json(415, {"error": str(exc)})
+            self.close_connection = True
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            self.close_connection = True
+            return
+        exchange = getattr(self, "login_exchange", None)
+        nonce = body.get("nonce") if isinstance(body, dict) else None
+        token = exchange.redeem(nonce) if isinstance(exchange, LoginExchange) else None
+        if not token:
+            time.sleep(TOKEN_FAILURE_DELAY_SECONDS)
+            self._send_json(403, {"error": FORBIDDEN_MESSAGE})
+            return
+        self._send_json(200, {"token": token})
+
+    def _handle_watch(self, body: dict) -> None:
+        """Save the network to watch beside this process's database.
+
+        The gateway MAC is read from the route table and the ARP cache. No
+        host is probed. A different saved network is left in place unless
+        ``adopt`` is true.
+        """
+        saved, message = apply_watch_opt_in(self, body)
+        if not saved and message.startswith("A different network"):
+            self._send_json(409, {"error": message})
+            return
+        if not saved:
+            raise ValueError(message)
+        self._send_json(200, {
+            "saved": True,
+            "message": message,
+            "watch_status": watch_status_text(self),
+        })
 
 
 class RequestTooLarge(ValueError):
@@ -1771,6 +1878,45 @@ def _loopback_host(host: str) -> bool:
     return is_loopback_host(host)
 
 
+class LoginExchange:
+    """Single-use nonces a browser open trades for the session token.
+
+    The session token is valid until this process restarts and is never put
+    in a URL. Each open mints a new nonce. ``redeem`` returns the token once.
+    A second call, or a nonce older than ``ttl`` seconds, returns None.
+    """
+
+    def __init__(self, token: str, *, ttl: float = LOGIN_NONCE_SECONDS, clock=None) -> None:
+        self._token = token
+        self._ttl = float(ttl)
+        self._clock = time.monotonic if clock is None else clock
+        self._lock = threading.Lock()
+        self._pending: dict[str, float] = {}
+
+    def mint(self) -> str:
+        nonce = secrets.token_urlsafe(32)
+        with self._lock:
+            self._drop_expired()
+            self._pending[nonce] = self._clock() + self._ttl
+        return nonce
+
+    def redeem(self, nonce: str) -> str | None:
+        if not isinstance(nonce, str) or not _LOGIN_NONCE_RE.fullmatch(nonce):
+            return None
+        with self._lock:
+            self._drop_expired()
+            expiry = self._pending.pop(nonce, None)
+            if expiry is None or self._clock() >= expiry:
+                return None
+            return self._token
+
+    def _drop_expired(self) -> None:
+        now = self._clock()
+        dead = [key for key, expiry in self._pending.items() if expiry <= now]
+        for key in dead:
+            del self._pending[key]
+
+
 def make_server(
     db_path,
     host: str = "127.0.0.1",
@@ -1860,6 +2006,11 @@ def make_server(
             "keep_days": keep_days,
             "scan_listeners": [],
             "watcher": None,
+            "watch_note": "",
+            "watch_problem": None,
+            "watch_gateway_mac": None,
+            "watch_pending_seconds": None,
+            "login_exchange": LoginExchange(token),
             "subnet_guess": _SubnetGuess(),
             "timeout": float(request_timeout),
             "header_timeout": float(header_timeout),
@@ -1877,6 +2028,27 @@ def make_server(
         handler.allowed_hosts = allowlist_for(bound_port, parsed_hosts)
     handler.api_token = token
     return server
+
+
+def _browser_open_url(handler, url: str | None) -> str | None:
+    """The URL handed to the browser. Strict auth uses a fresh login nonce.
+
+    Any ``#token=`` fragment on ``url`` is discarded. The session token is
+    not placed on the browser command line or in history.
+    """
+    if not url:
+        return None
+    bare = str(url).split("#", 1)[0]
+    if not getattr(handler, "strict_auth", False):
+        return bare
+    exchange = getattr(handler, "login_exchange", None)
+    if not isinstance(exchange, LoginExchange):
+        token = getattr(handler, "api_token", None)
+        if not token:
+            return bare
+        exchange = LoginExchange(token)
+        handler.login_exchange = exchange
+    return DashboardOpen(bare, exchange).url()
 
 
 def _open_browser(url: str) -> bool:
@@ -1916,23 +2088,57 @@ def _print_alert(alert) -> None:
     print(f"{alert.title}. {alert.text}", flush=True)
 
 
+def _gateway_problem(handler, network) -> str | None:
+    """``subnet``, ``gateway``, or None. Reads routes and the ARP cache only."""
+    from .discovery import default_gateways, gateway_arp_table, local_ipv4_in
+    from .watch import identity_problem
+
+    mac = getattr(handler, "watch_gateway_mac", None)
+    if not mac:
+        return "subnet"
+    try:
+        problem = identity_problem(
+            network, mac, local_ipv4_in(network), default_gateways(), gateway_arp_table(),
+        )
+    except Exception:
+        problem = "subnet"
+    handler.watch_problem = problem
+    return problem
+
+
+def _note_skip(handler, subnet: str) -> None:
+    from .watch import skip_message
+
+    reason = getattr(handler, "watch_problem", None) or "subnet"
+    print(skip_message(subnet, reason), file=sys.stderr, flush=True)
+    if reason == "gateway":
+        handler.watch_note = f"Skipped: the gateway did not match for {subnet}."
+    else:
+        handler.watch_note = f"Skipped: this machine is not on {subnet}."
+
+
 def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None,
                   gateway_mac: str | None = None):
     """The schedule for `--watch`, pinned to the opted-in subnet and gateway MAC."""
-    from .discovery import arp_table, default_gateways, local_ipv4_in
-    from .watch import Watcher, identity_matches, parse_started_at, skip_message
+    from .watch import Watcher, parse_started_at
 
     subnet = str(validate_subnet(watch_subnet))
+    handler.watch_gateway_mac = gateway_mac
 
     def on_network(network) -> bool:
-        if not gateway_mac:
-            return False
-        return identity_matches(
-            network, gateway_mac, local_ipv4_in(network), default_gateways(), arp_table(),
-        )
+        return _gateway_problem(handler, network) is None
 
     def on_skip(skipped: str) -> None:
-        print(skip_message(skipped), file=sys.stderr, flush=True)
+        _note_skip(handler, skipped)
+
+    def start(target: str) -> bool:
+        # Check again on the scan thread, immediately before any probe, so a
+        # wake from sleep cannot scan the network that is current then.
+        return start_scan_job(
+            handler, target,
+            confirm=lambda: on_network(watcher.network),
+            on_refused=lambda: on_skip(watcher.subnet),
+        )
 
     conn = connect(handler.db_path)
     try:
@@ -1942,12 +2148,13 @@ def _make_watcher(handler, watch_seconds: int, watch_subnet: str | None,
     watcher = Watcher(
         watch_seconds,
         subnet,
-        lambda target: start_scan_job(handler, target),
+        start,
         on_network=on_network,
         on_skip=on_skip,
         last_scan_at=parse_started_at(newest[0]["started_at"]) if newest else None,
     )
     handler.watcher = watcher
+    handler.watch_note = f"Watching {subnet}."
     return watcher
 
 
@@ -1982,48 +2189,172 @@ def tray_status_line(handler, now: float | None = None) -> str:
         conn.close()
     started = parse_started_at(newest[0]["started_at"]) if newest else None
     parts = [f"Last scan {_ago(now - started)}" if started is not None else "No scans yet"]
+    note = str(getattr(handler, "watch_note", "") or "").strip()
     watcher = getattr(handler, "watcher", None)
-    if watcher is not None:
+    if note:
+        parts.append(note.rstrip("."))
+    elif watcher is not None:
+        parts.append(f"Watching {watcher.subnet}")
+    lowered = note.lower()
+    if watcher is not None and not lowered.startswith("skipped") and not lowered.startswith("not watching"):
         parts.append(f"next {_in(watcher.next_scan_at - now)}")
     return " · ".join(parts)
 
 
-class DashboardOpen:
-    """Which URL a tray open uses. The token fragment is sent at most once.
+def watch_status_text(handler) -> str:
+    """One sentence for the tray and the dashboard. Empty when watch was not asked for."""
+    note = str(getattr(handler, "watch_note", "") or "").strip()
+    if note:
+        return note if note.endswith(".") else note + "."
+    watcher = getattr(handler, "watcher", None)
+    if watcher is not None:
+        return f"Watching {watcher.subnet}."
+    return ""
 
-    Later opens use the bare dashboard URL. The page keeps the token in
-    sessionStorage after the first visit, so the address is not put on the
-    browser command line again.
+
+def tray_may_scan(handler) -> tuple[bool, str]:
+    """Whether Scan now may run. A watched network that does not match is refused.
+
+    The menu still labels the command manual. With no watched network, the
+    user is choosing the scan themselves and this returns True.
+    """
+    watcher = getattr(handler, "watcher", None)
+    if watcher is None:
+        return True, ""
+    problem = _gateway_problem(handler, watcher.network)
+    if problem is None:
+        return True, ""
+    if problem == "gateway":
+        return False, (
+            "Scan now was not started. The gateway did not match the network you chose to watch."
+        )
+    return False, (
+        "Scan now was not started. This machine is not on the network you chose to watch."
+    )
+
+
+def apply_watch_opt_in(handler, body: dict) -> tuple[bool, str]:
+    """Save the opted-in network beside ``handler.db_path``. No host is probed.
+
+    Returns ``(saved, message)``. A different saved network is not replaced
+    unless ``body["adopt"]`` is true. On success, a process that was started
+    with a watch interval but had nothing to schedule starts that schedule.
+    """
+    from .watch import (
+        NetworkIdentity,
+        current_gateway_mac,
+        load_opt_in_status,
+        save_opt_in,
+    )
+
+    adopt = body.get("adopt", False)
+    if not isinstance(adopt, bool):
+        return False, "adopt must be true or false."
+    subnet = body.get("subnet")
+    if subnet is not None and not isinstance(subnet, str):
+        return False, "subnet must be a string like 192.168.1.0/24."
+    subnet = (subnet or "").strip() or guess_subnet()
+    if not subnet:
+        return False, "Could not detect your subnet."
+    try:
+        subnet = str(validate_subnet(subnet))
+    except ValueError as exc:
+        return False, str(exc)
+    mac = current_gateway_mac(subnet)
+    if not mac:
+        return False, "Could not confirm the gateway for this network."
+    status, existing = load_opt_in_status(handler.db_path)
+    if status == "unusable":
+        return False, "The saved network file could not be read."
+    if existing is not None and (existing.subnet != subnet or existing.gateway_mac != mac) and not adopt:
+        return False, "A different network is already saved. Confirm to replace it."
+    try:
+        save_opt_in(handler.db_path, NetworkIdentity(subnet, mac))
+    except OSError:
+        return False, "Could not save the network chosen for watch."
+    handler.watch_gateway_mac = mac
+    old = getattr(handler, "watcher", None)
+    pending = getattr(handler, "watch_pending_seconds", None)
+    seconds = pending or (getattr(old, "interval", None) if old is not None else None)
+    changed = existing is not None and (existing.subnet != subnet or existing.gateway_mac != mac)
+    if old is not None and (changed or getattr(old, "subnet", None) != subnet):
+        old.stop()
+        handler.watcher = None
+    if getattr(handler, "watcher", None) is None and seconds:
+        _make_watcher(handler, int(seconds), subnet, mac).start()
+        handler.watch_pending_seconds = None
+    else:
+        handler.watch_note = f"Watching {subnet}."
+    if getattr(handler, "watcher", None) is None:
+        return True, f"Saved {subnet}. The next start with --watch-saved will scan this network."
+    return True, f"Watching {subnet}."
+
+
+def watch_menu_label(handler) -> str:
+    """Tray label. 'instead' is the explicit replace, the same choice as --watch-adopt."""
+    from .watch import current_gateway_mac, load_opt_in_status
+
+    subnet = ""
+    guess = getattr(handler, "subnet_guess", None)
+    if guess is not None:
+        try:
+            subnet = str(guess.get() or "")
+        except Exception:
+            subnet = ""
+    status, existing = load_opt_in_status(handler.db_path)
+    if status == "ok" and existing is not None and subnet:
+        mac = current_gateway_mac(subnet)
+        if existing.subnet != subnet or (mac and existing.gateway_mac != mac):
+            return "Watch this network instead"
+    return "Watch this network"
+
+
+class DashboardOpen:
+    """Each open gets a fresh single-use login nonce, never the session token.
+
+    The page POSTs the nonce once and stores the session token in that tab.
+    The token stays valid until restart. It is not put in the URL, on the
+    browser command line, or in history. Without an exchange (strict auth is
+    off and the page already contains the token) the bare address is used.
     """
 
-    def __init__(self, bare: str, first: str | None = None) -> None:
-        self.bare = bare.split("#", 1)[0]
-        pending = (first or "").split("#", 1)
-        self._pending = first if len(pending) == 2 and pending[1] else None
-        if self._pending == self.bare:
-            self._pending = None
+    def __init__(self, bare: str, exchange: LoginExchange | None = None) -> None:
+        self.bare = str(bare).split("#", 1)[0]
+        self.exchange = exchange
 
     def url(self) -> str:
-        if self._pending:
-            chosen, self._pending = self._pending, None
-            return chosen
-        return self.bare
+        if self.exchange is None:
+            return self.bare
+        nonce = self.exchange.mint()
+        return f"{self.bare}#login={quote(nonce, safe='-_.~')}"
 
 
-def _serve_in_tray(server, host: str, port: int, url: str | None,
-                   *, token_already_sent: bool = False) -> None:
+def _serve_in_tray(server, host: str, port: int, url: str | None) -> None:
     """Run the server on a background thread and a tray icon on this one.
 
     Returns when the user chooses Quit or the server stops by itself.
+    Every open mints a new login nonce when strict auth is on. The session
+    token is not placed in the URL.
     """
     from .tray import TrayIcon
 
     handler = server.RequestHandlerClass
     bare = f"http://{host if host != 'localhost' else '127.0.0.1'}:{port}/"
-    opener = DashboardOpen(bare, None if token_already_sent else url)
+    if url:
+        bare = str(url).split("#", 1)[0]
+    exchange = getattr(handler, "login_exchange", None)
+    if not isinstance(exchange, LoginExchange):
+        exchange = None
+    if not getattr(handler, "strict_auth", False):
+        exchange = None
+    opener = DashboardOpen(bare, exchange)
     requested = threading.Event()  # a Scan now from the tray waits for its result
 
     def scan_now() -> None:
+        allowed, refusal = tray_may_scan(handler)
+        if not allowed:
+            icon.notify("Lantern", refusal)
+            return
         watcher = getattr(handler, "watcher", None)
         subnet = watcher.subnet if watcher else handler.subnet_guess.get()
         if not subnet:
@@ -2040,13 +2371,28 @@ def _serve_in_tray(server, host: str, port: int, url: str | None,
         else:
             icon.notify("Lantern", "A scan is already running.")
 
+    def watch_this() -> None:
+        subnet = handler.subnet_guess.get()
+        adopt = watch_menu_label(handler).endswith("instead")
+        saved, message = apply_watch_opt_in(handler, {"subnet": subnet or "", "adopt": adopt})
+        icon.notify("Lantern", message if saved or message else "Could not save that network.")
+
+    note = watch_status_text(handler)
+    tooltip = f"Lantern · {note}" if note else (
+        f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost")
+        else f"Lantern dashboard ({host}:{port})"
+    )
     icon = TrayIcon(
-        f"Lantern dashboard (http://127.0.0.1:{port})" if host in ("127.0.0.1", "localhost") else f"Lantern dashboard ({host}:{port})",
+        tooltip,
         on_open=lambda: _open_browser(opener.url()),
         on_quit=lambda: threading.Thread(target=server.shutdown, name="lantern-shutdown", daemon=True).start(),
         on_scan=scan_now,
         status=lambda: tray_status_line(handler),
+        on_watch=watch_this,
+        watch_label=lambda: watch_menu_label(handler),
     )
+    if note and not note.lower().startswith("watching"):
+        icon.notify("Lantern", note)
 
     def deliver(alert) -> None:
         requested.clear()
@@ -2093,6 +2439,8 @@ def serve(
     watch_seconds: int | None = None,
     watch_subnet: str | None = None,
     watch_gateway_mac: str | None = None,
+    watch_note: str | None = None,
+    watch_pending_seconds: int | None = None,
     keep_days: float | None = None,
 ) -> None:
     server = make_server(
@@ -2113,10 +2461,13 @@ def serve(
     if not tray:
         # In the tray, alerts are notifications instead (see _serve_in_tray).
         handler.scan_listeners.append(alert_listener(handler.db_path, _print_alert))
+    handler.watch_pending_seconds = watch_pending_seconds
     watcher = (
         _make_watcher(handler, watch_seconds, watch_subnet, watch_gateway_mac)
         if watch_seconds and watch_gateway_mac else None
     )
+    if watcher is None and watch_note:
+        handler.watch_note = watch_note
     # Install the SIGTERM handler before announcing the address: anything
     # that stops Lantern right after it reads the startup line must get a
     # clean shutdown, not the default kill. shutdown() before serve_forever
@@ -2161,13 +2512,11 @@ def serve(
         print("Press Ctrl+C to stop.", flush=True)
         if open_url:
             # The socket is already listening, so the browser's first request
-            # waits in the backlog until serve_forever starts.
-            _open_browser(open_url)
+            # waits in the backlog until serve_forever starts. Strict auth
+            # opens a single-use nonce. The session token is not in the URL.
+            _open_browser(_browser_open_url(handler, open_url) or open_url)
         if tray:
-            _serve_in_tray(
-                server, str(bound_host), int(bound_port), tray_url,
-                token_already_sent=bool(open_url and "#token=" in str(open_url)),
-            )
+            _serve_in_tray(server, str(bound_host), int(bound_port), tray_url)
         else:
             server.serve_forever()
     except KeyboardInterrupt:

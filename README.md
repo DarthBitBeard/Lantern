@@ -221,16 +221,18 @@ Scans saved before 1.1.0 still draw. They have no stored router or names, so the
 ```bash
 python3 -m lantern web --watch 1h                 # detect this network and remember its gateway
 python3 -m lantern web --watch 2h --watch-subnet 192.168.1.0/24
+python3 -m lantern web --watch 1h --watch-adopt   # replace a different saved network
+python3 -m lantern web --watch 1h --watch-saved   # unattended: reuse the saved network, never detect
 python3 -m lantern web --watch 1h --keep-days 30  # default 90 with --watch; 0 keeps everything
 ```
 
-- **It only scans the network you opted into.** Starting `--watch` saves that subnet and the gateway's MAC address. A scheduled scan runs only while this machine still has that gateway. The same address range with a different gateway is not your network, and the scan is skipped. The installer's watch shortcut reuses that saved choice and never picks a network by itself.
+- **It only scans the network you opted into.** Starting `--watch` saves that subnet and the gateway's MAC address beside the database. A scheduled scan runs only while this machine is in that subnet and the gateway MAC still matches. A different subnet and a different gateway are reported separately, and the scan is skipped. A plain `--watch` does not replace a saved network that names a different one; pass `--watch-adopt` to do that. An unattended start, including the installer's shortcut, uses `--watch-saved` and never picks a network by itself. The tray and the dashboard show "Watching <subnet>" or why watch was skipped, and **Watch this network** writes the choice beside the database that is actually running.
 - **Old scans are removed.** With `--watch`, scans older than 90 days are deleted after each dashboard scan (`--keep-days` changes that). The newest scan of each scope is always kept. `--keep-days` also works without `--watch`.
 - **Alerts.** After each dashboard scan the new scan is compared with the previous one. A new device that is not trusted or labelled, a high or critical risk port that opened, or a service that reports a different product or version raises an alert. In the tray it is a Windows notification (click it to open the dashboard). In a terminal it is one line. Moved addresses and closed ports stay in the diff and are not alerts.
 - **New since your last visit.** The dashboard remembers which devices this browser has seen (MAC or IP only, in the browser's local storage) and marks the ones that are new to you.
 - `GET /api/status` reports the schedule under `watch` (interval, subnet, next scan) and `keep_days`.
 
-In the tray, right-click the icon for the last and next scan time, **Scan now**, **Open dashboard**, and **Quit Lantern**. Starting the tray a second time opens the running one's dashboard instead of failing, and only when that window is this install's tray program. The Windows installer has an unchecked option that adds `--watch 1h --watch-saved` to the tray shortcuts. Opening the dashboard from the tray puts the token in the address once; later opens do not.
+In the tray, right-click the icon for the last scan, whether it is watching, **Scan now (manual)**, **Watch this network**, **Open dashboard**, and **Quit Lantern**. **Scan now (manual)** does not run when a watched network is set and this machine is not on it. Starting the tray a second time opens the running one's dashboard instead of failing, and only when that window is this install's tray program. The Windows installer has an unchecked option that adds `--watch 1h --watch-saved` to the tray shortcuts, using the installer's database. Each open of the dashboard from the tray or from `--open` carries a single-use login nonce, not the session token. The token is valid until restart. On a terminal it is still printed once as a `#token=` link.
 
 ## Export and `/api/v1`
 

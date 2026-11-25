@@ -11,6 +11,7 @@ the same is not enough, so a laptop on another network does not scan it.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import os
@@ -25,6 +26,7 @@ from pathlib import Path
 OPT_IN_NAME = "watch-opt-in.json"
 _OPT_IN_MAX = 1024
 _EMPTY_MACS = frozenset({"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"})
+_OPT_IN_KEYS = frozenset({"subnet", "gateway_mac"})
 
 MIN_INTERVAL = 5 * 60
 MAX_INTERVAL = 7 * 24 * 60 * 60
@@ -89,6 +91,10 @@ def canonical_mac(text: str | None) -> str | None:
         return None
     if mac in _EMPTY_MACS:
         return None
+    # The I/G bit marks multicast, and the broadcast address is multicast.
+    # Neither is a gateway. A locally administered unicast address is kept.
+    if int(mac.split(":")[0], 16) & 0x01:
+        return None
     return mac
 
 
@@ -112,30 +118,49 @@ def gateway_mac_for(network: ipaddress.IPv4Network, gateways, arp: dict) -> str 
     return None
 
 
+def identity_problem(network: ipaddress.IPv4Network, expected_mac: str,
+                     local_ip: str | None, gateways, arp: dict) -> str | None:
+    """None when this machine is on that gateway. Otherwise ``subnet`` or ``gateway``.
+
+    ``subnet`` means this machine has no address in the saved network, or the
+    saved MAC is not usable. ``gateway`` means an address is in the subnet
+    but the gateway MAC does not match. The address range alone is not enough.
+    """
+    expected = canonical_mac(expected_mac)
+    if expected is None or not local_ip:
+        return "subnet"
+    try:
+        on_subnet = ipaddress.IPv4Address(local_ip) in network
+    except ValueError:
+        return "subnet"
+    if not on_subnet:
+        return "subnet"
+    if gateway_mac_for(network, gateways, arp) != expected:
+        return "gateway"
+    return None
+
+
 def identity_matches(network: ipaddress.IPv4Network, expected_mac: str,
                      local_ip: str | None, gateways, arp: dict) -> bool:
     """True only when this machine is in ``network`` and the gateway MAC matches.
 
     The address range alone is not the network. A different gateway, or no
-    gateway MAC, does not match.
+    gateway MAC, does not match. A local address outside the subnet does not
+    match either, even when a gateway inside the subnet has the saved MAC.
     """
-    expected = canonical_mac(expected_mac)
-    if expected is None or not local_ip:
-        return False
-    try:
-        if ipaddress.IPv4Address(local_ip) not in network:
-            return False
-    except ValueError:
-        return False
-    return gateway_mac_for(network, gateways, arp) == expected
+    return identity_problem(network, expected_mac, local_ip, gateways, arp) is None
 
 
 def current_gateway_mac(subnet: str) -> str | None:
-    """The live gateway MAC inside ``subnet``, or None. Does not scan hosts."""
-    from .discovery import arp_table, default_gateways
+    """The live gateway MAC inside ``subnet``, or None. Does not scan hosts.
+
+    Uses the route table and the ARP cache, and ignores a stale or incomplete
+    neighbor entry when the cache line says so. No probe is sent.
+    """
+    from .discovery import default_gateways, gateway_arp_table
 
     network = ipaddress.ip_network(subnet, strict=False)
-    return gateway_mac_for(network, default_gateways(), arp_table())
+    return gateway_mac_for(network, default_gateways(), gateway_arp_table())
 
 
 def opt_in_path(db_path: str | Path) -> Path:
@@ -143,8 +168,37 @@ def opt_in_path(db_path: str | Path) -> Path:
     return Path(db_path).parent / OPT_IN_NAME
 
 
-def skip_message(subnet: str) -> str:
-    """One fixed line when a scheduled scan does not run."""
+def legacy_opt_in_paths(db_path: str | Path) -> list[Path]:
+    """Other places a start may have written the same opt-in.
+
+    The installer database is ``<root>/lantern.db`` and ``--watch-saved`` reads
+    ``<root>/watch-opt-in.json``. The installer's command prompt starts in
+    ``<root>`` and, with no ``--db``, writes ``<root>/data/watch-opt-in.json``.
+    Each load of one of those two databases checks the other when its own file
+    is missing.
+    """
+    path = Path(db_path)
+    parent = path.parent
+    primary = opt_in_path(path)
+    found: list[Path] = []
+    if parent.name != "data":
+        found.append(parent / "data" / OPT_IN_NAME)
+    if parent.name == "data":
+        found.append(parent.parent / OPT_IN_NAME)
+    return [item for item in found if item != primary]
+
+
+def skip_message(subnet: str, reason: str = "subnet") -> str:
+    """One fixed line when a scheduled scan does not run.
+
+    ``gateway`` is a same-subnet mismatch. Anything else is a subnet mismatch
+    (this machine is not in the saved network, or the gateway could not be read).
+    """
+    if reason == "gateway":
+        return (
+            "lantern: scheduled scan skipped. The gateway did not match "
+            f"for {subnet}, the network you chose to watch."
+        )
     return (
         "lantern: scheduled scan skipped. This machine is not on "
         f"{subnet}, the network you chose to watch."
@@ -155,7 +209,25 @@ def no_opt_in_message() -> str:
     """One fixed line when a saved-only start has nothing to reuse."""
     return (
         "lantern: not watching. No network has been chosen yet. "
-        "Run lantern web --watch once on the network you want to watch."
+        "Choose Watch this network in the tray or the dashboard, "
+        "or run lantern web --watch with the same --db."
+    )
+
+
+def corrupt_opt_in_message() -> str:
+    """One fixed line when a saved file exists but cannot be used."""
+    return (
+        "lantern: not watching. The saved network file could not be read. "
+        "It is corrupt or not a private file, so nothing is scheduled."
+    )
+
+
+def different_network_message(subnet: str) -> str:
+    """One fixed line when ``--watch`` would replace a different saved network."""
+    return (
+        "lantern: not watching. A saved network names a different network "
+        f"({subnet}). Pass --watch-adopt to replace it. "
+        "An unattended start should use --watch-saved."
     )
 
 
@@ -176,20 +248,82 @@ class NetworkIdentity:
 
 
 def load_opt_in(db_path: str | Path) -> NetworkIdentity | None:
-    """The saved network, or None when there is no usable opt-in file.
+    """The saved network, or None when there is nothing usable.
 
-    A symlink, a non-file, a file over 1 KiB, or JSON that is not the two
-    expected fields is treated as no opt-in. Nothing is scanned.
+    A missing file, a symlink, a file over 1 KiB, a wrong owner, loose
+    permissions, or JSON that is not the two expected fields all return None.
+    Use `load_opt_in_status` when the caller must tell a missing file from a
+    corrupt one. Nothing is scanned.
     """
-    path = opt_in_path(db_path)
-    blob = _read_opt_in(path)
-    if blob is None:
+    status, identity = load_opt_in_status(db_path)
+    if status != "ok":
+        return None
+    return identity
+
+
+def load_opt_in_status(db_path: str | Path) -> tuple[str, NetworkIdentity | None]:
+    """``(ok|missing|unusable, identity)``.
+
+    ``missing`` is only a file that is not there. A symlink, a bad owner, a
+    loose mode, a corrupt body, duplicate keys, or a subnet or MAC this
+    program would not save is ``unusable``. A usable file in the other of the
+    installer path and the command-prompt ``data/`` path is copied beside this
+    database and then used.
+    """
+    primary = opt_in_path(db_path)
+    status, identity = _load_opt_in_file(primary)
+    if status != "missing":
+        return status, identity
+    for legacy in legacy_opt_in_paths(db_path):
+        legacy_status, legacy_identity = _load_opt_in_file(legacy)
+        if legacy_status == "missing":
+            continue
+        if legacy_status != "ok" or legacy_identity is None:
+            return "unusable", None
+        try:
+            save_opt_in(db_path, legacy_identity)
+        except OSError:
+            pass
+        return "ok", legacy_identity
+    return "missing", None
+
+
+def save_opt_in(db_path: str | Path, identity: NetworkIdentity) -> None:
+    """Write the opt-in beside the database at mode 0600. Replaces a previous one."""
+    from .store import write_private_file
+
+    write_private_file(opt_in_path(db_path), identity.to_json())
+
+
+def _current_uid() -> int | None:
+    """The user running Lantern, or None where the OS has no uid (Windows)."""
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return None
+    return int(geteuid())
+
+
+def _reject_duplicate_keys(pairs: list) -> dict:
+    seen: set = set()
+    data = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError("duplicate key")
+        seen.add(key)
+        data[key] = value
+    return data
+
+
+def _parse_opt_in(blob: bytes) -> NetworkIdentity | None:
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
         return None
     try:
-        data = json.loads(blob.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    except (json.JSONDecodeError, ValueError, UnicodeError):
         return None
-    if not isinstance(data, dict) or set(data) != {"subnet", "gateway_mac"}:
+    if not isinstance(data, dict) or set(data) != _OPT_IN_KEYS:
         return None
     if not isinstance(data["subnet"], str) or not isinstance(data["gateway_mac"], str):
         return None
@@ -202,31 +336,40 @@ def load_opt_in(db_path: str | Path) -> NetworkIdentity | None:
         return None
 
 
-def save_opt_in(db_path: str | Path, identity: NetworkIdentity) -> None:
-    """Write the opt-in beside the database at mode 0600. Replaces a previous one."""
-    from .store import write_private_file
-
-    write_private_file(opt_in_path(db_path), identity.to_json())
-
-
-def _read_opt_in(path: Path) -> bytes | None:
+def _load_opt_in_file(path: Path) -> tuple[str, NetworkIdentity | None]:
+    """Read one candidate. ``missing`` only when that path is not present."""
+    try:
+        if path.is_symlink():
+            return "unusable", None
+    except OSError:
+        return "unusable", None
     flags = os.O_RDONLY
     for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_BINARY"):
         flags |= getattr(os, name, 0)
     try:
         fd = os.open(path, flags)
-    except OSError:
-        return None
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return "missing", None
+        return "unusable", None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > _OPT_IN_MAX:
-            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _OPT_IN_MAX or info.st_size <= 0:
+            return "unusable", None
+        uid = _current_uid()
+        if uid is not None and info.st_uid != uid:
+            return "unusable", None
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            return "unusable", None
         blob = os.read(fd, _OPT_IN_MAX + 1)
     finally:
         os.close(fd)
     if len(blob) > _OPT_IN_MAX:
-        return None
-    return blob
+        return "unusable", None
+    identity = _parse_opt_in(blob)
+    if identity is None:
+        return "unusable", None
+    return "ok", identity
 
 
 class Watcher:

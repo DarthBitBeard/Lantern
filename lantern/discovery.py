@@ -344,14 +344,27 @@ def tcp_alive(ip: str, ports=DISCOVERY_PORTS, timeout: float = DISCOVERY_TIMEOUT
     return False
 
 
-def parse_neighbors(text: str) -> dict[str, str]:
+# Neighbor states that are not a confirmed gateway. /proc/net/arp has no
+# state word; `ip neigh` and Windows `arp -a` do. STALE can survive a move.
+_UNUSABLE_NEIGHBOR = re.compile(
+    r"\b(?:STALE|INCOMPLETE|FAILED|DELAY|PROBE|INVALID)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_neighbors(text: str, *, drop_unusable: bool = False) -> dict[str, str]:
     """Parse ARP-style output (one entry per line) into {ip: mac}.
 
     Works for /proc/net/arp, `arp -a` (Linux, macOS, Windows), and
     `ip neigh`. Incomplete entries (no MAC, or an all-zero MAC) are skipped.
+    With ``drop_unusable``, a line that says the entry is stale, incomplete,
+    failed, or invalid is skipped too. That flag is for the gateway check.
+    Device discovery keeps the default and still reads a stale cache entry.
     """
     table = {}
     for line in text.splitlines():
+        if drop_unusable and _UNUSABLE_NEIGHBOR.search(line):
+            continue
         ip_match = IPV4_RE.search(line)
         mac_match = MAC_RE.search(line)
         if not ip_match or not mac_match:
@@ -365,6 +378,41 @@ def parse_neighbors(text: str) -> dict[str, str]:
         if mac != _EMPTY_MAC:
             table[ip] = mac
     return table
+
+
+def rejected_neighbor_ips(text: str) -> set[str]:
+    """IPv4 addresses whose neighbor line is stale, incomplete, or invalid."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        if not _UNUSABLE_NEIGHBOR.search(line):
+            continue
+        ip_match = IPV4_RE.search(line)
+        if not ip_match:
+            continue
+        try:
+            ipaddress.IPv4Address(ip_match.group(1))
+        except ValueError:
+            continue
+        found.add(ip_match.group(1))
+    return found
+
+
+def merge_neighbor_tables(neigh_text: str, proc_text: str, arp_text: str) -> dict[str, str]:
+    """Gateway ARP view. An address marked unusable is not filled back in.
+
+    ``ip neigh`` names STALE and INCOMPLETE. ``/proc/net/arp`` does not, so a
+    stale gateway must not be copied from that file after ``ip neigh`` rejected it.
+    """
+    good: dict[str, str] = {}
+    rejected: set[str] = set()
+    for text in (neigh_text, proc_text, arp_text):
+        if not text:
+            continue
+        rejected.update(rejected_neighbor_ips(text))
+        for ip, mac in parse_neighbors(text, drop_unusable=True).items():
+            if ip not in good and ip not in rejected:
+                good[ip] = mac
+    return good
 
 
 def _run_text(cmd: list[str], timeout: float = 5) -> str:
@@ -396,6 +444,34 @@ def arp_table() -> dict[str, str]:
     if not table:
         table.update(parse_neighbors(_run_text(["ip", "neigh"])))
     return table
+
+
+def gateway_arp_table() -> dict[str, str]:
+    """ARP cache for the watch gateway check. Drops stale and incomplete entries.
+
+    Same local reads as `arp_table`: ``ip neigh`` when it exists, ``/proc/net/arp``,
+    and ``arp -a``. Nothing is sent on the network. Never raises.
+    """
+    neigh = ""
+    proc = ""
+    try:
+        if platform.system().lower() == "linux":
+            neigh = _run_text(["ip", "neigh"])
+    except Exception:
+        neigh = ""
+    proc_arp = Path("/proc/net/arp")
+    try:
+        if proc_arp.is_file():
+            proc = proc_arp.read_text(errors="ignore")
+    except Exception:
+        proc = ""
+    arp = ""
+    if not neigh and not proc:
+        arp = _run_text(["arp", "-a"])
+    try:
+        return merge_neighbor_tables(neigh, proc, arp)
+    except Exception:
+        return {}
 
 
 _ROUTE_TOKEN_RE = re.compile(r"\S+")

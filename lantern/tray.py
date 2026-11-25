@@ -10,6 +10,7 @@ needed. On other systems `is_supported()` is False and `TrayIcon.run` raises.
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import threading
 from collections.abc import Callable
@@ -24,7 +25,8 @@ WM_TRAY = WM_USER + 1
 WM_APP = 0x8000
 WM_SHOW_PENDING = WM_APP + 2  # posted by notify() from another thread
 WM_OPEN_DASHBOARD = WM_APP + 3  # posted by a verified second launch
-WM_TRAY_STOP = WM_APP + 4  # posted by TrayIcon.stop(); external WM_CLOSE is ignored
+WM_TRAY_STOP = WM_APP + 4  # posted by TrayIcon.stop() with this run's lParam
+_STOP_MASK = (1 << 64) - 1
 WINDOW_CLASS = "LanternTrayWindow"  # fixed, so a second launch can find the first
 INSTANCE_NONE = "none"
 INSTANCE_OURS = "ours"
@@ -55,6 +57,7 @@ TPM_RETURNCMD = 0x100
 ID_OPEN = 1
 ID_QUIT = 2
 ID_SCAN = 3
+ID_WATCH = 4
 IDI_APPLICATION = 32512
 TOOLTIP_MAX = 127  # szTip holds 128 UTF-16 units including the terminator
 
@@ -111,13 +114,39 @@ def signal_running_instance() -> bool:
     return classify_running_instance() == INSTANCE_OURS
 
 
-def _post_tray_message(hwnd, message: int) -> bool:
+def stop_lparam_bits(value: int) -> int:
+    """The low 64 bits of an lParam, as an unsigned value."""
+    return int(value) & _STOP_MASK
+
+
+def signed_stop_lparam(value: int) -> int:
+    """``value`` as the signed LPARAM PostMessageW carries on 64-bit Windows."""
+    bits = stop_lparam_bits(value)
+    if bits >= (1 << 63):
+        return bits - (1 << 64)
+    return bits
+
+
+def accepts_stop(message: int, lparam: int, token: int) -> bool:
+    """True only for this run's stop message.
+
+    ``WM_TRAY_STOP`` is the fixed number ``WM_APP+4``. Any same-desktop
+    process can post that number. It quits Lantern only when ``lParam`` is
+    the random 64-bit value chosen at startup and never written out. ``WM_CLOSE``
+    and a stop message with any other lParam do not match.
+    """
+    if int(message) != WM_TRAY_STOP:
+        return False
+    return stop_lparam_bits(lparam) == stop_lparam_bits(token)
+
+
+def _post_tray_message(hwnd, message: int, lparam: int = 0) -> bool:
     import ctypes
 
     user32 = ctypes.WinDLL("user32")
     user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
     user32.PostMessageW.restype = ctypes.c_int
-    return bool(user32.PostMessageW(hwnd, message, 0, 0))
+    return bool(user32.PostMessageW(hwnd, message, 0, signed_stop_lparam(lparam)))
 
 
 def _windows_tray_target():
@@ -183,12 +212,16 @@ class TrayIcon:
         icon_path: str | None = None,
         on_scan: Callable[[], None] | None = None,
         status: Callable[[], str] | None = None,
+        on_watch: Callable[[], None] | None = None,
+        watch_label: Callable[[], str] | None = None,
     ) -> None:
         self.tooltip = clip_tooltip(tooltip)
         self.on_open = on_open
         self.on_quit = on_quit
         self.on_scan = on_scan
         self.status = status
+        self.on_watch = on_watch
+        self.watch_label = watch_label
         self.icon_path = icon_path
         self._hwnd = None
         self._ready = threading.Event()
@@ -196,6 +229,9 @@ class TrayIcon:
         self._error: BaseException | None = None
         self._pending: tuple[str, str] | None = None
         self._pending_lock = threading.Lock()
+        # 64 bits, chosen in this process, never exported. stop() posts it as
+        # lParam. A foreign WM_TRAY_STOP does not carry it, so it is ignored.
+        self._stop_token = secrets.randbits(64)
 
     # -- public ----------------------------------------------------------
 
@@ -208,7 +244,7 @@ class TrayIcon:
         hwnd = self._hwnd
         if not _IS_WINDOWS or not hwnd:
             return
-        _post_tray_message(hwnd, WM_TRAY_STOP)
+        _post_tray_message(hwnd, WM_TRAY_STOP, self._stop_token)
 
     def notify(self, title: str, text: str) -> bool:
         """Show a notification from the icon. Safe from any thread.
@@ -239,7 +275,15 @@ class TrayIcon:
             items.append((MF_SEPARATOR, 0, None))
         items.append((MF_STRING, ID_OPEN, "Open dashboard"))
         if self.on_scan is not None:
-            items.append((MF_STRING, ID_SCAN, "Scan now"))
+            items.append((MF_STRING, ID_SCAN, "Scan now (manual)"))
+        if self.on_watch is not None:
+            label = "Watch this network"
+            if self.watch_label is not None:
+                try:
+                    label = str(self.watch_label() or label)
+                except Exception:
+                    label = "Watch this network"
+            items.append((MF_STRING, ID_WATCH, label[:80]))
         items.append((MF_SEPARATOR, 0, None))
         items.append((MF_STRING, ID_QUIT, "Quit Lantern"))
         return items
@@ -401,6 +445,8 @@ class TrayIcon:
                 self._safely(self.on_open)
             elif command == ID_SCAN and self.on_scan is not None:
                 self._safely(self.on_scan)
+            elif command == ID_WATCH and self.on_watch is not None:
+                self._safely(self.on_watch)
             elif command == ID_QUIT:
                 self._quit(user32, hwnd)
 
@@ -423,11 +469,14 @@ class TrayIcon:
                     add_icon()  # Explorer restarted: put the icon back
                     return 0
                 if message == WM_TRAY_STOP:
-                    self._quit(user32, hwnd)
+                    # The message number is public. Quit only when lParam is
+                    # this run's random value, which stop() posts and nothing
+                    # else is given.
+                    if accepts_stop(message, lparam, self._stop_token):
+                        self._quit(user32, hwnd)
                     return 0
                 if message == WM_CLOSE:
-                    # An outside process can post WM_CLOSE. Quit only from the
-                    # menu or from stop(), which posts WM_TRAY_STOP.
+                    # An outside process can post WM_CLOSE. It is ignored.
                     return 0
                 if message == WM_DESTROY:
                     shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
